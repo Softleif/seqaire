@@ -1,0 +1,381 @@
+//! Property-based tests for the FASTA reader.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+use proptest::prelude::*;
+use rust_htslib::faidx;
+use seqair::fasta::{FaiEntry, IndexedFastaReader};
+use std::{io::Write, path::Path};
+use tempfile::TempDir;
+
+fn test_fasta_path() -> &'static Path {
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.fasta.gz"))
+}
+
+// ---------------------------------------------------------------------------
+// FAI byte offset properties
+// ---------------------------------------------------------------------------
+
+// r[verify fasta.index.offset_calculation]
+proptest! {
+    /// Consecutive positions must produce strictly increasing byte offsets.
+    #[test]
+    fn byte_offset_monotonically_increasing(
+        offset in 0u64..10_000,
+        linebases in 1u64..200,
+        extra in 1u64..10,   // linewidth - linebases (newline bytes)
+        pos in 0u64..50_000,
+    ) {
+        let linewidth = linebases + extra;
+        let entry = FaiEntry {
+            name: "test".into(), length: 100_000, offset, linebases, linewidth,
+        };
+        let off_a = entry.byte_offset(pos);
+        let off_b = entry.byte_offset(pos + 1);
+        prop_assert!(off_b > off_a,
+            "offset({}) = {} must be < offset({}) = {} (linebases={}, linewidth={})",
+            pos, off_a, pos + 1, off_b, linebases, linewidth);
+    }
+
+    /// The offset of position 0 must equal the entry's raw offset.
+    #[test]
+    fn byte_offset_zero_is_entry_offset(
+        offset in 0u64..1_000_000,
+        linebases in 1u64..200,
+        extra in 1u64..10,
+    ) {
+        let linewidth = linebases + extra;
+        let entry = FaiEntry {
+            name: "test".into(), length: 100_000, offset, linebases, linewidth,
+        };
+        prop_assert_eq!(entry.byte_offset(0), offset);
+    }
+
+    /// Positions on the same line must be contiguous (offset increments by 1).
+    #[test]
+    fn byte_offset_contiguous_within_line(
+        offset in 0u64..10_000,
+        linebases in 2u64..200,
+        extra in 1u64..10,
+        line_num in 0u64..100,
+        pos_in_line in 0u64..198, // will be clamped below
+    ) {
+        let linewidth = linebases + extra;
+        let pos_in_line = pos_in_line % (linebases - 1); // ensure room for next pos
+        let pos = line_num * linebases + pos_in_line;
+
+        let entry = FaiEntry {
+            name: "test".into(), length: 100_000, offset, linebases, linewidth,
+        };
+        let off_a = entry.byte_offset(pos);
+        let off_b = entry.byte_offset(pos + 1);
+        // Same line → difference should be exactly 1
+        prop_assert_eq!(off_b - off_a, 1,
+            "within-line positions {} and {} should differ by 1, got {} and {}",
+            pos, pos + 1, off_a, off_b);
+    }
+
+    /// Crossing a line boundary must skip exactly (linewidth - linebases) bytes.
+    #[test]
+    fn byte_offset_line_boundary_skip(
+        offset in 0u64..10_000,
+        linebases in 1u64..200,
+        extra in 1u64..10,
+        line_num in 0u64..100,
+    ) {
+        let linewidth = linebases + extra;
+        let last_on_line = line_num * linebases + (linebases - 1);
+        let first_on_next = last_on_line + 1;
+
+        let entry = FaiEntry {
+            name: "test".into(), length: 100_000, offset, linebases, linewidth,
+        };
+        let off_last = entry.byte_offset(last_on_line);
+        let off_first = entry.byte_offset(first_on_next);
+
+        // Jump should be 1 (base) + extra (newline chars)
+        prop_assert_eq!(off_first - off_last, 1 + extra,
+            "crossing line boundary from pos {} to {} should skip {} bytes (1 + {}), got {}",
+            last_on_line, first_on_next, 1 + extra, extra, off_first - off_last);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GZI translate properties
+// ---------------------------------------------------------------------------
+
+fn make_gzi_data(entries: &[(u64, u64)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    data.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for &(compressed, uncompressed) in entries {
+        data.extend_from_slice(&compressed.to_le_bytes());
+        data.extend_from_slice(&uncompressed.to_le_bytes());
+    }
+    data
+}
+
+// r[verify fasta.gzi.translate]
+proptest! {
+    /// Translating offsets within a block (≤ u16::MAX from block start) must
+    /// produce the correct compressed_offset and within_block_offset.
+    #[test]
+    fn gzi_translate_same_block_valid(
+        block_start_compressed in 0u64..1_000_000,
+        block_start_uncompressed in 1u64..1_000_000,
+        offset_a in 0u16..=u16::MAX,
+        offset_b in 0u16..=u16::MAX,
+    ) {
+        let entries = vec![(block_start_compressed, block_start_uncompressed)];
+        let data = make_gzi_data(&entries);
+        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+
+        let target_a = block_start_uncompressed + offset_a as u64;
+        let target_b = block_start_uncompressed + offset_b as u64;
+
+        let loc_a = gzi.translate(target_a).unwrap();
+        let loc_b = gzi.translate(target_b).unwrap();
+
+        prop_assert_eq!(loc_a.compressed_offset, block_start_compressed);
+        prop_assert_eq!(loc_b.compressed_offset, block_start_compressed);
+        prop_assert_eq!(loc_a.within_block_offset, offset_a);
+        prop_assert_eq!(loc_b.within_block_offset, offset_b);
+    }
+
+    /// For offsets before the first GZI entry, translation must map to
+    /// compressed offset 0 with the uncompressed offset as within_block.
+    #[test]
+    fn gzi_translate_before_first_entry(
+        block_start in 1000u64..1_000_000,
+        target in 0u64..999,
+    ) {
+        let entries = vec![(block_start, 1000)];
+        let data = make_gzi_data(&entries);
+        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+
+        let loc = gzi.translate(target).unwrap();
+        prop_assert_eq!(loc.compressed_offset, 0);
+        prop_assert_eq!(loc.within_block_offset, target as u16);
+    }
+
+    /// Within-block offset exceeding u16::MAX must be rejected.
+    #[test]
+    fn gzi_translate_rejects_overflow(
+        overflow in 1u64..100_000,
+    ) {
+        let data = make_gzi_data(&[]);
+        let gzi = seqair::fasta::GziIndex::parse_test(&data);
+
+        let target = u16::MAX as u64 + overflow;
+        let result = gzi.translate(target);
+        prop_assert!(result.is_err(),
+            "translate({}) should fail but returned {:?}", target, result);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Plain FASTA roundtrip: generate, write, read back, verify
+// ---------------------------------------------------------------------------
+
+/// Strategy for generating a valid FASTA sequence with known content.
+fn fasta_sequence_strategy() -> impl Strategy<Value = (Vec<u8>, u64)> {
+    // linebases between 3 and 80, sequence length between 1 and 500
+    (3u64..80, 1usize..500)
+        .prop_flat_map(|(linebases, seq_len)| {
+            let bases = prop::collection::vec(
+                prop::sample::select(vec![b'A', b'C', b'G', b'T', b'N']),
+                seq_len,
+            );
+            (bases, Just(linebases))
+        })
+        .prop_map(|(bases, linebases)| (bases, linebases))
+}
+
+// r[verify fasta.plain.read]
+// r[verify fasta.fetch.newline_stripping]
+// r[verify fasta.fetch.uppercase]
+// r[verify fasta.fetch.coordinates]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Write a random FASTA, read it back at a random position, verify content.
+    #[test]
+    fn plain_fasta_roundtrip(
+        (bases, linebases) in fasta_sequence_strategy(),
+        // We'll pick a random sub-range to fetch
+        range_start_frac in 0.0f64..1.0,
+        range_len_frac in 0.01f64..1.0,
+    ) {
+        let seq_len = bases.len() as u64;
+        let start = (range_start_frac * seq_len as f64) as u64;
+        let remaining = seq_len - start;
+        let fetch_len = ((range_len_frac * remaining as f64) as u64).max(1).min(remaining);
+        let stop = start + fetch_len;
+
+        let dir = TempDir::new().unwrap();
+        let fasta_path = dir.path().join("test.fa");
+        let fai_path = dir.path().join("test.fa.fai");
+
+        // Write FASTA with the given line length
+        let linewidth = linebases + 1; // +1 for \n
+        let mut f = std::fs::File::create(&fasta_path).unwrap();
+        writeln!(f, ">seq1").unwrap();
+        for (i, &base) in bases.iter().enumerate() {
+            f.write_all(&[base]).unwrap();
+            if ((i + 1) as u64).is_multiple_of(linebases) && (i + 1) < bases.len() {
+                f.write_all(b"\n").unwrap();
+            }
+        }
+        f.write_all(b"\n").unwrap();
+
+        // Compute FAI offset: ">seq1\n" = 6 bytes
+        let offset = 6u64;
+        let mut fai = std::fs::File::create(&fai_path).unwrap();
+        writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
+
+        let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
+        let fetched = reader.fetch_seq("seq1", start, stop).unwrap();
+
+        let expected: Vec<u8> = bases[start as usize..stop as usize]
+            .iter()
+            .map(|b| b.to_ascii_uppercase())
+            .collect();
+
+        prop_assert_eq!(
+            fetched, expected,
+            "roundtrip failed: start={}, stop={}, linebases={}, seq_len={}",
+            start, stop, linebases, seq_len
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bgzip FASTA: random positions compared to htslib
+// ---------------------------------------------------------------------------
+
+const SEQUENCES: &[(&str, u64)] =
+    &[("chr19", 61_431_566), ("2kb_3_Unmodified", 2018), ("bacteriophage_lambda_CpG", 48502)];
+
+fn htslib_fetch(name: &str, start: u64, stop: u64) -> Vec<u8> {
+    let reader = faidx::Reader::from_path(test_fasta_path()).expect("htslib faidx open");
+    reader
+        .fetch_seq(name, start as usize, (stop - 1) as usize)
+        .expect("htslib fetch_seq")
+        .to_ascii_uppercase()
+}
+
+// r[verify fasta.bgzf.decompress]
+// r[verify fasta.bgzf.sequential_read]
+// r[verify fasta.fork.equivalence]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(100))]
+
+    /// Fetch random regions from the bgzip test FASTA and compare to htslib.
+    #[test]
+    fn bgzf_random_regions_match_htslib(
+        seq_idx in 0usize..3,
+        start_frac in 0.0f64..0.99,
+        len_frac in 0.001f64..0.01,
+    ) {
+        let (name, length) = SEQUENCES[seq_idx];
+        let start = (start_frac * length as f64) as u64;
+        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+        let stop = start + fetch_len;
+
+        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+        let seq = rio.fetch_seq(name, start, stop).expect("rio fetch");
+        let hts_seq = htslib_fetch(name, start, stop);
+
+        prop_assert!(
+            seq == hts_seq,
+            "mismatch for {}:{}-{} (len rio={}, hts={})",
+            name, start, stop, seq.len(), hts_seq.len()
+        );
+    }
+
+    /// Forked readers must produce identical results to the original at any position.
+    #[test]
+    fn fork_matches_original_at_random_positions(
+        start_frac in 0.0f64..0.99,
+        len_frac in 0.001f64..0.01,
+    ) {
+        let length = 61_431_566u64; // chr19
+        let start = (start_frac * length as f64) as u64;
+        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+        let stop = start + fetch_len;
+
+        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+        let mut forked = rio.fork().expect("fork");
+
+        let orig = rio.fetch_seq("chr19", start, stop).expect("orig fetch");
+        let fork_result = forked.fetch_seq("chr19", start, stop).expect("fork fetch");
+
+        prop_assert_eq!(orig, fork_result,
+            "fork mismatch at chr19:{}-{}", start, stop);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// fetch_base_seq: buffer reuse across calls
+// ---------------------------------------------------------------------------
+
+// r[verify fasta.fetch.buffer_reuse]
+#[test]
+fn fetch_base_seq_reuses_buffer() {
+    use seqair_types::Base;
+
+    let mut readers = seqair::Readers::open(
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam")),
+        test_fasta_path(),
+    )
+    .unwrap();
+
+    // First call: buffer starts empty, gets allocated
+    let seq1 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    assert_eq!(seq1.len(), 100);
+    // Every element must be a valid Base
+    for &b in seq1.iter() {
+        assert!(matches!(b, Base::A | Base::C | Base::G | Base::T | Base::Unknown));
+    }
+
+    // Second call: should reuse the internal buffer (no way to observe capacity
+    // directly, but we can verify correctness across calls)
+    let seq2 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 100, 300).unwrap();
+    assert_eq!(seq2.len(), 200);
+
+    // Third call: same region as first, must produce identical result
+    let seq3 = readers.fetch_base_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    assert_eq!(seq1, seq3, "repeated fetch must produce identical results");
+
+    // Verify against raw fetch + manual conversion
+    let mut raw_reader = IndexedFastaReader::open(test_fasta_path()).unwrap();
+    let raw = raw_reader.fetch_seq("bacteriophage_lambda_CpG", 0, 100).unwrap();
+    let expected: Vec<Base> = Base::from_ascii_vec(raw);
+    assert_eq!(&*seq1, &expected[..], "fetch_base_seq must match from_ascii_vec on raw fetch");
+}
+
+// ---------------------------------------------------------------------------
+// Fetch into buffer: must produce same result as allocating fetch
+// ---------------------------------------------------------------------------
+
+// r[verify fasta.fetch.buffer_reuse]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(50))]
+
+    #[test]
+    fn fetch_into_matches_fetch_at_random_positions(
+        start_frac in 0.0f64..0.99,
+        len_frac in 0.001f64..0.01,
+    ) {
+        let length = 48502u64; // bacteriophage_lambda_CpG
+        let start = (start_frac * length as f64) as u64;
+        let fetch_len = ((len_frac * length as f64) as u64).max(1).min(length - start);
+        let stop = start + fetch_len;
+
+        let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
+        let mut buf = Vec::new();
+
+        let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start, stop).expect("fetch_seq");
+        rio.fetch_seq_into("bacteriophage_lambda_CpG", start, stop, &mut buf)
+            .expect("fetch_seq_into");
+
+        prop_assert_eq!(alloc, buf, "fetch vs fetch_into mismatch at {}-{}", start, stop);
+    }
+}

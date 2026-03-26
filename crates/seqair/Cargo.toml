@@ -1,0 +1,38 @@
+[package]
+name = "seqair"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92.0"
+
+[dependencies]
+color-eyre = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+libdeflater = "1.25.2"
+seqair-types = { path = "../seqair-types" }
+rustc-hash = "2.1.1"
+flate2 = "1.1.9"
+bzip2 = "0.6.1"
+xz2 = "0.1.7"
+md5 = "0.8.0"
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+tempfile = "3.27.0"
+
+# to compare with:
+bgzf = "0.3.0"
+rust-htslib = { workspace = true, default-features = false, features = [
+    "libdeflate",
+    "bzip2",
+    "lzma",
+    "static",
+] }
+noodles-cram = "0.91.0"
+noodles-fasta = "0.60.0"
+noodles-sam = "0.83.0"
+
+[lints]
+workspace = true

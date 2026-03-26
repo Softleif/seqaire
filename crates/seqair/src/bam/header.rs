@@ -1,0 +1,368 @@
+//! Parse BAM headers and look up contigs. [`BamHeader`] maps between tid integers,
+//! sequence names, and lengths; shared across forked readers via `Arc`.
+
+use super::bgzf::{BgzfError, BgzfReader};
+use seqair_types::SmolStr;
+use std::{collections::HashMap, path::Path};
+use tracing::instrument;
+
+#[derive(Debug)]
+pub struct BamHeader {
+    header_text: String,
+    targets: Vec<TargetInfo>,
+    name_to_tid: HashMap<SmolStr, u32>,
+}
+
+#[derive(Debug, Clone)]
+struct TargetInfo {
+    name: SmolStr,
+    length: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContigInfo {
+    pub tid: u32,
+    pub len: u64,
+}
+
+// r[impl bam.header.errors]
+#[derive(Debug, thiserror::Error)]
+pub enum BamHeaderError {
+    #[error("invalid BAM magic bytes (expected BAM\\x01)")]
+    InvalidMagic,
+
+    #[error("@SQ header line missing SN (sequence name) tag: {line}")]
+    MissingSn { line: String },
+
+    #[error("@SQ header line missing LN (sequence length) tag: {line}")]
+    MissingLn { line: String },
+
+    #[error("header text is not valid UTF-8 (BAM spec requires UTF-8)")]
+    NonUtf8HeaderText { source: std::str::Utf8Error },
+
+    #[error("reference name is not valid UTF-8 (BAM spec requires printable ASCII)")]
+    NonUtf8ReferenceName { source: std::str::Utf8Error },
+
+    #[error("no @SQ lines found in SAM header text")]
+    NoSequences,
+
+    #[error(
+        "indexed region queries require coordinate-sorted input, but the header specifies \
+         SO:{sort_order}. Re-sort the file with `samtools sort -o sorted.bam input.bam` \
+         and re-index with `samtools index sorted.bam`."
+    )]
+    UnsupportedSortOrder { sort_order: SmolStr },
+
+    #[error("contig `{name}` not found in BAM header")]
+    ContigNotFound { name: SmolStr },
+
+    #[error("contig `{name}` (tid={tid}) has no length in BAM header")]
+    ContigNoLength { name: SmolStr, tid: u32 },
+
+    #[error("BGZF error reading BAM header")]
+    Bgzf {
+        #[from]
+        source: BgzfError,
+    },
+}
+
+impl BamHeader {
+    // r[impl bam.header.magic]
+    // r[impl bam.header.text]
+    // r[impl bam.header.references]
+    /// Parse the BAM header from a BGZF reader positioned at the start of the file.
+    #[instrument(level = "debug", skip(bgzf), err)]
+    pub(crate) fn parse(bgzf: &mut BgzfReader) -> Result<Self, BamHeaderError> {
+        // Magic: BAM\1
+        let mut magic = [0u8; 4];
+        bgzf.read_exact_into(&mut magic)?;
+        if magic != *b"BAM\x01" {
+            return Err(BamHeaderError::InvalidMagic);
+        }
+
+        // Header text
+        let l_text = bgzf.read_i32()? as usize;
+        let mut text_buf = vec![0u8; l_text];
+        bgzf.read_exact_into(&mut text_buf)?;
+        let header_text = std::str::from_utf8(&text_buf)
+            .map_err(|source| BamHeaderError::NonUtf8HeaderText { source })?
+            .to_owned();
+
+        // Reference sequences
+        let n_ref = bgzf.read_i32()? as usize;
+        let mut targets = Vec::with_capacity(n_ref);
+        let mut name_to_tid = HashMap::with_capacity(n_ref);
+
+        for tid in 0..n_ref {
+            let l_name = bgzf.read_i32()? as usize;
+            let mut name_buf = vec![0u8; l_name];
+            bgzf.read_exact_into(&mut name_buf)?;
+            // Remove trailing NUL
+            if name_buf.last() == Some(&0) {
+                name_buf.pop();
+            }
+            let name = SmolStr::new(
+                std::str::from_utf8(&name_buf)
+                    .map_err(|source| BamHeaderError::NonUtf8ReferenceName { source })?,
+            );
+
+            let l_ref = bgzf.read_i32()? as u64;
+
+            name_to_tid.insert(name.clone(), tid as u32);
+            targets.push(TargetInfo { name, length: l_ref });
+        }
+
+        Ok(BamHeader { header_text, targets, name_to_tid })
+    }
+
+    /// Open a BAM file and parse just the header.
+    #[instrument(level = "debug", fields(path = %path.display()), err)]
+    pub fn from_bam_path(path: &Path) -> Result<Self, BamHeaderError> {
+        let mut bgzf = BgzfReader::open(path)?;
+        Self::parse(&mut bgzf)
+    }
+
+    // r[impl unified.header_from_sam_text]
+    /// Parse a `BamHeader` from SAM header text (the `@HD`, `@SQ`, `@RG`, etc. lines).
+    ///
+    /// Extracts target names and lengths from `@SQ` lines (`SN` and `LN` tags).
+    /// Returns an error if no `@SQ` lines are found.
+    #[instrument(level = "debug", skip(text), fields(text_len = text.len()), err)]
+    pub fn from_sam_text(text: &str) -> Result<Self, BamHeaderError> {
+        let mut targets = Vec::new();
+        let mut name_to_tid = HashMap::new();
+
+        for line in text.lines() {
+            if !line.starts_with("@SQ") {
+                continue;
+            }
+            let mut name: Option<&str> = None;
+            let mut length: Option<u64> = None;
+
+            for field in line.split('\t').skip(1) {
+                if let Some(val) = field.strip_prefix("SN:") {
+                    name = Some(val);
+                } else if let Some(val) = field.strip_prefix("LN:") {
+                    length = val.parse().ok();
+                }
+            }
+
+            match (name, length) {
+                (Some(n), Some(l)) => {
+                    let tid = targets.len() as u32;
+                    name_to_tid.insert(SmolStr::new(n), tid);
+                    targets.push(TargetInfo { name: SmolStr::new(n), length: l });
+                }
+                (None, _) => return Err(BamHeaderError::MissingSn { line: line.to_string() }),
+                (Some(_), None) => {
+                    return Err(BamHeaderError::MissingLn { line: line.to_string() });
+                }
+            }
+        }
+
+        if targets.is_empty() {
+            return Err(BamHeaderError::NoSequences);
+        }
+
+        Ok(BamHeader { header_text: text.to_string(), targets, name_to_tid })
+    }
+
+    pub fn resolve_contig(&self, name: &str) -> Result<ContigInfo, BamHeaderError> {
+        let tid = self
+            .tid(name)
+            .ok_or_else(|| BamHeaderError::ContigNotFound { name: SmolStr::new(name) })?;
+        let len = self
+            .target_len(tid)
+            .ok_or_else(|| BamHeaderError::ContigNoLength { name: SmolStr::new(name), tid })?;
+        Ok(ContigInfo { tid, len })
+    }
+
+    pub fn target_count(&self) -> usize {
+        self.targets.len()
+    }
+
+    // r[impl bam.header.tid_lookup]
+    pub fn tid(&self, name: &str) -> Option<u32> {
+        self.name_to_tid.get(name).copied()
+    }
+
+    pub fn target_name(&self, tid: u32) -> Option<&str> {
+        self.targets.get(tid as usize).map(|t| t.name.as_str())
+    }
+
+    // r[impl bam.header.target_len]
+    pub fn target_len(&self, tid: u32) -> Option<u64> {
+        self.targets.get(tid as usize).map(|t| t.length)
+    }
+
+    // r[impl bam.header.target_names]
+    pub fn target_names(&self) -> impl Iterator<Item = &str> {
+        self.targets.iter().map(|t| t.name.as_str())
+    }
+
+    pub fn header_text(&self) -> &str {
+        &self.header_text
+    }
+
+    // r[impl unified.sort_order]
+    pub fn validate_sort_order(&self) -> Result<(), BamHeaderError> {
+        let hd_line = match self.header_text.lines().find(|l| l.starts_with("@HD")) {
+            Some(line) => line,
+            None => return Ok(()),
+        };
+
+        let sort_order = match hd_line.split('\t').find_map(|f| f.strip_prefix("SO:")) {
+            Some(so) => so,
+            None => return Ok(()),
+        };
+
+        match sort_order {
+            "unsorted" | "queryname" => {
+                Err(BamHeaderError::UnsupportedSortOrder { sort_order: SmolStr::new(sort_order) })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // r[verify unified.header_from_sam_text]
+    #[test]
+    fn from_sam_text_parses_sq_lines() {
+        let text = "@HD\tVN:1.6\tSO:coordinate\n\
+                     @SQ\tSN:chr1\tLN:248956422\n\
+                     @SQ\tSN:chr2\tLN:242193529\n\
+                     @RG\tID:sample1\tSM:sample1\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        assert_eq!(header.target_count(), 2);
+        assert_eq!(header.tid("chr1"), Some(0));
+        assert_eq!(header.tid("chr2"), Some(1));
+        assert_eq!(header.target_name(0), Some("chr1"));
+        assert_eq!(header.target_len(0), Some(248_956_422));
+        assert_eq!(header.target_len(1), Some(242_193_529));
+        assert!(header.header_text().contains("@HD"));
+    }
+
+    #[test]
+    fn from_sam_text_errors_on_no_sq() {
+        let text = "@HD\tVN:1.6\n@RG\tID:x\tSM:x\n";
+        let err = BamHeader::from_sam_text(text).unwrap_err();
+        assert!(matches!(err, BamHeaderError::NoSequences));
+    }
+
+    #[test]
+    fn from_sam_text_errors_on_malformed_sq() {
+        let text = "@SQ\tSN:chr1\n"; // missing LN
+        let err = BamHeader::from_sam_text(text).unwrap_err();
+        match err {
+            BamHeaderError::MissingLn { line } => {
+                assert!(line.contains("SN:chr1"), "line field should contain the SQ line: {line}")
+            }
+            other => panic!("expected MissingLn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_sam_text_errors_on_missing_sn() {
+        let text = "@SQ\tLN:1000\n"; // missing SN
+        let err = BamHeader::from_sam_text(text).unwrap_err();
+        match err {
+            BamHeaderError::MissingSn { line } => {
+                assert!(line.contains("LN:1000"), "line field should contain the SQ line: {line}")
+            }
+            other => panic!("expected MissingSn, got {other:?}"),
+        }
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_coordinate_accepted() {
+        let text = "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        header.validate_sort_order().unwrap();
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_absent_accepted() {
+        let text = "@HD\tVN:1.6\n@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        header.validate_sort_order().unwrap();
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_no_hd_accepted() {
+        let text = "@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        header.validate_sort_order().unwrap();
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_unsorted_rejected() {
+        let text = "@HD\tVN:1.6\tSO:unsorted\n@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        let err = header.validate_sort_order().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsorted"), "error should mention the sort order: {msg}");
+        assert!(msg.contains("samtools sort"), "error should suggest samtools sort: {msg}");
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_queryname_rejected() {
+        let text = "@HD\tVN:1.6\tSO:queryname\n@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        let err = header.validate_sort_order().unwrap_err();
+        assert!(matches!(err, BamHeaderError::UnsupportedSortOrder { .. }));
+        assert!(err.to_string().contains("queryname"));
+    }
+
+    // r[verify unified.sort_order]
+    #[test]
+    fn sort_order_unknown_accepted() {
+        let text = "@HD\tVN:1.6\tSO:unknown\n@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+        header.validate_sort_order().unwrap();
+    }
+
+    #[test]
+    fn resolve_contig_returns_tid_and_len() {
+        let text = "@SQ\tSN:chr1\tLN:248956422\n@SQ\tSN:chr2\tLN:242193529\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+
+        let info = header.resolve_contig("chr1").unwrap();
+        assert_eq!(info, ContigInfo { tid: 0, len: 248_956_422 });
+
+        let info = header.resolve_contig("chr2").unwrap();
+        assert_eq!(info, ContigInfo { tid: 1, len: 242_193_529 });
+    }
+
+    #[test]
+    fn resolve_contig_not_found() {
+        let text = "@SQ\tSN:chr1\tLN:1000\n";
+        let header = BamHeader::from_sam_text(text).unwrap();
+
+        let err = header.resolve_contig("chrX").unwrap_err();
+        assert!(matches!(err, BamHeaderError::ContigNotFound { .. }));
+        assert!(err.to_string().contains("chrX"));
+    }
+
+    #[test]
+    fn from_sam_text_matches_bam_header() {
+        let bam_path =
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"));
+        let bam_header = BamHeader::from_bam_path(bam_path).unwrap();
+        let sam_header = BamHeader::from_sam_text(bam_header.header_text()).unwrap();
+
+        assert_eq!(bam_header.target_count(), sam_header.target_count());
+        for tid in 0..bam_header.target_count() as u32 {
+            assert_eq!(bam_header.target_name(tid), sam_header.target_name(tid));
+            assert_eq!(bam_header.target_len(tid), sam_header.target_len(tid));
+        }
+    }
+}

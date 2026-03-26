@@ -1,0 +1,10 @@
+nextest-version = "0.9.97"
+
+[profile.default]
+fail-fast = false
+
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"

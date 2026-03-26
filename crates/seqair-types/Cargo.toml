@@ -1,0 +1,27 @@
+[package]
+name = "seqair-types"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.92.0"
+
+[dependencies]
+color-eyre = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+winnow = "1.0.0"
+smallvec = { version = "2.0.0-alpha.12", features = ["serde", "std"] }
+smol_str = { version = "0.3.6", features = ["serde"] }
+
+rust-htslib = { workspace = true, optional = true, default-features = false }
+
+[features]
+# Adds conversion traits to convert between seqair-types and rust-htslib types
+hts-compat = ["dep:rust-htslib"]
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

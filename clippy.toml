@@ -1,0 +1,9 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+suppress-restriction-lint-in-const = true
+
+[[disallowed-types]]
+path = "smallvec::SmallVec"
+reason = "Use seqair_types::SmallVec rexport instead."

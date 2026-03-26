@@ -1,0 +1,284 @@
+//! Tests for CIGAR operations, CigarIndex, and qpos computation.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+mod helpers;
+
+use helpers::{cigar_bytes, cigar_op};
+use proptest::prelude::*;
+use seqair::bam::cigar::{CigarIndex, calc_matches_indels};
+
+// ---- cigar.matches_indels ----
+
+// r[verify cigar.matches_indels]
+#[test]
+fn matches_indels_simple_match() {
+    let ops = cigar_bytes(&[cigar_op(100, 0)]);
+    let (matches, indels) = calc_matches_indels(&ops);
+    assert_eq!(matches, 100);
+    assert_eq!(indels, 0);
+}
+
+// r[verify cigar.matches_indels]
+#[test]
+fn matches_indels_with_insertions() {
+    let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 1), cigar_op(20, 0)]);
+    let (matches, indels) = calc_matches_indels(&ops);
+    assert_eq!(matches, 50);
+    assert_eq!(indels, 5);
+}
+
+// r[verify cigar.matches_indels]
+#[test]
+fn matches_indels_with_deletions() {
+    let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 2), cigar_op(20, 0)]);
+    let (matches, indels) = calc_matches_indels(&ops);
+    assert_eq!(matches, 50);
+    assert_eq!(indels, 5);
+}
+
+// r[verify cigar.matches_indels]
+#[test]
+fn matches_indels_soft_clip_ignored() {
+    let ops = cigar_bytes(&[cigar_op(5, 4), cigar_op(90, 0), cigar_op(5, 4)]);
+    let (matches, indels) = calc_matches_indels(&ops);
+    assert_eq!(matches, 90);
+    assert_eq!(indels, 0);
+}
+
+// ---- cigar.index + cigar.qpos_at ----
+
+// r[verify cigar.index]
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_simple_match() {
+    let ops = cigar_bytes(&[cigar_op(100, 0)]);
+    let idx = CigarIndex::new(200, &ops);
+    assert_eq!(idx.qpos_at(200), Some(0));
+    assert_eq!(idx.qpos_at(250), Some(50));
+    assert_eq!(idx.qpos_at(299), Some(99));
+    assert_eq!(idx.qpos_at(199), None);
+    assert_eq!(idx.qpos_at(300), None);
+}
+
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_with_soft_clip() {
+    let ops = cigar_bytes(&[cigar_op(5, 4), cigar_op(90, 0), cigar_op(5, 4)]);
+    let idx = CigarIndex::new(100, &ops);
+    assert_eq!(idx.qpos_at(100), Some(5));
+    assert_eq!(idx.qpos_at(189), Some(94));
+    assert_eq!(idx.qpos_at(99), None);
+    assert_eq!(idx.qpos_at(190), None);
+}
+
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_with_deletion() {
+    let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 2), cigar_op(20, 0)]);
+    let idx = CigarIndex::new(100, &ops);
+    assert_eq!(idx.qpos_at(129), Some(29));
+    assert_eq!(idx.qpos_at(130), None); // inside deletion
+    assert_eq!(idx.qpos_at(134), None);
+    assert_eq!(idx.qpos_at(135), Some(30)); // after deletion
+}
+
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_with_insertion() {
+    let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(5, 1), cigar_op(20, 0)]);
+    let idx = CigarIndex::new(100, &ops);
+    assert_eq!(idx.qpos_at(129), Some(29));
+    assert_eq!(idx.qpos_at(130), Some(35)); // insertion skips query 30-34
+}
+
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_with_ref_skip() {
+    let ops = cigar_bytes(&[cigar_op(30, 0), cigar_op(1000, 3), cigar_op(20, 0)]);
+    let idx = CigarIndex::new(100, &ops);
+    assert_eq!(idx.qpos_at(130), None); // inside N skip
+    assert_eq!(idx.qpos_at(1130), Some(30));
+}
+
+// r[verify cigar.qpos_at]
+#[test]
+fn cigar_index_seq_match_and_mismatch() {
+    let ops = cigar_bytes(&[cigar_op(50, 7), cigar_op(10, 8), cigar_op(40, 7)]);
+    let idx = CigarIndex::new(0, &ops);
+    assert_eq!(idx.qpos_at(50), Some(50)); // X op
+    assert_eq!(idx.qpos_at(60), Some(60)); // back to =
+    assert_eq!(idx.qpos_at(100), None);
+}
+
+// r[verify cigar.operations]
+#[test]
+fn cigar_index_hard_clip_ignored() {
+    let ops = cigar_bytes(&[cigar_op(5, 5), cigar_op(90, 0), cigar_op(5, 5)]);
+    let idx = CigarIndex::new(100, &ops);
+    assert_eq!(idx.qpos_at(100), Some(0));
+    assert_eq!(idx.qpos_at(190), None);
+}
+
+// r[verify io.named_constants]
+#[test]
+fn cigar_op_constants_match_sam_spec() {
+    use seqair::bam::cigar::*;
+    assert_eq!(CIGAR_M, 0);
+    assert_eq!(CIGAR_I, 1);
+    assert_eq!(CIGAR_D, 2);
+    assert_eq!(CIGAR_N, 3);
+    assert_eq!(CIGAR_S, 4);
+    assert_eq!(CIGAR_H, 5);
+    assert_eq!(CIGAR_P, 6);
+    assert_eq!(CIGAR_EQ, 7);
+    assert_eq!(CIGAR_X, 8);
+}
+
+// ---- CigarOpType enum ----
+
+// r[verify io.typed_cigar_ops]
+#[test]
+fn cigar_op_type_roundtrip_all_valid_codes() {
+    use seqair::bam::cigar::CigarOpType;
+
+    for code in 0..=8u8 {
+        let op = CigarOpType::from_bam(code);
+        assert!(op.is_some(), "valid code {code} should parse");
+    }
+    // Invalid codes
+    assert!(CigarOpType::from_bam(9).is_none());
+    assert!(CigarOpType::from_bam(255).is_none());
+}
+
+// r[verify io.typed_cigar_ops]
+#[test]
+fn cigar_op_type_consumes_ref_and_query() {
+    use seqair::bam::cigar::CigarOpType;
+
+    // M, =, X consume both
+    assert!(CigarOpType::Match.consumes_ref());
+    assert!(CigarOpType::Match.consumes_query());
+    assert!(CigarOpType::SeqMatch.consumes_ref());
+    assert!(CigarOpType::SeqMatch.consumes_query());
+    assert!(CigarOpType::SeqMismatch.consumes_ref());
+    assert!(CigarOpType::SeqMismatch.consumes_query());
+
+    // I, S consume query only
+    assert!(!CigarOpType::Insertion.consumes_ref());
+    assert!(CigarOpType::Insertion.consumes_query());
+    assert!(!CigarOpType::SoftClip.consumes_ref());
+    assert!(CigarOpType::SoftClip.consumes_query());
+
+    // D, N consume ref only
+    assert!(CigarOpType::Deletion.consumes_ref());
+    assert!(!CigarOpType::Deletion.consumes_query());
+    assert!(CigarOpType::RefSkip.consumes_ref());
+    assert!(!CigarOpType::RefSkip.consumes_query());
+
+    // H, P consume neither
+    assert!(!CigarOpType::HardClip.consumes_ref());
+    assert!(!CigarOpType::HardClip.consumes_query());
+    assert!(!CigarOpType::Padding.consumes_ref());
+    assert!(!CigarOpType::Padding.consumes_query());
+}
+
+// ---- property tests ----
+
+const MATCH_OPS: [u8; 3] = [0, 7, 8];
+const REF_ONLY_OPS: [u8; 2] = [2, 3];
+
+fn arb_cigar() -> impl Strategy<Value = Vec<(u32, u8)>> {
+    prop::option::of((1u32..=20, Just(4u8)))
+        .prop_flat_map(|leading_clip| {
+            let inner_ops = prop::collection::vec(
+                prop_oneof![
+                    (1u32..=200, prop::sample::select(&MATCH_OPS[..])),
+                    (1u32..=20, prop::sample::select(&REF_ONLY_OPS[..])),
+                    (1u32..=20, Just(1u8)), // I
+                ],
+                1..=8,
+            );
+            let trailing_clip = prop::option::of((1u32..=20, Just(4u8)));
+            (Just(leading_clip), inner_ops, trailing_clip)
+        })
+        .prop_map(|(lead, inner, trail)| {
+            let mut ops = Vec::new();
+            if let Some(clip) = lead {
+                ops.push(clip);
+            }
+            ops.extend(inner);
+            if let Some(clip) = trail {
+                ops.push(clip);
+            }
+            ops
+        })
+        .prop_filter("need at least one ref-consuming op", |ops| {
+            ops.iter().any(|(_, op)| matches!(op, 0 | 2 | 3 | 7 | 8))
+        })
+}
+
+// r[verify cigar.qpos_at]
+proptest! {
+    #[test]
+    fn qpos_monotonically_increasing(ops in arb_cigar(), start in 0i64..1_000_000) {
+        let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
+        let bytes = cigar_bytes(&packed);
+        let idx = CigarIndex::new(start, &bytes);
+
+        let ref_span: i64 = ops.iter().map(|&(len, op)| match op {
+            0 | 2 | 3 | 7 | 8 => i64::from(len),
+            _ => 0,
+        }).sum();
+
+        let mut last_qpos: Option<usize> = None;
+        for ref_pos in start..start + ref_span {
+            if let Some(qpos) = idx.qpos_at(ref_pos) {
+                if let Some(prev) = last_qpos {
+                    prop_assert!(qpos > prev, "not monotonic at ref {ref_pos}");
+                }
+                last_qpos = Some(qpos);
+            }
+        }
+    }
+}
+
+// r[verify cigar.qpos_accuracy]
+proptest! {
+    #[test]
+    fn pure_match_qpos_is_offset(len in 1u32..=500, start in 0i64..1_000_000) {
+        let bytes = cigar_bytes(&[cigar_op(len, 0)]);
+        let idx = CigarIndex::new(start, &bytes);
+        for offset in 0..i64::from(len) {
+            prop_assert_eq!(idx.qpos_at(start + offset), Some(offset as usize));
+        }
+        prop_assert_eq!(idx.qpos_at(start + i64::from(len)), None);
+    }
+}
+
+// r[verify cigar.qpos_at]
+proptest! {
+    #[test]
+    fn none_at_deletions_some_at_matches(ops in arb_cigar(), start in 0i64..1_000_000) {
+        let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
+        let bytes = cigar_bytes(&packed);
+        let idx = CigarIndex::new(start, &bytes);
+
+        let mut ref_pos = start;
+        for &(len, op) in &ops {
+            match op {
+                0 | 7 | 8 => {
+                    for i in 0..i64::from(len) {
+                        prop_assert!(idx.qpos_at(ref_pos + i).is_some());
+                    }
+                    ref_pos += i64::from(len);
+                }
+                2 | 3 => {
+                    for i in 0..i64::from(len) {
+                        prop_assert!(idx.qpos_at(ref_pos + i).is_none());
+                    }
+                    ref_pos += i64::from(len);
+                }
+                _ => {}
+            }
+        }
+    }
+}

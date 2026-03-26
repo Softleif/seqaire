@@ -1,0 +1,818 @@
+//! Decode CRAM slices into records. Reads data series blocks, applies the encodings from
+//! [`CompressionHeader`], and pushes decoded records into a [`RecordStore`].
+
+use super::{
+    block::{self, Block, ContentType},
+    compression_header::CompressionHeader,
+    encoding::{DecodeContext, ExternalCursor},
+    reader::CramError,
+    varint,
+};
+use crate::bam::{BamHeader, record_store::RecordStore};
+use rustc_hash::FxHashMap;
+use seqair_types::Base;
+use tracing::warn;
+
+/// Parsed CRAM slice header.
+#[derive(Debug)]
+pub struct SliceHeader {
+    pub ref_seq_id: i32,
+    pub alignment_start: i32,
+    pub alignment_span: i32,
+    pub num_records: i32,
+    pub record_counter: i64,
+    pub num_blocks: i32,
+    pub block_content_ids: Vec<i32>,
+    pub embedded_reference: i32,
+    pub reference_md5: [u8; 16],
+}
+
+impl SliceHeader {
+    // r[impl cram.slice.header]
+    pub fn parse(data: &[u8]) -> Result<Self, CramError> {
+        let mut cursor: &[u8] = data;
+
+        let ref_seq_id = read_itf8(&mut cursor)? as i32;
+        let alignment_start = read_itf8(&mut cursor)? as i32;
+        let alignment_span = read_itf8(&mut cursor)? as i32;
+        let num_records = read_itf8(&mut cursor)? as i32;
+        let record_counter = read_ltf8(&mut cursor)? as i64;
+        let num_blocks = read_itf8(&mut cursor)? as i32;
+
+        let num_content_ids = read_itf8(&mut cursor)?;
+        let mut block_content_ids = Vec::with_capacity(num_content_ids as usize);
+        for _ in 0..num_content_ids {
+            block_content_ids.push(read_itf8(&mut cursor)? as i32);
+        }
+
+        let embedded_reference = read_itf8(&mut cursor)? as i32;
+
+        let md5_bytes =
+            cursor.get(..16).ok_or(CramError::Truncated { context: "slice reference MD5" })?;
+        let mut reference_md5 = [0u8; 16];
+        reference_md5.copy_from_slice(md5_bytes);
+
+        Ok(SliceHeader {
+            ref_seq_id,
+            alignment_start,
+            alignment_span,
+            num_records,
+            record_counter,
+            num_blocks,
+            block_content_ids,
+            embedded_reference,
+            reference_md5,
+        })
+    }
+}
+
+/// Decode all records from a slice's blocks and push them into a RecordStore.
+///
+/// `container_data` starts at the first block after the container header.
+/// `slice_offset` is the byte offset from container data start to this slice's header block.
+#[allow(clippy::too_many_arguments)]
+pub fn decode_slice(
+    ch: &CompressionHeader,
+    container_data: &[u8],
+    slice_offset: usize,
+    reference_seq: &[u8],
+    ref_start_0based: i64,
+    header: &BamHeader,
+    tid: u32,
+    query_start: i64,
+    query_end: i64,
+    store: &mut RecordStore,
+    cigar_buf: &mut Vec<u8>,
+    bases_buf: &mut Vec<Base>,
+    qual_buf: &mut Vec<u8>,
+    aux_buf: &mut Vec<u8>,
+) -> Result<usize, CramError> {
+    let slice_data = container_data
+        .get(slice_offset..)
+        .ok_or(CramError::Truncated { context: "slice offset" })?;
+
+    // Parse slice header block
+    let (slice_header_block, mut pos) = block::parse_block(slice_data)?;
+    if slice_header_block.content_type != ContentType::SliceHeader {
+        return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
+    }
+    let sh = SliceHeader::parse(&slice_header_block.data)?;
+
+    let is_multi_ref = sh.ref_seq_id == -2;
+
+    // r[impl cram.edge.unknown_read_names]
+    if !ch.preservation.read_names_included {
+        warn!(
+            "CRAM file has RN=false (read names not stored). Mate-pair overlap dedup will be unreliable."
+        );
+    }
+
+    // r[impl cram.edge.empty_slice]
+    if sh.num_records == 0 {
+        return Ok(0);
+    }
+
+    // r[impl cram.edge.reference_mismatch]
+    if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
+        let slice_ref_start = (sh.alignment_start.max(1) as i64 - 1 - ref_start_0based) as usize;
+        let slice_ref_end = slice_ref_start + sh.alignment_span as usize;
+        if let Some(slice_ref) = reference_seq.get(slice_ref_start..slice_ref_end) {
+            let computed =
+                md5::compute(slice_ref.iter().map(|b| b.to_ascii_uppercase()).collect::<Vec<u8>>());
+            if *computed != sh.reference_md5 {
+                return Err(CramError::ReferenceMd5Mismatch {
+                    contig: header.target_name(tid).unwrap_or("?").into(),
+                    start: sh.alignment_start as u64,
+                    end: (sh.alignment_start + sh.alignment_span) as u64,
+                });
+            }
+        }
+    }
+
+    // Parse remaining blocks: core data + external data
+    let mut core_block: Option<Block> = None;
+    let mut external_blocks: FxHashMap<i32, ExternalCursor> = FxHashMap::default();
+
+    for _ in 0..sh.num_blocks {
+        let remaining =
+            slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
+        let (blk, consumed) = block::parse_block(remaining)?;
+        pos += consumed;
+
+        match blk.content_type {
+            ContentType::CoreData => {
+                core_block = Some(blk);
+            }
+            ContentType::ExternalData => {
+                external_blocks.insert(blk.content_id, ExternalCursor::new(blk.data));
+            }
+            _ => {
+                // Ignore unexpected block types
+            }
+        }
+    }
+
+    // r[impl cram.slice.embedded_ref]
+    let embedded_ref_data = if sh.embedded_reference >= 0 {
+        external_blocks
+            .remove(&sh.embedded_reference)
+            .map(|cursor| cursor.into_data())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let effective_ref: &[u8] =
+        if sh.embedded_reference >= 0 { &embedded_ref_data } else { reference_seq };
+
+    let core_data = core_block.ok_or(CramError::MissingCoreDataBlock)?;
+
+    let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
+
+    // Decode records
+    let mut alignment_pos = sh.alignment_start as i64;
+    let mut records_pushed = 0usize;
+
+    for _ in 0..sh.num_records {
+        // For embedded reference, ref_start is the slice's alignment_start
+        let effective_ref_start = if sh.embedded_reference >= 0 {
+            sh.alignment_start.max(1) as i64 - 1
+        } else {
+            ref_start_0based
+        };
+
+        let count = decode_record(
+            ch,
+            &sh,
+            is_multi_ref,
+            &mut ctx,
+            &mut alignment_pos,
+            effective_ref,
+            effective_ref_start,
+            header,
+            tid,
+            query_start,
+            query_end,
+            store,
+            cigar_buf,
+            bases_buf,
+            qual_buf,
+            aux_buf,
+        )?;
+        records_pushed += count;
+    }
+
+    Ok(records_pushed)
+}
+
+/// Decode a single CRAM record from the decode context.
+///
+/// Returns 1 if the record was pushed to the store, 0 if filtered out.
+// r[impl cram.record.decode_order]
+#[allow(clippy::too_many_arguments)]
+fn decode_record(
+    ch: &CompressionHeader,
+    sh: &SliceHeader,
+    is_multi_ref: bool,
+    ctx: &mut DecodeContext<'_>,
+    prev_alignment_pos: &mut i64,
+    reference_seq: &[u8],
+    ref_start_0based: i64,
+    header: &BamHeader,
+    tid: u32,
+    query_start: i64,
+    query_end: i64,
+    store: &mut RecordStore,
+    cigar_buf: &mut Vec<u8>,
+    bases_buf: &mut Vec<Base>,
+    qual_buf: &mut Vec<u8>,
+    aux_buf: &mut Vec<u8>,
+) -> Result<usize, CramError> {
+    let ds = &ch.data_series;
+
+    // r[impl cram.record.flags]
+    // 1. BF (BAM flags)
+    let bam_flags = ds.bam_flags.decode(ctx)? as u16;
+
+    // 2. CF (CRAM flags)
+    let cram_flags = ds.cram_flags.decode(ctx)? as u32;
+    let quality_as_array = cram_flags & 0x1 != 0;
+    let detached = cram_flags & 0x2 != 0;
+    let mate_downstream = cram_flags & 0x4 != 0;
+    let seq_unknown = cram_flags & 0x8 != 0;
+
+    // r[impl cram.slice.multi_ref]
+    // 3. RI (ref ID — only for multi-ref slices)
+    let record_ref_id = if is_multi_ref { ds.ref_id.decode(ctx)? } else { sh.ref_seq_id };
+
+    // r[impl cram.record.read_length]
+    // 4. RL (read length)
+    let read_length = ds.read_length.decode(ctx)? as usize;
+
+    // r[impl cram.record.position]
+    // 5. AP (alignment position)
+    let ap = ds.alignment_pos.decode(ctx)? as i64;
+    let alignment_pos = if ch.preservation.ap_delta {
+        *prev_alignment_pos += ap;
+        *prev_alignment_pos
+    } else {
+        *prev_alignment_pos = ap;
+        ap
+    };
+    // r[impl cram.edge.position_overflow]
+    // Convert from 1-based to 0-based
+    let pos_0based = alignment_pos - 1;
+
+    // r[impl cram.record.read_group]
+    // 6. RG (read group)
+    let read_group = ds.read_group.decode(ctx)?;
+
+    // r[impl cram.record.read_name]
+    // 7. RN (read name)
+    let read_name =
+        if ch.preservation.read_names_included { ds.read_name.decode(ctx)? } else { Vec::new() };
+
+    // r[impl cram.record.mate_detached]
+    // r[impl cram.record.mate_attached]
+    // 8. Mate data
+    if detached {
+        let _mate_flags = ds.mate_flags.decode(ctx)?;
+        if !ch.preservation.read_names_included {
+            let _ = ds.read_name.decode(ctx)?;
+        }
+        let _next_ref = ds.next_segment_ref.decode(ctx)?;
+        let _next_pos = ds.next_mate_pos.decode(ctx)?;
+        let _template_size = ds.template_size.decode(ctx)?;
+    } else if mate_downstream {
+        let _next_fragment = ds.next_fragment.decode(ctx)?;
+    }
+
+    // 9. TL (tag line index)
+    let tag_line_idx = ds.tag_line.decode(ctx)? as usize;
+
+    // r[impl cram.record.aux_tags]
+    // 10. Decode tag values
+    aux_buf.clear();
+    if let Some(tag_set) = ch.preservation.tag_dictionary.get(tag_line_idx) {
+        for entry in tag_set {
+            let tag_key = ((entry.tag[0] as i32) << 16)
+                | ((entry.tag[1] as i32) << 8)
+                | (entry.bam_type as i32);
+            if let Some(enc) = ch.tag_encodings.get(&tag_key) {
+                let tag_value = enc.decode(ctx)?;
+                // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes
+                aux_buf.push(entry.tag[0]);
+                aux_buf.push(entry.tag[1]);
+                aux_buf.push(entry.bam_type);
+                aux_buf.extend_from_slice(&tag_value);
+            }
+        }
+    }
+
+    // r[impl cram.record.rg_tag]
+    // Add RG tag if read group >= 0
+    if read_group >= 0 {
+        // Look up @RG ID from header text
+        if let Some(rg_id) = get_read_group_id(header, read_group as usize) {
+            aux_buf.push(b'R');
+            aux_buf.push(b'G');
+            aux_buf.push(b'Z');
+            aux_buf.extend_from_slice(rg_id.as_bytes());
+            aux_buf.push(0); // null terminator for Z-type
+        }
+    }
+
+    let is_unmapped = bam_flags & 0x4 != 0;
+
+    // 11. Mapped read: features + MQ + quality
+    cigar_buf.clear();
+    bases_buf.clear();
+    qual_buf.clear();
+    // r[impl cram.edge.long_reads]
+    bases_buf.reserve(read_length);
+    qual_buf.reserve(read_length);
+
+    if !is_unmapped {
+        let feature_count = ds.feature_count.decode(ctx)?;
+
+        // Decode features and reconstruct sequence + CIGAR
+        let result = decode_features_and_reconstruct(
+            ch,
+            ctx,
+            feature_count as usize,
+            read_length,
+            pos_0based,
+            ref_start_0based,
+            reference_seq,
+            cigar_buf,
+            bases_buf,
+        )?;
+
+        // MQ
+        let mapq = ds.mapping_quality.decode(ctx)? as u8;
+
+        // r[impl cram.record.quality]
+        // Quality scores
+        if quality_as_array {
+            for _ in 0..read_length {
+                qual_buf.push(ds.quality_score.decode(ctx)?);
+            }
+        } else {
+            qual_buf.resize(read_length, 0xFF);
+        }
+
+        let end_pos = pos_0based + result.ref_consumed as i64;
+
+        // r[impl cram.index.multi_ref_slices]
+        // Skip records from different references in multi-ref slices
+        if record_ref_id != tid as i32 {
+            return Ok(0);
+        }
+
+        // Check overlap with query region
+        if pos_0based >= query_end || end_pos <= query_start {
+            return Ok(0);
+        }
+
+        let qname: &[u8] = &read_name;
+
+        store.push_fields(
+            pos_0based,
+            end_pos,
+            bam_flags,
+            mapq,
+            result.matching_bases,
+            result.indel_bases,
+            qname,
+            cigar_buf,
+            bases_buf,
+            qual_buf,
+            aux_buf,
+        );
+
+        return Ok(1);
+    }
+
+    // Unmapped read
+    // r[impl cram.edge.seq_unknown]
+    if !seq_unknown {
+        for _ in 0..read_length {
+            let base_byte = ds.base.decode(ctx)?;
+            bases_buf.push(Base::from(base_byte));
+        }
+    }
+
+    // Quality
+    if quality_as_array {
+        for _ in 0..read_length {
+            qual_buf.push(ds.quality_score.decode(ctx)?);
+        }
+    } else {
+        qual_buf.resize(read_length, 0xFF);
+    }
+
+    // r[impl cram.edge.unmapped_reads]
+    // Unmapped reads — skip for fetch_into (same as BAM/SAM)
+    Ok(0)
+}
+
+struct ReconstructResult {
+    ref_consumed: u32,
+    matching_bases: u32,
+    indel_bases: u32,
+}
+
+// r[impl cram.record.features]
+// r[impl cram.record.sequence]
+// r[impl cram.record.cigar_reconstruction]
+/// Decode features and reconstruct sequence + CIGAR.
+#[allow(clippy::too_many_arguments)]
+fn decode_features_and_reconstruct(
+    ch: &CompressionHeader,
+    ctx: &mut DecodeContext<'_>,
+    feature_count: usize,
+    read_length: usize,
+    pos_0based: i64,
+    slice_start_0based: i64,
+    reference_seq: &[u8],
+    cigar_buf: &mut Vec<u8>,
+    bases_buf: &mut Vec<Base>,
+) -> Result<ReconstructResult, CramError> {
+    let ds = &ch.data_series;
+
+    // Collect features first
+    struct Feature {
+        read_pos: u32, // 1-based position within read
+        data: FeatureData,
+    }
+
+    enum FeatureData {
+        Substitution(u8),    // BS code
+        Insertion(Vec<u8>),  // IN bases
+        SingleInsertion(u8), // BA single base
+        Deletion(u32),       // DL length
+        SoftClip(Vec<u8>),   // SC bases
+        HardClip(u32),       // HC length
+        RefSkip(u32),        // RS length
+        Padding(u32),        // PD length
+        BaseQuality(u8, u8), // BA + QS
+        Bases(Vec<u8>),      // BB
+        // r[unimpl cram.feature.quality_block]
+        Qualities, // QQ — data decoded but not yet applied to qual_buf
+        // r[unimpl cram.feature.quality_score]
+        Quality, // QS single — data decoded but not yet applied to qual_buf
+    }
+
+    let mut features = Vec::with_capacity(feature_count);
+    let mut prev_read_pos = 0u32;
+
+    for _ in 0..feature_count {
+        let fc = ds.feature_code.decode(ctx)?;
+        let fp = ds.feature_pos.decode(ctx)? as u32;
+        prev_read_pos += fp;
+        let read_pos = prev_read_pos;
+
+        let data = match fc {
+            b'X' => {
+                let bs = ds.base_sub.decode(ctx)?;
+                FeatureData::Substitution(bs)
+            }
+            b'I' => {
+                let bases = ds.insertion.decode(ctx)?;
+                FeatureData::Insertion(bases)
+            }
+            b'i' => {
+                let base = ds.base.decode(ctx)?;
+                FeatureData::SingleInsertion(base)
+            }
+            b'D' => {
+                let len = ds.deletion_length.decode(ctx)? as u32;
+                FeatureData::Deletion(len)
+            }
+            b'S' => {
+                let bases = ds.soft_clip.decode(ctx)?;
+                FeatureData::SoftClip(bases)
+            }
+            b'H' => {
+                let len = ds.hard_clip.decode(ctx)? as u32;
+                FeatureData::HardClip(len)
+            }
+            b'N' => {
+                let len = ds.ref_skip.decode(ctx)? as u32;
+                FeatureData::RefSkip(len)
+            }
+            b'P' => {
+                let len = ds.padding.decode(ctx)? as u32;
+                FeatureData::Padding(len)
+            }
+            b'B' => {
+                let base = ds.base.decode(ctx)?;
+                let qual = ds.quality_score.decode(ctx)?;
+                FeatureData::BaseQuality(base, qual)
+            }
+            b'b' => {
+                let bases = ds.bases_block.decode(ctx)?;
+                FeatureData::Bases(bases)
+            }
+            b'q' => {
+                let _quals = ds.quality_block.decode(ctx)?;
+                FeatureData::Qualities
+            }
+            b'Q' => {
+                let _qual = ds.quality_score.decode(ctx)?;
+                FeatureData::Quality
+            }
+            _ => {
+                return Err(CramError::UnknownFeatureCode { feature_code: fc });
+            }
+        };
+
+        features.push(Feature { read_pos, data });
+    }
+
+    // Reconstruct sequence and CIGAR from reference + features
+    let ref_offset = (pos_0based - slice_start_0based) as usize;
+    let mut read_pos = 0usize; // 0-based position in the read
+    let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
+    let mut matching_bases = 0u32;
+    let mut indel_bases = 0u32;
+
+    // CIGAR ops: accumulate as (length, op_code) then pack at the end
+    let mut cigar_ops: Vec<(u32, u8)> = Vec::new();
+
+    fn push_cigar_op(ops: &mut Vec<(u32, u8)>, len: u32, op: u8) {
+        if len == 0 {
+            return;
+        }
+        if let Some(last) = ops.last_mut()
+            && last.1 == op
+        {
+            last.0 += len;
+            return;
+        }
+        ops.push((len, op));
+    }
+
+    let mut feature_idx = 0;
+
+    while read_pos < read_length {
+        // Check for feature at current read position (1-based in features)
+        if feature_idx < features.len()
+            && features.get(feature_idx).map(|f| f.read_pos as usize) == Some(read_pos + 1)
+        {
+            let feature = features
+                .get(feature_idx)
+                .ok_or(CramError::Truncated { context: "feature index" })?;
+            feature_idx += 1;
+
+            match &feature.data {
+                FeatureData::Substitution(code) => {
+                    let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+                    let read_base = ch.preservation.substitution_matrix.substitute(ref_base, *code);
+                    bases_buf.push(Base::from(read_base));
+                    push_cigar_op(&mut cigar_ops, 1, 0); // M
+                    matching_bases += 1; // substitutions count as alignment match
+                    read_pos += 1;
+                    ref_pos += 1;
+                }
+                FeatureData::Insertion(bases) => {
+                    let len = bases.len();
+                    for &b in bases {
+                        bases_buf.push(Base::from(b));
+                    }
+                    push_cigar_op(&mut cigar_ops, len as u32, 1); // I
+                    indel_bases += len as u32;
+                    read_pos += len;
+                }
+                FeatureData::SingleInsertion(base) => {
+                    bases_buf.push(Base::from(*base));
+                    push_cigar_op(&mut cigar_ops, 1, 1); // I
+                    indel_bases += 1;
+                    read_pos += 1;
+                }
+                FeatureData::Deletion(len) => {
+                    push_cigar_op(&mut cigar_ops, *len, 2); // D
+                    indel_bases += len;
+                    ref_pos += *len as usize;
+                }
+                FeatureData::SoftClip(bases) => {
+                    let len = bases.len();
+                    for &b in bases {
+                        bases_buf.push(Base::from(b));
+                    }
+                    push_cigar_op(&mut cigar_ops, len as u32, 4); // S
+                    read_pos += len;
+                }
+                FeatureData::HardClip(len) => {
+                    push_cigar_op(&mut cigar_ops, *len, 5); // H
+                }
+                FeatureData::RefSkip(len) => {
+                    push_cigar_op(&mut cigar_ops, *len, 3); // N
+                    ref_pos += *len as usize;
+                }
+                FeatureData::Padding(len) => {
+                    push_cigar_op(&mut cigar_ops, *len, 6); // P
+                }
+                FeatureData::BaseQuality(base, _qual) => {
+                    bases_buf.push(Base::from(*base));
+                    push_cigar_op(&mut cigar_ops, 1, 0); // M
+                    matching_bases += 1;
+                    read_pos += 1;
+                    ref_pos += 1;
+                }
+                FeatureData::Bases(bases) => {
+                    let len = bases.len();
+                    for &b in bases {
+                        bases_buf.push(Base::from(b));
+                    }
+                    push_cigar_op(&mut cigar_ops, len as u32, 0); // M
+                    matching_bases += len as u32;
+                    read_pos += len;
+                    ref_pos += len;
+                }
+                FeatureData::Qualities | FeatureData::Quality => {
+                    // Quality features don't affect sequence or CIGAR
+                    // Copy ref base as matching
+                    let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+                    bases_buf.push(Base::from(ref_base));
+                    push_cigar_op(&mut cigar_ops, 1, 0); // M
+                    matching_bases += 1;
+                    read_pos += 1;
+                    ref_pos += 1;
+                }
+            }
+        } else {
+            // No feature at this position — copy from reference (match)
+            let ref_base = reference_seq.get(ref_offset + ref_pos).copied().unwrap_or(b'N');
+            bases_buf.push(Base::from(ref_base));
+            push_cigar_op(&mut cigar_ops, 1, 0); // M
+            matching_bases += 1;
+            read_pos += 1;
+            ref_pos += 1;
+        }
+    }
+
+    // Pack CIGAR ops into BAM format
+    cigar_buf.clear();
+    for (len, op) in &cigar_ops {
+        let packed = (len << 4) | (*op as u32);
+        cigar_buf.extend_from_slice(&packed.to_le_bytes());
+    }
+
+    Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
+}
+
+fn get_read_group_id(header: &BamHeader, rg_index: usize) -> Option<String> {
+    // Parse @RG lines from header text to get the ID at the given index
+    let text = header.header_text();
+    let mut idx = 0;
+    for line in text.lines() {
+        if line.starts_with("@RG") {
+            if idx == rg_index {
+                // Extract ID field
+                for field in line.split('\t') {
+                    if let Some(id) = field.strip_prefix("ID:") {
+                        return Some(id.to_string());
+                    }
+                }
+            }
+            idx += 1;
+        }
+    }
+    None
+}
+
+fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
+    varint::read_itf8_from(cursor).ok_or(CramError::Truncated { context: "slice header itf8" })
+}
+
+fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
+    varint::read_ltf8_from(cursor).ok_or(CramError::Truncated { context: "slice header ltf8" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn load_test_cram() -> Vec<u8> {
+        std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram")).unwrap()
+    }
+
+    #[test]
+    fn parse_slice_header_from_real_cram() {
+        use super::super::container::ContainerHeader;
+
+        let data = load_test_cram();
+        let after_file_def = &data[26..];
+
+        // Skip header container
+        let hdr_container = ContainerHeader::parse(after_file_def).unwrap();
+        let data_start = hdr_container.header_size + hdr_container.length as usize;
+
+        // Parse first data container
+        let dc_bytes = &after_file_def[data_start..];
+        let dc = ContainerHeader::parse(dc_bytes).unwrap();
+
+        // Parse compression header block
+        let container_data = &dc_bytes[dc.header_size..];
+        let (comp_block, _) = block::parse_block(container_data).unwrap();
+        assert_eq!(comp_block.content_type, ContentType::CompressionHeader);
+
+        // First slice header should be at the first landmark offset
+        let first_landmark = *dc.landmarks.first().unwrap();
+        let slice_data = &container_data[first_landmark as usize..];
+        let (slice_header_block, _) = block::parse_block(slice_data).unwrap();
+        assert_eq!(slice_header_block.content_type, ContentType::SliceHeader);
+
+        let sh = SliceHeader::parse(&slice_header_block.data).unwrap();
+        assert!(sh.num_records > 0, "slice should have records");
+        assert!(sh.alignment_start > 0, "slice should have valid alignment start");
+        assert!(sh.num_blocks > 0, "slice should have blocks");
+    }
+
+    // r[verify cram.edge.reference_mismatch]
+    #[test]
+    fn md5_mismatch_detected_with_wrong_reference() {
+        // Verify that decode_slice catches a reference MD5 mismatch.
+        // We do this by reading a real CRAM slice and passing a wrong reference.
+        use super::super::{compression_header::CompressionHeader, container::ContainerHeader};
+
+        let data = load_test_cram();
+        let after_file_def = &data[26..];
+        let hdr = ContainerHeader::parse(after_file_def).unwrap();
+        let data_start = hdr.header_size + hdr.length as usize;
+        let dc_bytes = &after_file_def[data_start..];
+        let dc = ContainerHeader::parse(dc_bytes).unwrap();
+        let container_data = &dc_bytes[dc.header_size..];
+        let (comp_block, _) = block::parse_block(container_data).unwrap();
+        let ch = CompressionHeader::parse(&comp_block.data).unwrap();
+
+        let bam_header =
+            crate::bam::BamHeader::from_sam_text("@HD\tVN:1.6\n@SQ\tSN:chr19\tLN:61431566\n")
+                .unwrap();
+
+        // Create a fake reference full of N's — MD5 will not match
+        let fake_ref = vec![b'N'; 100_000];
+        let ref_start = dc.alignment_start.max(1) as i64 - 1;
+
+        let first_landmark = *dc.landmarks.first().unwrap();
+        let result = decode_slice(
+            &ch,
+            container_data,
+            first_landmark as usize,
+            &fake_ref,
+            ref_start,
+            &bam_header,
+            0,
+            0,
+            i64::MAX,
+            &mut crate::bam::record_store::RecordStore::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        assert!(
+            matches!(result, Err(CramError::ReferenceMd5Mismatch { .. })),
+            "should detect MD5 mismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn expected_slice_header_wrong_block_type() {
+        // Build a block with ExternalData instead of SliceHeader and check the error variant.
+        let data = b"\x01\x02\x03";
+        let block_bytes = block::build_test_block(4, 0, data); // 4 = ExternalData
+        let (blk, _) = block::parse_block(&block_bytes).unwrap();
+        assert_eq!(blk.content_type, ContentType::ExternalData);
+        // The error is constructed in decode_slice when the first block isn't a SliceHeader.
+        let err = CramError::ExpectedSliceHeader { found: blk.content_type };
+        assert!(matches!(err, CramError::ExpectedSliceHeader { found: ContentType::ExternalData }));
+    }
+
+    #[test]
+    fn missing_core_data_block_error_variant() {
+        // Verify the MissingCoreDataBlock error variant exists and formats correctly.
+        let err = CramError::MissingCoreDataBlock;
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("core data block"),
+            "error message should mention core data block: {msg}"
+        );
+    }
+
+    #[test]
+    fn unknown_feature_code_error_variant() {
+        // UnknownFeatureCode is returned from decode_features_and_reconstruct when
+        // encountering a feature code byte that doesn't match any known code.
+        // The known codes are: X, I, i, D, S, H, N, P, B, b, q, Q
+        // Value 0xFF is not a valid feature code.
+        let err = CramError::UnknownFeatureCode { feature_code: 0xFF };
+        assert!(matches!(err, CramError::UnknownFeatureCode { feature_code: 0xFF }));
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("ff") || msg.contains("0xff") || msg.contains("255"),
+            "error message should contain the code: {msg}"
+        );
+    }
+}

@@ -1,0 +1,359 @@
+//! Parse and query CIGAR strings. `CigarMapping` maps reference positions to query positions
+//! (linear fast-path for clip+match CIGARs, `SmallVec` fallback for complex ones);
+//! [`CigarIndex`] supports binary-search qpos lookups.
+
+use seqair_types::SmallVec;
+
+// r[impl cigar.operations]
+// r[impl io.named_constants]
+pub const CIGAR_M: u8 = 0;
+pub const CIGAR_I: u8 = 1;
+pub const CIGAR_D: u8 = 2;
+pub const CIGAR_N: u8 = 3;
+pub const CIGAR_S: u8 = 4;
+pub const CIGAR_H: u8 = 5;
+pub const CIGAR_P: u8 = 6;
+pub const CIGAR_EQ: u8 = 7;
+pub const CIGAR_X: u8 = 8;
+
+// r[impl io.typed_cigar_ops]
+/// Strongly-typed CIGAR operation kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CigarOpType {
+    Match,       // M(0): alignment match (may be sequence match or mismatch)
+    Insertion,   // I(1): insertion to the reference
+    Deletion,    // D(2): deletion from the reference
+    RefSkip,     // N(3): skipped region from the reference (e.g. intron)
+    SoftClip,    // S(4): soft clipping
+    HardClip,    // H(5): hard clipping
+    Padding,     // P(6): padding
+    SeqMatch,    // =(7): sequence match
+    SeqMismatch, // X(8): sequence mismatch
+}
+
+impl CigarOpType {
+    pub fn from_bam(code: u8) -> Option<Self> {
+        match code {
+            CIGAR_M => Some(Self::Match),
+            CIGAR_I => Some(Self::Insertion),
+            CIGAR_D => Some(Self::Deletion),
+            CIGAR_N => Some(Self::RefSkip),
+            CIGAR_S => Some(Self::SoftClip),
+            CIGAR_H => Some(Self::HardClip),
+            CIGAR_P => Some(Self::Padding),
+            CIGAR_EQ => Some(Self::SeqMatch),
+            CIGAR_X => Some(Self::SeqMismatch),
+            _ => None,
+        }
+    }
+
+    pub const fn consumes_ref(self) -> bool {
+        matches!(
+            self,
+            Self::Match | Self::Deletion | Self::RefSkip | Self::SeqMatch | Self::SeqMismatch
+        )
+    }
+
+    pub const fn consumes_query(self) -> bool {
+        matches!(
+            self,
+            Self::Match | Self::Insertion | Self::SoftClip | Self::SeqMatch | Self::SeqMismatch
+        )
+    }
+}
+
+/// Whether a CIGAR op code consumes the reference.
+const fn consumes_ref(op: u8) -> bool {
+    matches!(op, CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X)
+}
+
+/// Whether a CIGAR op code consumes the query.
+const fn consumes_query(op: u8) -> bool {
+    matches!(op, CIGAR_M | CIGAR_I | CIGAR_S | CIGAR_EQ | CIGAR_X)
+}
+
+// r[impl cigar.matches_indels]
+/// Calculate matches and indels from packed CIGAR bytes (LE u32 per op).
+///
+/// Lower 4 bits encode the operation; upper 28 bits encode the length.
+pub fn calc_matches_indels(cigar_bytes: &[u8]) -> (u32, u32) {
+    let mut matches = 0u32;
+    let mut indels = 0u32;
+    let n_ops = cigar_bytes.len() / 4;
+    for i in 0..n_ops {
+        let op = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let len = op >> 4;
+        let op_type = (op & 0xF) as u8;
+        match op_type {
+            CIGAR_M => matches += len,
+            CIGAR_I | CIGAR_D => indels += len,
+            _ => {}
+        }
+    }
+    (matches, indels)
+}
+
+// r[impl cigar.index]
+/// Pre-computed CIGAR index for O(log n) qpos lookup at any reference position.
+// Note: CigarOpType enum is available for typed access (see above).
+// Internal CigarOp uses raw u8 for performance in the hot path.
+// r[impl perf.cigar_binary_search]
+#[derive(Debug)]
+pub struct CigarIndex {
+    ops: Vec<CigarOp>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CigarOp {
+    ref_start: i64,
+    query_start: i64,
+    len: i64,
+    op_type: u8,
+}
+
+impl CigarIndex {
+    pub fn new(ref_pos: i64, cigar_bytes: &[u8]) -> Self {
+        let n_ops = cigar_bytes.len() / 4;
+        let mut ops = Vec::with_capacity(n_ops);
+        let mut ref_off: i64 = 0;
+        let mut query_off: i64 = 0;
+
+        for i in 0..n_ops {
+            let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+            let len = i64::from(packed >> 4);
+            let op_type = (packed & 0xF) as u8;
+
+            ops.push(CigarOp {
+                ref_start: ref_pos + ref_off,
+                query_start: query_off,
+                len,
+                op_type,
+            });
+
+            if consumes_ref(op_type) {
+                ref_off += len;
+            }
+            if consumes_query(op_type) {
+                query_off += len;
+            }
+        }
+
+        Self { ops }
+    }
+
+    // r[impl cigar.qpos_at]
+    // r[impl cigar.qpos_accuracy]
+    pub fn qpos_at(&self, ref_pos: i64) -> Option<usize> {
+        if self.ops.len() <= 4 {
+            self.qpos_at_linear(ref_pos)
+        } else {
+            self.qpos_at_bsearch(ref_pos)
+        }
+    }
+
+    fn qpos_at_linear(&self, ref_pos: i64) -> Option<usize> {
+        for op in &self.ops {
+            if !consumes_ref(op.op_type) {
+                continue;
+            }
+            let ref_end = op.ref_start + op.len;
+            if ref_pos < op.ref_start || ref_pos >= ref_end {
+                continue;
+            }
+            return if consumes_query(op.op_type) {
+                let offset = ref_pos - op.ref_start;
+                Some((op.query_start + offset) as usize)
+            } else {
+                None
+            };
+        }
+        None
+    }
+
+    fn qpos_at_bsearch(&self, ref_pos: i64) -> Option<usize> {
+        // Binary search for the op whose ref range contains ref_pos.
+        // Only ref-consuming ops have meaningful ref_start ranges, but all
+        // ops are sorted by ref_start, so we search the full array.
+        let idx = self.ops.partition_point(|op| op.ref_start <= ref_pos);
+        // partition_point returns the first op with ref_start > ref_pos.
+        // The candidate is the op before that.
+        if idx == 0 {
+            return None;
+        }
+        // Check the candidate and its neighbors (non-ref-consuming ops may
+        // share the same ref_start as the next ref-consuming op).
+        for i in idx.saturating_sub(2)..self.ops.len().min(idx + 1) {
+            let Some(op) = self.ops.get(i) else { continue };
+            if !consumes_ref(op.op_type) {
+                continue;
+            }
+            let ref_end = op.ref_start + op.len;
+            if ref_pos >= op.ref_start && ref_pos < ref_end {
+                return if consumes_query(op.op_type) {
+                    let offset = ref_pos - op.ref_start;
+                    Some((op.query_start + offset) as usize)
+                } else {
+                    None
+                };
+            }
+        }
+        None
+    }
+}
+
+/// Compact CIGAR mapping for fast qpos lookup in the pileup engine.
+///
+/// For the ~90% of reads with simple CIGARs (clips + one match block),
+/// `Linear` avoids any allocation and computes qpos with a single subtraction.
+/// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
+pub(crate) enum CigarMapping {
+    /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
+    Linear { rec_pos: i64, query_offset: u32 },
+    /// Pre-computed compact ops for linear/binary search.
+    Complex(SmallVec<CompactOp, 6>),
+}
+
+/// 16-byte CIGAR op for the compact index.
+#[derive(Clone, Copy)]
+pub(crate) struct CompactOp {
+    ref_start: i32,
+    query_start: u32,
+    len: u32,
+    op_type: u8,
+}
+
+impl CigarMapping {
+    pub(crate) fn new(rec_pos: i64, cigar_bytes: &[u8]) -> Self {
+        match try_linear(cigar_bytes) {
+            Some(query_offset) => Self::Linear { rec_pos, query_offset },
+            None => Self::Complex(build_compact_ops(rec_pos, cigar_bytes)),
+        }
+    }
+
+    pub(crate) fn qpos_at(&self, pos: i64) -> Option<usize> {
+        match self {
+            Self::Linear { rec_pos, query_offset } => {
+                Some((pos - rec_pos) as usize + *query_offset as usize)
+            }
+            Self::Complex(ops) => {
+                if ops.len() <= 4 {
+                    qpos_linear(ops, pos)
+                } else {
+                    qpos_bsearch(ops, pos)
+                }
+            }
+        }
+    }
+}
+
+/// Check if the CIGAR is a simple clips-match-clips pattern.
+/// Returns the query offset (leading soft-clip length) if linear, None otherwise.
+fn try_linear(cigar_bytes: &[u8]) -> Option<u32> {
+    let n_ops = cigar_bytes.len() / 4;
+    let mut query_offset = 0u32;
+    // 0 = leading clips, 1 = match block, 2 = trailing clips
+    let mut phase = 0u8;
+
+    for i in 0..n_ops {
+        let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let len = packed >> 4;
+        let op_type = (packed & 0xF) as u8;
+
+        match (phase, op_type) {
+            (0, CIGAR_S) => query_offset += len,
+            (0, CIGAR_H) => {}
+            (0, CIGAR_M | CIGAR_EQ | CIGAR_X) => phase = 1,
+            (1, CIGAR_M | CIGAR_EQ | CIGAR_X) => {}
+            (1 | 2, CIGAR_S | CIGAR_H) => phase = 2,
+            _ => return None,
+        }
+    }
+
+    // Only succeed if we reached the match phase (phase >= 1).
+    // Pure soft/hard clips (phase == 0) should use the complex path.
+    if phase >= 1 { Some(query_offset) } else { None }
+}
+
+fn build_compact_ops(rec_pos: i64, cigar_bytes: &[u8]) -> SmallVec<CompactOp, 6> {
+    let n_ops = cigar_bytes.len() / 4;
+    let mut ops = SmallVec::with_capacity(n_ops);
+    let mut ref_off: i64 = 0;
+    let mut query_off: u32 = 0;
+
+    for i in 0..n_ops {
+        let packed = u32::from_le_bytes(read4(cigar_bytes, i * 4));
+        let len = packed >> 4;
+        let op_type = (packed & 0xF) as u8;
+
+        ops.push(CompactOp {
+            ref_start: (rec_pos + ref_off) as i32,
+            query_start: query_off,
+            len,
+            op_type,
+        });
+
+        if consumes_ref(op_type) {
+            ref_off += i64::from(len);
+        }
+        if consumes_query(op_type) {
+            query_off += len;
+        }
+    }
+
+    ops
+}
+
+fn qpos_linear(ops: &[CompactOp], pos: i64) -> Option<usize> {
+    let pos32 = pos as i32;
+    for op in ops {
+        if !consumes_ref(op.op_type) {
+            continue;
+        }
+        let ref_end = op.ref_start + op.len as i32;
+        if pos32 < op.ref_start || pos32 >= ref_end {
+            continue;
+        }
+        return if consumes_query(op.op_type) {
+            let offset = (pos32 - op.ref_start) as u32;
+            Some((op.query_start + offset) as usize)
+        } else {
+            None
+        };
+    }
+    None
+}
+
+fn qpos_bsearch(ops: &[CompactOp], pos: i64) -> Option<usize> {
+    let pos32 = pos as i32;
+    let idx = ops.partition_point(|op| op.ref_start <= pos32);
+    if idx == 0 {
+        return None;
+    }
+    for i in idx.saturating_sub(2)..ops.len().min(idx + 1) {
+        let Some(op) = ops.get(i) else { continue };
+        if !consumes_ref(op.op_type) {
+            continue;
+        }
+        let ref_end = op.ref_start + op.len as i32;
+        if pos32 >= op.ref_start && pos32 < ref_end {
+            return if consumes_query(op.op_type) {
+                let offset = (pos32 - op.ref_start) as u32;
+                Some((op.query_start + offset) as usize)
+            } else {
+                None
+            };
+        }
+    }
+    None
+}
+
+// Callers only invoke read4 with offset = i * 4 where i < buf.len() / 4, so offset + 3 < buf.len().
+#[allow(clippy::indexing_slicing, reason = "offset + 3 < buf.len() ensured by caller's loop bound")]
+fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
+    debug_assert!(
+        offset + 3 < buf.len(),
+        "read4 out of bounds: offset={offset}, len={}",
+        buf.len()
+    );
+    [buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]
+}

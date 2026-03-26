@@ -1,0 +1,13 @@
+specs (
+  {
+    name seqair
+    include (docs/spec/**/*.md)
+    impls (
+      {
+        name rust
+        include (crates/**/*.rs)
+        exclude (target/**)
+      }
+    )
+  }
+)
