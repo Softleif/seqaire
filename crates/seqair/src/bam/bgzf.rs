@@ -65,8 +65,8 @@ pub enum BgzfError {
     #[error("BGZF ISIZE ({isize_value}) exceeds maximum block size (65536)")]
     UncompressedSizeTooLarge { isize_value: usize },
 
-    #[error("BAM record block_size ({block_size}) exceeds maximum ({max_size})")]
-    RecordTooLarge { block_size: usize, max_size: usize },
+    #[error("BAM record block_size ({block_size}) exceeds maximum (2 MiB)")]
+    RecordTooLarge { block_size: usize },
 }
 
 // r[impl bgzf.libdeflate]

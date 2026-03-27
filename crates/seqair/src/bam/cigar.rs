@@ -208,7 +208,6 @@ impl CigarIndex {
 /// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
 pub(crate) enum CigarMapping {
     /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
-    // r[impl cigar.qpos_bounds]
     Linear { rec_pos: i64, query_offset: u32, match_len: u32 },
     /// Pre-computed compact ops for linear/binary search.
     Complex(SmallVec<CompactOp, 6>),
@@ -235,6 +234,7 @@ impl CigarMapping {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => {
                 let offset = pos - rec_pos;
+                // r[depends cigar.qpos_bounds]
                 if offset < 0 || offset >= i64::from(*match_len) {
                     return None;
                 }
@@ -251,8 +251,11 @@ impl CigarMapping {
     }
 }
 
+// r[impl cigar.qpos_bounds]
 /// Check if the CIGAR is a simple clips-match-clips pattern.
-/// Returns the query offset (leading soft-clip length) if linear, None otherwise.
+/// Returns `(query_offset, match_len)` where `query_offset` is the leading soft-clip length
+/// and `match_len` is the total length of the contiguous match/seq-match/seq-mismatch block.
+/// Returns `None` for CIGARs with insertions, deletions, or multiple disjoint match regions.
 fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     let n_ops = cigar_bytes.len() / 4;
     let mut query_offset = 0u32;
@@ -280,11 +283,7 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
 
     // Only succeed if we reached the match phase (phase >= 1).
     // Pure soft/hard clips (phase == 0) should use the complex path.
-    if phase >= 1 {
-        Some((query_offset, match_len))
-    } else {
-        None
-    }
+    if phase >= 1 { Some((query_offset, match_len)) } else { None }
 }
 
 fn build_compact_ops(rec_pos: i64, cigar_bytes: &[u8]) -> SmallVec<CompactOp, 6> {

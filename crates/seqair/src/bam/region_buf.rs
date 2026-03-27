@@ -74,6 +74,7 @@ impl std::fmt::Debug for RegionBuf {
 impl RegionBuf {
     // r[impl region_buf.load]
     // r[impl region_buf.empty]
+    // r[related region_buf.merge_chunks]
     /// Bulk-read all compressed bytes for the given chunks into memory.
     ///
     /// Merges overlapping/adjacent chunks to minimize I/O, then performs
@@ -434,7 +435,7 @@ impl RegionBuf {
         // r[impl bam.record.max_size]
         const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
         if block_size > MAX_RECORD_SIZE {
-            return Err(BgzfError::RecordTooLarge { block_size, max_size: MAX_RECORD_SIZE });
+            return Err(BgzfError::RecordTooLarge { block_size });
         }
 
         // Fast path: the entire record body is already in the decompressed buffer.

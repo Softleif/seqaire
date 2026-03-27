@@ -147,6 +147,7 @@ fn cumulative_frequencies_symbol(
 fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
     let result = f * (s >> bits) + (s & ((1 << bits) - 1));
     debug_assert!(result >= g, "state_step underflow: {result} < {g}");
+    // r[depends cram.codec.state_step_safety]
     result.wrapping_sub(g)
 }
 

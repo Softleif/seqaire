@@ -37,7 +37,7 @@
 // push_raw() is not a significant bottleneck and that slab access patterns
 // are indeed cache-friendly.
 
-// r[impl unified.minimal_public_api]
+// r[impl io.minimal_public_api]
 pub mod aux;
 pub mod bgzf;
 pub mod cigar;
@@ -55,6 +55,6 @@ pub use bgzf::BgzfError;
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{BaiError, BamIndex};
 pub use pileup::{PileupColumn, PileupEngine, RefSeq};
-pub use reader::{BamError, BamShared, IndexedBamReader};
+pub use reader::{BamError, BamShared, CoordinateField, IndexedBamReader};
 pub use record::BamRecord;
 pub use record_store::RecordStore;

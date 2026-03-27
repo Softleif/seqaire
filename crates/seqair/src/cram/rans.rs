@@ -45,6 +45,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
             let sym = sym_table[f as usize];
             *d = sym;
             let i = sym as usize;
+            // r[depends cram.codec.state_step_safety]
             *state =
                 u32::from(freq[i]) * (*state >> 12) + (*state & 0x0FFF) - u32::from(cum_freq[i]);
             renormalize(state, src)?;

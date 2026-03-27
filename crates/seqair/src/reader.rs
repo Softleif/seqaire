@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::instrument;
 
-// r[impl unified.non_exhaustive_enums]
+// r[impl io.non_exhaustive_enums]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FormatDetectionError {

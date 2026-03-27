@@ -291,6 +291,7 @@ impl Iterator for PileupEngine {
             }
 
             // r[impl pileup.qpos_none]
+            // r[related record_store.field_access]
             let mut alignments = Vec::with_capacity(self.active.len());
             for active in &self.active {
                 if let Some(qpos) = active.cigar.qpos_at(pos) {

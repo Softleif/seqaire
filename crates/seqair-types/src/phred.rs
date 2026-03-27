@@ -32,6 +32,7 @@ pub struct Phred(f64);
 impl Phred {
     /// Get the Phred quality score as an integer, clamped to [0, 99].
     // r[impl types.phred.as_int_clamp]
+    // r[depends types.phred.non_negative]
     pub fn as_int(self) -> i32 {
         let phred = self.0;
         // NaN and values <= 0 clamp to 0
@@ -100,35 +101,6 @@ mod tests {
         assert_eq!(0., *Phred::from(Probability::new_panicky(1.)));
     }
 
-    // r[verify types.phred.non_negative]
-    #[test]
-    fn from_phred_accepts_u8() {
-        // from_phred takes u8, so negative values are unrepresentable
-        let p = Phred::from_phred(0);
-        assert_eq!(p.as_int(), 0);
-        let p = Phred::from_phred(42);
-        assert_eq!(p.as_int(), 42);
-        let p = Phred::from_phred(255);
-        assert_eq!(p.as_int(), 99); // clamped
-    }
-
-    // r[verify types.phred.as_int_clamp]
-    #[test]
-    fn as_int_clamps_low_to_zero() {
-        // A probability of 1.0 yields Phred 0.0; as_int must return 0
-        let p = Phred::from(Probability::new_panicky(1.0));
-        assert_eq!(p.as_int(), 0);
-    }
-
-    // r[verify types.phred.as_int_clamp]
-    #[test]
-    fn as_int_clamps_high_to_99() {
-        let p = Phred::from_phred(99);
-        assert_eq!(p.as_int(), 99);
-        let p = Phred::from_phred(100);
-        assert_eq!(p.as_int(), 99);
-    }
-
     // r[verify types.phred.as_int_clamp]
     #[test]
     fn as_int_handles_nan() {
@@ -136,5 +108,46 @@ mod tests {
         // is impossible since Probability rejects NaN, so we test the raw struct)
         let p = Phred(f64::NAN);
         assert_eq!(p.as_int(), 0);
+    }
+
+    proptest::proptest! {
+        // r[verify types.phred.non_negative]
+        #[test]
+        fn proptest_from_phred_produces_valid(q: u8) {
+            let p = Phred::from_phred(q);
+            let i = p.as_int();
+            proptest::prop_assert!(i >= 0 && i <= 99, "as_int out of range: {i}");
+        }
+
+        // r[verify types.phred.non_negative]
+        #[test]
+        fn proptest_from_phred_roundtrip(q in 0u8..=93) {
+            // Values 0..=93 are within the SAM/BAM quality range and should roundtrip
+            let p = Phred::from_phred(q);
+            proptest::prop_assert_eq!(p.as_int(), i32::from(q));
+        }
+
+        // r[verify types.phred.as_int_clamp]
+        #[test]
+        fn proptest_as_int_always_in_range(q: u8) {
+            let p = Phred::from_phred(q);
+            let i = p.as_int();
+            proptest::prop_assert!(i >= 0, "as_int negative: {i}");
+            proptest::prop_assert!(i <= 99, "as_int > 99: {i}");
+        }
+
+        #[test]
+        fn proptest_phred_probability_roundtrip(q in 1u8..=60) {
+            // Phred -> Probability -> Phred roundtrip (avoid q=0 which gives p=1.0 -> phred=0)
+            let phred1 = Phred::from_phred(q);
+            let prob = Probability::try_from(10f64.powf(-f64::from(q) / 10.0))
+                .expect("valid probability for q in 1..=60");
+            let phred2 = Phred::from(prob);
+            // Should be within 1 of original due to floating-point
+            proptest::prop_assert!(
+                (phred1.as_int() - phred2.as_int()).abs() <= 1,
+                "roundtrip drift: {} vs {}", phred1.as_int(), phred2.as_int()
+            );
+        }
     }
 }

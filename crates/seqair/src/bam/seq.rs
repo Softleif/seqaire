@@ -107,6 +107,7 @@ pub fn decode_seq(encoded: &[u8], len: usize) -> Vec<u8> {
 /// all other nibbles (=, IUPAC ambiguity, N) → Unknown(78).
 // r[impl base_decode.table]
 // r[impl base_decode.table_invariant]
+// r[depends base_decode.table_invariant]
 // Indexed by the 4-bit BAM nibble value (0–15):
 // 0:= 1:A 2:C 3:M 4:G 5:R 6:S 7:V 8:T 9:W 10:Y 11:H 12:K 13:D 14:B 15:N
 #[allow(clippy::byte_char_slices, reason = "per-index comments explain the IUPAC nibble mapping")]
@@ -130,6 +131,7 @@ static DECODE_BASE_TYPED: &[u8; 16] = &[
 ];
 
 /// Pre-computed pair table for Base-typed decoding.
+// r[depends base_decode.table_invariant]
 #[allow(clippy::indexing_slicing, reason = "i < 256, nibbles < 16")]
 static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
     const B: [u8; 16] = [
@@ -151,10 +153,12 @@ pub fn decode_bases(encoded: &[u8], len: usize) -> Vec<seqair_types::Base> {
     let bytes = decode_bases_raw(encoded, len);
     // Safety: DECODE_BASE_TYPED/DECODE_PAIR_TYPED only produce valid Base
     // discriminants (A=65, C=67, G=71, T=84, Unknown=78) in every byte.
+    // r[depends base_decode.table_invariant]
     unsafe { seqair_types::Base::vec_u8_into_vec_base(bytes) }
 }
 
 /// Raw byte decode using the Base-typed lookup table.
+// r[depends seq.simd_scalar_equivalence]
 fn decode_bases_raw(encoded: &[u8], len: usize) -> Vec<u8> {
     #[cfg(target_arch = "x86_64")]
     {
@@ -454,8 +458,15 @@ unsafe fn decode_seq_neon(encoded: &[u8], len: usize) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    /// Valid `Base` discriminants: A=65, C=67, G=71, T=84, Unknown=78.
-    const VALID_DISCRIMINANTS: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
+    /// Valid `Base` discriminants, derived from the enum so the test stays correct
+    /// if discriminant values ever change.
+    const VALID_DISCRIMINANTS: [u8; 5] = [
+        seqair_types::Base::A as u8,
+        seqair_types::Base::C as u8,
+        seqair_types::Base::G as u8,
+        seqair_types::Base::T as u8,
+        seqair_types::Base::Unknown as u8,
+    ];
 
     fn is_valid_base_discriminant(byte: u8) -> bool {
         VALID_DISCRIMINANTS.contains(&byte)

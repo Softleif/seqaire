@@ -92,8 +92,8 @@ Note: the integer type selected here may differ from the type used by the origin
 r[sam.record.aux_parse_strict]
 Malformed aux tag values MUST return an error, not silently default to zero. For integer (`i`) typed tags, if the value cannot be parsed as an integer, the reader MUST return a `SamRecordError::InvalidAuxValue` error.
 
-r[sam.record.aux_int_range]
-Integer aux values MUST fit within one of the BAM integer types: i8 [-128, 127], u8 [0, 255], i16 [-32768, 32767], u16 [0, 65535], i32 [-2147483648, 2147483647], or u32 [0, 4294967295]. Values outside this range (i.e., `val > u32::MAX` or `val < i32::MIN` as i64) MUST return a `SamRecordError::AuxIntOutOfRange` error instead of silently truncating.
+r[sam.record.aux_int_range+2]
+SAM aux integer values (type `i`) are serialized into the smallest BAM integer type that fits, using the ranges defined in `r[sam.record.aux_tags]`. Values that exceed the u32 range (i.e., `val > u32::MAX` or `val < i32::MIN` when interpreted as i64) cannot be represented in any BAM integer type and MUST return a `SamRecordError::AuxIntOutOfRange` error instead of silently truncating.
 
 ## Region fetching
 
@@ -108,7 +108,7 @@ r[sam.reader.fetch_into]
 7. Skip unmapped reads (FLAG 0x4).
 8. Push passing records into the RecordStore.
 
-r[sam.reader.overlap_filter]
+r[sam.reader.overlap_filter+2]
 The overlap filter uses half-open intervals (0-based). `end_pos` MUST be computed from the parsed CIGAR. When CIGAR is `*` (unavailable), `end_pos = pos` (point record).
 
 r[sam.reader.overlap_halfopen]

@@ -13,30 +13,58 @@ use std::{
 };
 use tracing::instrument;
 
+/// Format a byte slice for error display: printable ASCII shown as-is, other bytes as `\xNN`.
+/// Output is capped to `max_len` bytes of input, with "..." appended if truncated.
+fn format_aux_field(bytes: &[u8], max_len: usize) -> String {
+    let truncated = bytes.len() > max_len;
+    let slice = if truncated { &bytes[..max_len] } else { bytes };
+    let mut out = String::with_capacity(slice.len() + 4);
+    for &b in slice {
+        if b.is_ascii_graphic() || b == b' ' {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("\\x{b:02x}"));
+        }
+    }
+    if truncated {
+        out.push_str("...");
+    }
+    out
+}
+
+/// Format a 2-byte tag as ASCII if both bytes are printable, otherwise as hex.
+fn format_tag(tag: &[u8]) -> String {
+    if tag.len() == 2 && tag[0].is_ascii_graphic() && tag[1].is_ascii_graphic() {
+        format!("{}{}", tag[0] as char, tag[1] as char)
+    } else {
+        format_aux_field(tag, 32)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SamRecordError {
     #[error("expected >= 11 TAB-separated fields, got {found}")]
     TooFewFields { found: usize },
 
-    #[error("invalid FLAG field: {value:?}")]
+    #[error("invalid FLAG field: {}", format_aux_field(value, 32))]
     InvalidFlag { value: Box<[u8]> },
 
-    #[error("RNAME is not valid UTF-8: {value:?}")]
+    #[error("RNAME is not valid UTF-8: {}", format_aux_field(value, 32))]
     InvalidRname { value: Box<[u8]> },
 
-    #[error("invalid POS field: {value:?}")]
+    #[error("invalid POS field: {}", format_aux_field(value, 32))]
     InvalidPos { value: Box<[u8]> },
 
-    #[error("invalid MAPQ field: {value:?}")]
+    #[error("invalid MAPQ field: {}", format_aux_field(value, 32))]
     InvalidMapq { value: Box<[u8]> },
 
-    #[error("invalid CIGAR operation length: {value:?}")]
+    #[error("invalid CIGAR operation length: {}", format_aux_field(value, 32))]
     InvalidCigarLength { value: Box<[u8]> },
 
     #[error("unknown CIGAR operation: {op}")]
     UnknownCigarOp { op: char },
 
-    #[error("invalid aux tag value for {tag:?}: {value:?}")]
+    #[error("invalid aux tag value for {}: {}", format_tag(tag), format_aux_field(value, 32))]
     InvalidAuxValue { tag: Box<[u8]>, value: Box<[u8]> },
 
     #[error("SAM header is not valid UTF-8")]

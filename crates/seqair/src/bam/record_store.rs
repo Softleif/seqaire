@@ -61,6 +61,7 @@ impl SlimRecord {
 // r[impl record_store.capacity]
 // r[impl record_store.no_rc]
 // r[impl base_decode.slab]
+// r[related pileup.qpos]
 /// Slab-based storage for BAM records.
 ///
 /// Four contiguous buffers hold all data for a region:

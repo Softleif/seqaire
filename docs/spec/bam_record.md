@@ -70,5 +70,8 @@ BAM records can carry optional key-value tags (e.g. `XR:Z:CT` for bismark strand
 r[bam.record.aux_parse]
 The record MUST support looking up auxiliary tags by their 2-byte name. Tag types A, c, C, s, S, i, I, f, d, Z, H, and B (typed array) MUST be supported.
 
+r[bam.record.aux_array_unsupported]
+B-type (array) auxiliary tags are not yet parsed into `AuxValue`. `find_tag` returns `None` for array tags. The tag bytes MUST be correctly skipped so that all subsequent tags in the record remain accessible.
+
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.

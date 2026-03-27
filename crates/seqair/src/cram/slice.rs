@@ -593,6 +593,7 @@ fn decode_features_and_reconstruct(
             feature_idx += 1;
 
             match &feature.data {
+                // r[related cram.slice.ref_bounds_warning]
                 FeatureData::Substitution(code) => {
                     let ref_base =
                         ref_base_at(reference_seq, ref_offset + ref_pos, &mut ref_warned);

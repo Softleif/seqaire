@@ -20,6 +20,23 @@ use std::{
 };
 use tracing::instrument;
 
+#[derive(Debug, Clone, Copy)]
+pub enum CoordinateField {
+    Tid,
+    Start,
+    End,
+}
+
+impl std::fmt::Display for CoordinateField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tid => write!(f, "tid"),
+            Self::Start => write!(f, "start"),
+            Self::End => write!(f, "end"),
+        }
+    }
+}
+
 // r[impl io.errors]
 #[derive(Debug, thiserror::Error)]
 pub enum BamError {
@@ -64,23 +81,23 @@ pub enum BamError {
 
     // r[impl bam.reader.coordinate_overflow]
     #[error("coordinate overflow: {field} value {value} exceeds {max}")]
-    CoordinateOverflow { field: &'static str, value: u64, max: u64 },
+    CoordinateOverflow { field: CoordinateField, value: u64, max: u64 },
 }
 
 // r[impl bam.reader.coordinate_overflow]
 fn validate_fetch_coordinates(tid: u32, start: u64, end: u64) -> Result<(i32, i64, i64), BamError> {
     let tid_i32 = i32::try_from(tid).map_err(|_| BamError::CoordinateOverflow {
-        field: "tid",
+        field: CoordinateField::Tid,
         value: u64::from(tid),
         max: i32::MAX as u64,
     })?;
     let start_i64 = i64::try_from(start).map_err(|_| BamError::CoordinateOverflow {
-        field: "start",
+        field: CoordinateField::Start,
         value: start,
         max: i64::MAX as u64,
     })?;
     let end_i64 = i64::try_from(end).map_err(|_| BamError::CoordinateOverflow {
-        field: "end",
+        field: CoordinateField::End,
         value: end,
         max: i64::MAX as u64,
     })?;
@@ -292,6 +309,7 @@ impl IndexedBamReader {
 }
 
 // r[impl bam.index.chunk_cache]
+// r[related bam.index.chunk_separation+2]
 /// Caches records from distant bins (levels 0–2, covering ≥8 Mbp) for a
 /// single reference sequence.
 ///
@@ -481,7 +499,7 @@ mod tests {
         assert!(result.is_err(), "tid > i32::MAX must error");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, BamError::CoordinateOverflow { field: "tid", .. }),
+            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::Tid, .. }),
             "expected CoordinateOverflow for tid, got: {err}"
         );
     }
@@ -494,7 +512,7 @@ mod tests {
         assert!(result.is_err(), "start > i64::MAX must error");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, BamError::CoordinateOverflow { field: "start", .. }),
+            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::Start, .. }),
             "expected CoordinateOverflow for start, got: {err}"
         );
     }
@@ -507,7 +525,7 @@ mod tests {
         assert!(result.is_err(), "end > i64::MAX must error");
         let err = result.unwrap_err();
         assert!(
-            matches!(err, BamError::CoordinateOverflow { field: "end", .. }),
+            matches!(err, BamError::CoordinateOverflow { field: CoordinateField::End, .. }),
             "expected CoordinateOverflow for end, got: {err}"
         );
     }

@@ -116,6 +116,7 @@ impl<'de> serde::Deserialize<'de> for Probability {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Phred;
 
     #[test]
     fn fails_outside_range() {
@@ -154,5 +155,54 @@ mod tests {
     fn error_accessible_from_crate_root() {
         let err: crate::ProbabilityError = ProbabilityError::OutOfRange { value: 2.0 };
         assert!(matches!(err, crate::ProbabilityError::OutOfRange { .. }));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn proptest_valid_range_accepted(v in 0.0f64..=1.0) {
+            proptest::prop_assert!(Probability::new(v).is_ok());
+        }
+
+        #[test]
+        fn proptest_above_range_rejected(v in 1.001f64..1e10) {
+            proptest::prop_assert!(Probability::new(v).is_err());
+        }
+
+        #[test]
+        fn proptest_below_range_rejected(v in -1e10f64..-0.001) {
+            proptest::prop_assert!(Probability::new(v).is_err());
+        }
+
+        #[test]
+        fn proptest_inverted_stays_in_range(v in 0.0f64..=1.0) {
+            let p = Probability::new(v).expect("valid");
+            let inv = p.inverted();
+            proptest::prop_assert!(*inv >= 0.0 && *inv <= 1.0,
+                "inverted({v}) = {} out of range", *inv);
+        }
+
+        #[test]
+        fn proptest_probability_phred_roundtrip(v in 0.001f64..=1.0) {
+            // Probability -> Phred -> Probability roundtrip
+            let p1 = Probability::new(v).expect("valid");
+            let phred = Phred::from(p1);
+            // Reconstruct probability from phred: P = 10^(-Q/10)
+            let reconstructed = 10f64.powf(-*phred / 10.0);
+            let p2 = Probability::new(reconstructed).expect("reconstructed valid");
+            // Allow small epsilon for floating-point
+            let diff = (*p1 - *p2).abs();
+            proptest::prop_assert!(diff < 0.01,
+                "roundtrip error too large: {v} -> phred {} -> {}, diff={diff}", *phred, *p2);
+        }
+
+        #[test]
+        fn proptest_from_str_roundtrip(v in 0.0f64..=1.0) {
+            let p = Probability::new(v).expect("valid");
+            let s = format!("{p:.10}");
+            let p2: Probability = s.parse().expect("roundtrip parse");
+            let diff = (*p - *p2).abs();
+            proptest::prop_assert!(diff < 1e-9,
+                "FromStr roundtrip error: {v} -> \"{s}\" -> {}, diff={diff}", *p2);
+        }
     }
 }
