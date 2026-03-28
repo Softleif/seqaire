@@ -656,14 +656,27 @@ mod tests {
     }
 
     proptest::proptest! {
+        // Verify Beta decoding with varying bit widths and offsets: decoded value must
+        // equal the raw bit pattern minus the offset, as per the CRAM spec.
         #[test]
-        fn beta_roundtrip(val in 0u32..256, bits in 8u32..=8) {
-            let byte = val as u8;
-            let data = [byte];
+        fn beta_decode_with_varying_params(
+            bits in 1u32..=16,
+            offset in -100i32..=100,
+            val in 0u32..=(u32::MAX),
+        ) {
+            // Clamp val to the valid range for this bit width
+            let max_val = (1u32 << bits) - 1;
+            let val = val % (max_val + 1);
+
+            // Pack `val` MSB-first into 3 bytes (enough for up to 16 bits)
+            let shift = 24u32.saturating_sub(bits);
+            let packed = val << shift;
+            let data = [(packed >> 16) as u8, (packed >> 8) as u8, packed as u8];
+
             let mut ctx = DecodeContext::new(&data, FxHashMap::default());
-            let enc = IntEncoding::Beta { offset: 0, bits };
+            let enc = IntEncoding::Beta { offset, bits };
             let decoded = enc.decode(&mut ctx).unwrap();
-            proptest::prop_assert_eq!(decoded, val as i32);
+            proptest::prop_assert_eq!(decoded, val as i32 - offset);
         }
 
         #[test]

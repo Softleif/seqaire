@@ -13,27 +13,42 @@ use std::{cell::Cell, rc::Rc};
 // r[verify pileup.column_contents]
 proptest! {
     #[test]
-    fn depth_equals_covering_records(
+    fn depth_matches_sweep_line_count(
         records in prop::collection::vec((0i32..500, 10u32..=100), 1..=20),
     ) {
         let mut sorted = records.clone();
         sorted.sort_by_key(|&(offset, _)| offset);
 
         let mut arena = RecordStore::new();
-        let mut intervals: Vec<(i64, i64)> = Vec::new();
+        // Build a sweep-line depth array: for each read, +1 at start, -1 at end+1.
+        // Prefix-sum gives expected depth at each position.
+        const MAX_POS: usize = 601;
+        let mut delta = vec![0i32; MAX_POS + 1];
         for &(offset, read_len) in &sorted {
-            let pos = i64::from(offset);
-            let end = pos + i64::from(read_len) - 1;
+            let start = offset as usize;
+            let end_excl = (offset as usize + read_len as usize).min(MAX_POS);
+            if start < MAX_POS {
+                delta[start] += 1;
+            }
+            if end_excl <= MAX_POS {
+                delta[end_excl] -= 1;
+            }
             arena.push_raw(&make_record(0, offset, 99, 60, read_len)).unwrap();
-            intervals.push((pos, end));
+        }
+
+        // Compute prefix sum to get expected depth at each position.
+        let mut expected_depth = vec![0usize; MAX_POS];
+        let mut running = 0i32;
+        for (i, &d) in delta.iter().enumerate().take(MAX_POS) {
+            running += d;
+            expected_depth[i] = running.max(0) as usize;
         }
 
         let engine = PileupEngine::new(arena, 0, 600);
         for col in engine {
-            let expected = intervals.iter()
-                .filter(|&&(s, e)| col.pos() >= s && col.pos() <= e)
-                .count();
-            prop_assert_eq!(col.depth(), expected,
+            let pos = col.pos() as usize;
+            let exp = expected_depth.get(pos).copied().unwrap_or(0);
+            prop_assert_eq!(col.depth(), exp,
                 "depth mismatch at pos {}", col.pos());
         }
     }
@@ -44,27 +59,46 @@ proptest! {
 // r[verify pileup.position_iteration]
 proptest! {
     #[test]
-    fn every_covered_position_yields_a_column(
+    fn columns_match_sweep_line_coverage(
         records in prop::collection::vec((0i32..500, 10u32..=100), 1..=20),
     ) {
         let mut sorted = records.clone();
         sorted.sort_by_key(|&(offset, _)| offset);
 
         let mut arena = RecordStore::new();
-        let mut intervals: Vec<(i64, i64)> = Vec::new();
+        // Build sweep-line depth array using event-based approach.
+        const MAX_POS: usize = 601;
+        let mut delta = vec![0i32; MAX_POS + 1];
         for &(offset, read_len) in &sorted {
+            let start = offset as usize;
+            let end_excl = (offset as usize + read_len as usize).min(MAX_POS);
+            if start < MAX_POS {
+                delta[start] += 1;
+            }
+            if end_excl <= MAX_POS {
+                delta[end_excl] -= 1;
+            }
             arena.push_raw(&make_record(0, offset, 99, 60, read_len)).unwrap();
-            intervals.push((i64::from(offset), i64::from(offset) + i64::from(read_len) - 1));
+        }
+
+        // Prefix sum → expected depth per position.
+        let mut expected_depth = vec![0i32; MAX_POS];
+        let mut running = 0i32;
+        for (i, &d) in delta.iter().enumerate().take(MAX_POS) {
+            running += d;
+            expected_depth[i] = running.max(0);
         }
 
         let engine = PileupEngine::new(arena, 0, 600);
         let columns: Vec<_> = engine.collect();
-        let col_positions: std::collections::HashSet<i64> = columns.iter().map(|c| c.pos()).collect();
+        let col_positions: std::collections::HashSet<i64> =
+            columns.iter().map(|c| c.pos()).collect();
 
-        for pos in 0..=600i64 {
-            let covered = intervals.iter().any(|&(s, e)| pos >= s && pos <= e);
-            prop_assert_eq!(col_positions.contains(&pos), covered,
-                "position {} coverage mismatch", pos);
+        for pos in 0..MAX_POS as i64 {
+            let exp_covered = expected_depth.get(pos as usize).copied().unwrap_or(0) > 0;
+            let actual_covered = col_positions.contains(&pos);
+            prop_assert_eq!(actual_covered, exp_covered,
+                "position {} coverage mismatch (sweep says covered={})", pos, exp_covered);
         }
     }
 }

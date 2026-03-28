@@ -255,28 +255,76 @@ proptest! {
 }
 
 // r[verify cigar.qpos_at]
+//
+// Builds CIGARs from human-readable strings and derives expected Some/None
+// from the string form — not from numeric op-code constants — so the test
+// cannot be tautological.
 proptest! {
     #[test]
-    fn none_at_deletions_some_at_matches(ops in arb_cigar(), start in 0i64..1_000_000) {
-        let packed: Vec<u32> = ops.iter().map(|&(len, op)| cigar_op(len, op)).collect();
+    fn qpos_none_for_deletions_some_for_matches_from_strings(
+        // Each part is (length, op_char) drawn from the SAM alphabet.
+        // At least one ref-consuming op must be present so the CIGAR is valid.
+        parts in prop::collection::vec(
+            prop_oneof![
+                (1u32..=200u32, Just('M')),
+                (1u32..=200u32, Just('=')),
+                (1u32..=200u32, Just('X')),
+                (1u32..=20u32,  Just('D')),
+                (1u32..=20u32,  Just('N')),
+                (1u32..=20u32,  Just('I')),
+            ],
+            1..=8,
+        ).prop_filter("need at least one ref-consuming op", |parts| {
+            parts.iter().any(|(_, op)| matches!(op, 'M' | '=' | 'X' | 'D' | 'N'))
+        }),
+        start in 0i64..1_000_000,
+    ) {
+        // Build the byte representation from the human-readable string.
+        let cigar_str: String = parts.iter().map(|(len, op)| format!("{len}{op}")).collect();
+        // Parse the string back into packed ops via the helpers, driving
+        // CigarIndex from the same string that we reason about below.
+        let op_char_to_code = |c: char| -> u8 {
+            match c {
+                'M' => 0, 'I' => 1, 'D' => 2, 'N' => 3, 'S' => 4,
+                'H' => 5, 'P' => 6, '=' => 7, 'X' => 8, _ => 0,
+            }
+        };
+        let packed: Vec<u32> = parts.iter()
+            .map(|&(len, op)| cigar_op(len, op_char_to_code(op)))
+            .collect();
         let bytes = cigar_bytes(&packed);
         let idx = CigarIndex::new(start, &bytes);
 
+        // Walk the string-form parts to derive expectations independently.
         let mut ref_pos = start;
-        for &(len, op) in &ops {
+        for &(len, op) in &parts {
             match op {
-                0 | 7 | 8 => {
+                // M / = / X consume ref+query → every covered ref position must
+                // return Some.
+                'M' | '=' | 'X' => {
                     for i in 0..i64::from(len) {
-                        prop_assert!(idx.qpos_at(ref_pos + i).is_some());
+                        let pos = ref_pos + i;
+                        prop_assert!(
+                            idx.qpos_at(pos).is_some(),
+                            "cigar={}: ref {} under {} op should be Some",
+                            cigar_str, pos, op
+                        );
                     }
                     ref_pos += i64::from(len);
                 }
-                2 | 3 => {
+                // D / N consume ref only → no query position exists.
+                'D' | 'N' => {
                     for i in 0..i64::from(len) {
-                        prop_assert!(idx.qpos_at(ref_pos + i).is_none());
+                        let pos = ref_pos + i;
+                        prop_assert!(
+                            idx.qpos_at(pos).is_none(),
+                            "cigar={}: ref {} under {} op should be None",
+                            cigar_str, pos, op
+                        );
                     }
                     ref_pos += i64::from(len);
                 }
+                // I consumes query only — no ref positions to check.
                 _ => {}
             }
         }

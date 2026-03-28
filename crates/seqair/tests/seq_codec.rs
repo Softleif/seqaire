@@ -129,15 +129,59 @@ fn encode_odd_length() {
 }
 
 // r[verify seq.encode_scalar]
+// Verifies the BAM spec (SAM1 §4.2.4) nibble encoding table:
+// =ACMGRSVTWYHKDBN → nibble values 0–15, so A=1, C=2, G=4, T=8, N=15.
 proptest! {
     #[test]
-    fn encode_decode_roundtrip(
+    fn encode_produces_spec_nibble_values(
         bases in prop::collection::vec(
             prop::sample::select(vec![b'A', b'C', b'G', b'T', b'N']),
             0..=200,
         ),
     ) {
+        fn spec_nibble(b: u8) -> u8 {
+            match b {
+                b'A' => 1,
+                b'C' => 2,
+                b'G' => 4,
+                b'T' => 8,
+                b'N' => 15,
+                _ => panic!("unexpected base {b}"),
+            }
+        }
+
         let encoded = encode_seq(&bases);
+
+        // Verify each encoded byte has the correct nibble values per the BAM spec.
+        for i in 0..bases.len() / 2 {
+            let byte = encoded.get(i).copied().unwrap();
+            let hi = byte >> 4;
+            let lo = byte & 0x0F;
+            prop_assert_eq!(
+                hi,
+                spec_nibble(*bases.get(i * 2).unwrap()),
+                "high nibble mismatch at pair {}",
+                i
+            );
+            prop_assert_eq!(
+                lo,
+                spec_nibble(*bases.get(i * 2 + 1).unwrap()),
+                "low nibble mismatch at pair {}",
+                i
+            );
+        }
+        // For odd-length sequences the last byte's high nibble encodes the final base.
+        if bases.len() % 2 == 1 {
+            let last_byte = encoded.get(bases.len() / 2).copied().unwrap();
+            prop_assert_eq!(
+                last_byte >> 4,
+                spec_nibble(*bases.last().unwrap()),
+                "high nibble mismatch for final odd base"
+            );
+            prop_assert_eq!(last_byte & 0x0F, 0u8, "low nibble of padding byte must be 0");
+        }
+
+        // Secondary: roundtrip check.
         let decoded = decode_seq(&encoded, bases.len());
         prop_assert_eq!(&decoded, &bases);
     }

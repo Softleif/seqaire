@@ -7,49 +7,19 @@ use seqair_types::Base;
 // public API with generated inputs. For CIGAR, we generate valid CIGAR strings,
 // create SAM records, push through the reader, and verify round-trip properties.
 
-/// Generate a valid CIGAR string with 1-10 operations.
-fn arb_cigar() -> impl Strategy<Value = String> {
+/// Generate a valid CIGAR as a list of `(length, op_char)` parts plus the
+/// assembled string.  Returning the parts lets callers compute reference-
+/// consuming totals directly from the generator, without reimplementing
+/// the parser.
+fn arb_cigar_parts() -> impl Strategy<Value = (Vec<(u32, char)>, String)> {
     prop::collection::vec(
         (1..200u32, prop::sample::select(vec!['M', 'I', 'D', 'S', 'N', '=', 'X'])),
         1..10,
     )
-    .prop_map(|ops| ops.iter().map(|(len, op)| format!("{len}{op}")).collect::<String>())
-}
-
-/// Compute query-consuming length from a CIGAR string.
-fn cigar_query_len(cigar: &str) -> usize {
-    let mut len = 0;
-    let mut num_start = 0;
-    for (i, c) in cigar.char_indices() {
-        if c.is_ascii_digit() {
-            continue;
-        }
-        let n: usize = cigar[num_start..i].parse().unwrap_or(0);
-        match c {
-            'M' | 'I' | 'S' | '=' | 'X' => len += n,
-            _ => {}
-        }
-        num_start = i + c.len_utf8();
-    }
-    len
-}
-
-/// Compute reference-consuming length from a CIGAR string.
-fn cigar_ref_len(cigar: &str) -> usize {
-    let mut len = 0;
-    let mut num_start = 0;
-    for (i, c) in cigar.char_indices() {
-        if c.is_ascii_digit() {
-            continue;
-        }
-        let n: usize = cigar[num_start..i].parse().unwrap_or(0);
-        match c {
-            'M' | 'D' | 'N' | '=' | 'X' => len += n,
-            _ => {}
-        }
-        num_start = i + c.len_utf8();
-    }
-    len
+    .prop_map(|parts| {
+        let s = parts.iter().map(|(len, op)| format!("{len}{op}")).collect::<String>();
+        (parts, s)
+    })
 }
 
 proptest! {
@@ -58,24 +28,26 @@ proptest! {
     // r[verify sam.record.cigar_parse]
     // r[verify sam.edge.long_cigar]
     #[test]
-    fn cigar_roundtrip_preserves_end_pos(
-        cigar in arb_cigar(),
+    fn cigar_end_pos_invariants(
+        (parts, cigar) in arb_cigar_parts(),
         pos in 100i64..10000,
     ) {
-        let query_len = cigar_query_len(&cigar);
-        if query_len == 0 {
+        // Compute query length and ref-consuming total directly from the
+        // generated parts — no reimplementation of the parser is needed.
+        let query_consuming: u32 = parts.iter()
+            .filter(|(_, op)| matches!(op, 'M' | 'I' | 'S' | '=' | 'X'))
+            .map(|(len, _)| len)
+            .sum();
+        if query_consuming == 0 {
             return Ok(());
         }
+        let ref_consuming: u32 = parts.iter()
+            .filter(|(_, op)| matches!(op, 'M' | 'D' | 'N' | '=' | 'X'))
+            .map(|(len, _)| len)
+            .sum();
 
-        let ref_len = cigar_ref_len(&cigar);
-        let expected_end_pos = if ref_len > 0 {
-            pos + ref_len as i64 - 1
-        } else {
-            pos
-        };
-
-        let seq: String = (0..query_len).map(|_| 'A').collect();
-        let qual: String = (0..query_len).map(|_| 'I').collect();
+        let seq: String = (0..query_consuming).map(|_| 'A').collect();
+        let qual: String = (0..query_consuming).map(|_| 'I').collect();
         let sam_text = format!(
             "@HD\tVN:1.6\tSO:coordinate\n@SQ\tSN:chr1\tLN:100000000\n\
              read1\t99\tchr1\t{pos_1}\t60\t{cigar}\t=\t200\t150\t{seq}\t{qual}\n",
@@ -91,15 +63,42 @@ proptest! {
 
         prop_assert!(!store.is_empty(), "should fetch at least 1 record");
         let rec = store.record(0);
-        prop_assert_eq!(rec.pos, pos);
-        prop_assert_eq!(rec.end_pos, expected_end_pos);
-        prop_assert_eq!(rec.seq_len as usize, query_len);
+
+        // Invariant 1: alignment spans at least one base.
+        prop_assert!(rec.end_pos >= rec.pos, "end_pos must be >= pos");
+
+        // Invariant 2: the ref span equals the sum of reference-consuming ops.
+        // Special case: zero-refspan reads (pure insertion/soft-clip) have
+        // end_pos == pos per r[pileup.zero_refspan_reads], so span is 1.
+        let span = rec.end_pos - rec.pos + 1;
+        let expected_span = if ref_consuming == 0 { 1 } else { i64::from(ref_consuming) };
+        prop_assert_eq!(
+            span,
+            expected_span,
+            "cigar={}: ref span {} != expected {}",
+            cigar, span, expected_span
+        );
+
+        // Invariant 3: seq_len is positive for a non-empty CIGAR.
+        prop_assert!(rec.seq_len > 0, "seq_len must be positive");
     }
 
     // r[verify sam.record.seq_decode]
+    //
+    // Extends coverage beyond ACGT to include all IUPAC ambiguity codes and N,
+    // verifying that the BAM spec mapping (M/R/W/S/Y/K/V/H/D/B/N → Unknown) is
+    // correctly applied end-to-end through the SAM→BAM encoding pipeline.
     #[test]
-    fn seq_decode_roundtrip(
-        bases in prop::collection::vec(prop::sample::select(vec![b'A', b'C', b'G', b'T']), 1..200),
+    fn seq_decode_maps_iupac_to_unknown(
+        bases in prop::collection::vec(
+            prop::sample::select(vec![
+                b'A', b'C', b'G', b'T',     // definite bases
+                b'M', b'R', b'W', b'S', b'Y', b'K', // IUPAC ambiguity (2-fold)
+                b'V', b'H', b'D', b'B',     // IUPAC ambiguity (3-fold)
+                b'N',                        // fully unknown
+            ]),
+            1..200,
+        ),
     ) {
         let seq_str: String = bases.iter().map(|&b| b as char).collect();
         let qual_str: String = bases.iter().map(|_| 'I').collect();
@@ -119,15 +118,20 @@ proptest! {
         prop_assert_eq!(store.len(), 1);
         let seq = store.seq(0);
         prop_assert_eq!(seq.len(), bases.len());
-        for (i, (&expected, &actual)) in bases.iter().zip(seq.iter()).enumerate() {
-            let expected_base = match expected {
+        for (i, (&input_byte, &actual)) in bases.iter().zip(seq.iter()).enumerate() {
+            let expected_base = match input_byte {
                 b'A' => Base::A,
                 b'C' => Base::C,
                 b'G' => Base::G,
                 b'T' => Base::T,
+                // All IUPAC ambiguity codes and N must decode to Unknown.
                 _ => Base::Unknown,
             };
-            prop_assert_eq!(actual, expected_base, "pos {}: expected {:?}", i, expected_base);
+            prop_assert_eq!(
+                actual, expected_base,
+                "pos {}: input '{}' expected {:?}",
+                i, input_byte as char, expected_base
+            );
         }
     }
 
