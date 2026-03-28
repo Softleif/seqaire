@@ -16,85 +16,58 @@ fn test_fasta_path() -> &'static Path {
 
 // r[verify fasta.index.offset_calculation]
 proptest! {
-    /// Consecutive positions must produce strictly increasing byte offsets.
+    /// True end-to-end oracle: build an in-memory FASTA content string from
+    /// generated parameters, then verify that `byte_offset(pos)` points to
+    /// the correct character in the actual FASTA bytes.
     #[test]
-    fn byte_offset_monotonically_increasing(
-        offset in 0u64..10_000,
-        linebases in 1u64..200,
-        extra in 1u64..10,   // linewidth - linebases (newline bytes)
-        pos in 0u64..50_000,
+    fn byte_offset_indexes_correct_character_in_fasta(
+        linebases in 1u64..=80u64,
+        extra in 1u64..=2u64,  // 1 = \n, 2 = \r\n
+        bases in prop::collection::vec(
+            prop::sample::select(vec![b'A', b'C', b'G', b'T']),
+            1..=200usize,
+        ),
     ) {
+        let n_bases = bases.len() as u64;
         let linewidth = linebases + extra;
+
+        // Build the FASTA sequence body: bases with newlines every `linebases`
+        // characters. extra=1 means \n, extra=2 means \r\n.
+        let mut content: Vec<u8> = Vec::new();
+        for (i, &b) in bases.iter().enumerate() {
+            content.push(b);
+            let pos_in_line = (i as u64 + 1) % linebases;
+            // After every `linebases` bases (but not after the very last base),
+            // insert the line ending.
+            if pos_in_line == 0 && (i as u64 + 1) < n_bases {
+                if extra == 2 {
+                    content.push(b'\r');
+                }
+                content.push(b'\n');
+            }
+        }
+
+        // The FaiEntry has offset=0 (sequence starts at byte 0 of content).
         let entry = FaiEntry {
-            name: "test".into(), length: 100_000, offset, linebases, linewidth,
+            name: "test".into(),
+            length: n_bases,
+            offset: 0,
+            linebases,
+            linewidth,
         };
-        let off_a = entry.byte_offset(pos);
-        let off_b = entry.byte_offset(pos + 1);
-        prop_assert!(off_b > off_a,
-            "offset({}) = {} must be < offset({}) = {} (linebases={}, linewidth={})",
-            pos, off_a, pos + 1, off_b, linebases, linewidth);
-    }
 
-    /// The offset of position 0 must equal the entry's raw offset.
-    #[test]
-    fn byte_offset_zero_is_entry_offset(
-        offset in 0u64..1_000_000,
-        linebases in 1u64..200,
-        extra in 1u64..10,
-    ) {
-        let linewidth = linebases + extra;
-        let entry = FaiEntry {
-            name: "test".into(), length: 100_000, offset, linebases, linewidth,
-        };
-        prop_assert_eq!(entry.byte_offset(0), offset);
-    }
-
-    /// Positions on the same line must be contiguous (offset increments by 1).
-    #[test]
-    fn byte_offset_contiguous_within_line(
-        offset in 0u64..10_000,
-        linebases in 2u64..200,
-        extra in 1u64..10,
-        line_num in 0u64..100,
-        pos_in_line in 0u64..198, // will be clamped below
-    ) {
-        let linewidth = linebases + extra;
-        let pos_in_line = pos_in_line % (linebases - 1); // ensure room for next pos
-        let pos = line_num * linebases + pos_in_line;
-
-        let entry = FaiEntry {
-            name: "test".into(), length: 100_000, offset, linebases, linewidth,
-        };
-        let off_a = entry.byte_offset(pos);
-        let off_b = entry.byte_offset(pos + 1);
-        // Same line → difference should be exactly 1
-        prop_assert_eq!(off_b - off_a, 1,
-            "within-line positions {} and {} should differ by 1, got {} and {}",
-            pos, pos + 1, off_a, off_b);
-    }
-
-    /// Crossing a line boundary must skip exactly (linewidth - linebases) bytes.
-    #[test]
-    fn byte_offset_line_boundary_skip(
-        offset in 0u64..10_000,
-        linebases in 1u64..200,
-        extra in 1u64..10,
-        line_num in 0u64..100,
-    ) {
-        let linewidth = linebases + extra;
-        let last_on_line = line_num * linebases + (linebases - 1);
-        let first_on_next = last_on_line + 1;
-
-        let entry = FaiEntry {
-            name: "test".into(), length: 100_000, offset, linebases, linewidth,
-        };
-        let off_last = entry.byte_offset(last_on_line);
-        let off_first = entry.byte_offset(first_on_next);
-
-        // Jump should be 1 (base) + extra (newline chars)
-        prop_assert_eq!(off_first - off_last, 1 + extra,
-            "crossing line boundary from pos {} to {} should skip {} bytes (1 + {}), got {}",
-            last_on_line, first_on_next, 1 + extra, extra, off_first - off_last);
+        for pos in 0..n_bases {
+            let byte_off = entry.byte_offset(pos);
+            let actual_byte = content.get(byte_off as usize).copied();
+            let expected_byte = bases.get(pos as usize).copied();
+            prop_assert_eq!(
+                actual_byte, expected_byte,
+                "byte_offset({}) = {} indexes {:?} but expected {:?} \
+                 (linebases={}, linewidth={}, content_len={})",
+                pos, byte_off, actual_byte, expected_byte,
+                linebases, linewidth, content.len()
+            );
+        }
     }
 }
 

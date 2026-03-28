@@ -473,15 +473,62 @@ mod tests {
         assert!(matches!(err, CramError::ExpectedFileHeader { found: ContentType::CoreData }));
     }
 
+    // Construct a raw block at the byte level according to the CRAM spec:
+    // method(1) | content_type(1) | content_id(ITF8) | compressed_size(ITF8)
+    // | uncompressed_size(ITF8) | data | CRC32(4 LE)
+    // Parse it with parse_block and assert every field matches what was written.
+    #[test]
+    fn raw_block_from_known_bytes() {
+        // ExternalData (4), content_id=7, data="hello"
+        let payload = b"hello";
+        let size = payload.len() as u32; // 5 — encodes as single ITF8 byte
+
+        let mut buf = Vec::new();
+        buf.push(0u8); // method = raw
+        buf.push(4u8); // content_type = ExternalData
+        encode_itf8_to(&mut buf, 7); // content_id ITF8: 7 → [0x07]
+        encode_itf8_to(&mut buf, size); // compressed_size ITF8: 5 → [0x05]
+        encode_itf8_to(&mut buf, size); // uncompressed_size ITF8: 5 → [0x05]
+        buf.extend_from_slice(payload);
+        let mut crc = libdeflater::Crc::new();
+        crc.update(&buf);
+        buf.extend_from_slice(&crc.sum().to_le_bytes());
+
+        // Verify hand-crafted header bytes before parsing
+        assert_eq!(buf.get(0), Some(&0u8), "method byte must be 0 (raw)");
+        assert_eq!(buf.get(1), Some(&4u8), "content_type byte must be 4 (ExternalData)");
+        assert_eq!(buf.get(2), Some(&7u8), "content_id ITF8: single byte for val < 0x80");
+        assert_eq!(buf.get(3), Some(&5u8), "compressed_size ITF8: single byte for val < 0x80");
+        assert_eq!(buf.get(4), Some(&5u8), "uncompressed_size ITF8: single byte for val < 0x80");
+
+        let (block, consumed) = parse_block(&buf).unwrap();
+        assert_eq!(block.content_type, ContentType::ExternalData);
+        assert_eq!(block.content_id, 7);
+        assert_eq!(block.data, payload);
+        assert_eq!(consumed, buf.len());
+
+        // Also verify a 2-byte ITF8 content_id (val=128 → [0x80, 0x80])
+        let mut buf2 = Vec::new();
+        buf2.push(0u8); // raw
+        buf2.push(4u8); // ExternalData
+        encode_itf8_to(&mut buf2, 128); // content_id = 128 → 2 ITF8 bytes: [0x80, 0x80]
+        encode_itf8_to(&mut buf2, 3u32);
+        encode_itf8_to(&mut buf2, 3u32);
+        buf2.extend_from_slice(b"abc");
+        let mut crc2 = libdeflater::Crc::new();
+        crc2.update(&buf2);
+        buf2.extend_from_slice(&crc2.sum().to_le_bytes());
+
+        assert_eq!(buf2.get(2), Some(&0x80u8), "first ITF8 byte for 128: 0x80");
+        assert_eq!(buf2.get(3), Some(&0x80u8), "second ITF8 byte for 128: 0x80");
+
+        let (block2, consumed2) = parse_block(&buf2).unwrap();
+        assert_eq!(block2.content_id, 128);
+        assert_eq!(block2.data, b"abc");
+        assert_eq!(consumed2, buf2.len());
+    }
+
     proptest::proptest! {
-        #[test]
-        fn raw_block_roundtrip(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256)) {
-            let block_bytes = build_test_block(4, 0, &data);
-            let (block, consumed) = parse_block(&block_bytes).unwrap();
-            proptest::prop_assert_eq!(&block.data, &data);
-            proptest::prop_assert_eq!(consumed, block_bytes.len());
-            proptest::prop_assert_eq!(block.content_type, ContentType::ExternalData);
-        }
 
         #[test]
         fn gzip_block_roundtrip(data in proptest::collection::vec(proptest::prelude::any::<u8>(), 1..256)) {

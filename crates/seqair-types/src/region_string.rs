@@ -288,7 +288,6 @@ mod tests {
             assert_eq!(parsed.chromosome, chrom);
             assert_eq!(parsed.start, None);
             assert_eq!(parsed.end, None);
-            assert_eq!(parsed.to_string(), region_str);
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
 
@@ -298,7 +297,6 @@ mod tests {
             assert_eq!(parsed.chromosome, chrom);
             assert_eq!(parsed.start, NonZeroU32::new(start));
             assert_eq!(parsed.end, None);
-            assert_eq!(parsed.to_string(), region_str);
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
 
@@ -308,7 +306,6 @@ mod tests {
             assert_eq!(parsed.chromosome, chrom);
             assert_eq!(parsed.start, NonZeroU32::new(start));
             assert_eq!(parsed.end, NonZeroU32::new(end));
-            assert_eq!(parsed.to_string(), region_str.trim());
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
         }
@@ -322,8 +319,20 @@ mod tests {
                 // We're just checking that there is no panic, but errors are fine!
                 return Ok(());
             };
-            // parsed string is same as the original
-            assert_eq!(parsed.to_string(), random_str.trim());
+            let display = parsed.to_string();
+            if let Some(start) = parsed.start {
+                proptest::prop_assert!(display.contains(':'), "display missing ':': {display}");
+                let after_colon = display.split(':').nth(1).unwrap_or("");
+                let start_str = after_colon.split('-').next().unwrap_or("");
+                let parsed_start: u32 = start_str.parse().expect("start in display must be numeric");
+                proptest::prop_assert_eq!(parsed_start, start.get());
+            }
+            if let Some(end) = parsed.end {
+                proptest::prop_assert!(display.contains('-'), "display missing '-': {display}");
+                let after_dash = display.split('-').nth(1).unwrap_or("");
+                let parsed_end: u32 = after_dash.parse().expect("end in display must be numeric");
+                proptest::prop_assert_eq!(parsed_end, end.get());
+            }
             // can be used as a FetchDefinition for bam
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);

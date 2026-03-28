@@ -502,23 +502,31 @@ mod tests {
 
     proptest::proptest! {
         #[test]
-        fn proptest_from_u8_roundtrip(input: u8) {
+        fn proptest_from_u8_maps_correctly(input: u8) {
             let base = Base::from(input);
-            match base {
-                Base::Unknown => {} // many bytes map to Unknown, no roundtrip guarantee
-                known => {
-                    assert_eq!(*known, (input as char).to_ascii_uppercase() as u8);
-                    // as_u8 roundtrip: from_u8(discriminant) recovers the same base
-                    let discriminant = *known;
-                    proptest::prop_assert_eq!(Base::from(discriminant), known);
-                }
-            }
+            let expected = match input {
+                b'A' | b'a' => Base::A,
+                b'C' | b'c' => Base::C,
+                b'G' | b'g' => Base::G,
+                b'T' | b't' => Base::T,
+                _ => Base::Unknown,
+            };
+            proptest::prop_assert_eq!(base, expected);
         }
 
         #[test]
-        fn proptest_from_str_roundtrip(input in "[ACGTNacgtn]") {
+        fn proptest_from_str_maps_to_correct_variant(input in "[ACGTNacgtn]") {
             let base = Base::from_str(&input).expect("valid single base char");
-            assert_eq!(*base, input.to_ascii_uppercase().as_bytes()[0]);
+            let ch = input.chars().next().expect("non-empty string");
+            let expected = match ch {
+                'A' | 'a' => Base::A,
+                'C' | 'c' => Base::C,
+                'G' | 'g' => Base::G,
+                'T' | 't' => Base::T,
+                'N' | 'n' => Base::Unknown,
+                _ => unreachable!("regex guarantees only ACGTNacgtn"),
+            };
+            proptest::prop_assert_eq!(base, expected);
         }
 
         #[test]

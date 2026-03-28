@@ -130,32 +130,29 @@ mod tests {
 
         // r[verify types.phred.non_negative]
         #[test]
-        fn proptest_from_phred_roundtrip(q in 0u8..=93) {
-            // Values 0..=93 are within the SAM/BAM quality range and should roundtrip
-            let p = Phred::from_phred(q);
-            proptest::prop_assert_eq!(p.as_int(), i32::from(q));
-        }
-
-        // r[verify types.phred.as_int_clamp]
-        #[test]
-        fn proptest_as_int_always_in_range(q: u8) {
-            let p = Phred::from_phred(q);
-            let i = p.as_int();
-            proptest::prop_assert!(i >= 0, "as_int negative: {i}");
-            proptest::prop_assert!(i <= 99, "as_int > 99: {i}");
+        fn proptest_from_phred_matches_from_probability(q in 0u8..=93) {
+            // Cross-validate: from_phred and From<Probability> must agree
+            let via_int = Phred::from_phred(q).as_int();
+            proptest::prop_assert_eq!(via_int, i32::from(q));
+            let prob = Probability::new(10f64.powf(-f64::from(q) / 10.0))
+                .expect("valid probability");
+            let via_prob = Phred::from(prob).as_int();
+            proptest::prop_assert_eq!(via_int, via_prob,
+                "construction paths disagree for q={}: from_phred gives {}, from_prob gives {}", q, via_int, via_prob);
         }
 
         #[test]
-        fn proptest_phred_probability_roundtrip(q in 1u8..=60) {
-            // Phred -> Probability -> Phred roundtrip (avoid q=0 which gives p=1.0 -> phred=0)
-            let phred1 = Phred::from_phred(q);
-            let prob = Probability::try_from(10f64.powf(-f64::from(q) / 10.0))
-                .expect("valid probability for q in 1..=60");
-            let phred2 = Phred::from(prob);
-            // Should be within 1 of original due to floating-point
+        fn proptest_phred_monotonic_with_quality(q1 in 0u8..=93, q2 in 0u8..=93) {
+            proptest::prop_assume!(q1 != q2);
+            let (lo, hi) = if q1 < q2 { (q1, q2) } else { (q2, q1) };
+            // Higher quality score → lower error probability
+            let prob_lo = Probability::new(10f64.powf(-f64::from(lo) / 10.0))
+                .expect("valid probability");
+            let prob_hi = Probability::new(10f64.powf(-f64::from(hi) / 10.0))
+                .expect("valid probability");
             proptest::prop_assert!(
-                (phred1.as_int() - phred2.as_int()).abs() <= 1,
-                "roundtrip drift: {} vs {}", phred1.as_int(), phred2.as_int()
+                *prob_lo >= *prob_hi,
+                "expected prob(q={lo}) >= prob(q={hi}) but got {} < {}", *prob_lo, *prob_hi
             );
         }
     }

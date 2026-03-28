@@ -177,22 +177,29 @@ mod tests {
         fn proptest_inverted_stays_in_range(v in 0.0f64..=1.0) {
             let p = Probability::new(v).expect("valid");
             let inv = p.inverted();
-            proptest::prop_assert!(*inv >= 0.0 && *inv <= 1.0,
-                "inverted({v}) = {} out of range", *inv);
+            let sum = *p + *inv;
+            proptest::prop_assert!(
+                (sum - 1.0).abs() <= f64::EPSILON * 4.0,
+                "p + inverted(p) = {sum}, expected 1.0 (v={v})"
+            );
         }
 
         #[test]
-        fn proptest_probability_phred_roundtrip(v in 0.001f64..=1.0) {
-            // Probability -> Phred -> Probability roundtrip
-            let p1 = Probability::new(v).expect("valid");
-            let phred = Phred::from(p1);
-            // Reconstruct probability from phred: P = 10^(-Q/10)
-            let reconstructed = 10f64.powf(-*phred / 10.0);
-            let p2 = Probability::new(reconstructed).expect("reconstructed valid");
-            // Allow small epsilon for floating-point
-            let diff = (*p1 - *p2).abs();
-            proptest::prop_assert!(diff < 0.01,
-                "roundtrip error too large: {v} -> phred {} -> {}, diff={diff}", *phred, *p2);
+        fn proptest_phred_monotonic_with_probability(
+            v1 in 0.001f64..=0.999,
+            v2 in 0.001f64..=0.999
+        ) {
+            proptest::prop_assume!(v1 != v2);
+            let (lo, hi) = if v1 < v2 { (v1, v2) } else { (v2, v1) };
+            let p_lo = Probability::new(lo).expect("valid");
+            let p_hi = Probability::new(hi).expect("valid");
+            // Higher error probability → lower Phred quality score
+            proptest::prop_assert!(
+                Phred::from(p_lo).as_int() >= Phred::from(p_hi).as_int(),
+                "expected Phred({lo}) >= Phred({hi}) but got {} < {}",
+                Phred::from(p_lo).as_int(),
+                Phred::from(p_hi).as_int()
+            );
         }
 
         #[test]

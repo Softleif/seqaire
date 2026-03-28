@@ -137,21 +137,36 @@ mod tests {
     }
 
     proptest! {
+        // Read each bit individually and check it matches (byte >> (7 - i)) & 1,
+        // verifying that bits are read MSB-first.
         #[test]
-        fn roundtrip_byte_values(byte: u8) {
+        fn individual_bits_match_msb_order(byte: u8) {
             let data = [byte];
             let mut reader = BitReader::new(&data);
-            let val = reader.read_bits(8).unwrap();
-            prop_assert_eq!(val, u32::from(byte));
+            for i in 0u8..8 {
+                let expected = (byte >> (7 - i)) & 1;
+                let got = reader.read_bit().unwrap();
+                prop_assert_eq!(got, expected, "bit {} of byte {:#010b}", i, byte);
+            }
+            prop_assert_eq!(reader.read_bit(), None);
         }
 
+        // Read 16 individual bits from a 2-byte buffer and verify the MSB-first bit pattern.
         #[test]
-        fn roundtrip_u16_values(hi: u8, lo: u8) {
+        fn u16_individual_bits_match_msb_order(hi: u8, lo: u8) {
             let data = [hi, lo];
             let mut reader = BitReader::new(&data);
-            let val = reader.read_bits(16).unwrap();
-            let expected = (u32::from(hi) << 8) | u32::from(lo);
-            prop_assert_eq!(val, expected);
+            for i in 0u8..8 {
+                let expected = (hi >> (7 - i)) & 1;
+                let got = reader.read_bit().unwrap();
+                prop_assert_eq!(got, expected, "hi bit {} of {:#010b}", i, hi);
+            }
+            for i in 0u8..8 {
+                let expected = (lo >> (7 - i)) & 1;
+                let got = reader.read_bit().unwrap();
+                prop_assert_eq!(got, expected, "lo bit {} of {:#010b}", i, lo);
+            }
+            prop_assert_eq!(reader.read_bit(), None);
         }
 
         #[test]

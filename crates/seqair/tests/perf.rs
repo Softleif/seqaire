@@ -15,26 +15,41 @@ use seqair::bam::{RecordStore, cigar::CigarIndex, pileup::PileupEngine};
 // r[verify perf.reuse_alignment_vec+2]
 proptest! {
     #[test]
-    fn reused_alignment_vec_produces_correct_depth(
+    fn reused_vec_depth_matches_sweep_line(
         records in prop::collection::vec((0i32..200, 20u32..=80), 2..=15),
     ) {
-        // Sort by position to match fetch_into's coordinate-sorted guarantee
+        // Sort by position to match fetch_into's coordinate-sorted guarantee.
         let mut sorted_records = records.clone();
         sorted_records.sort_by_key(|&(offset, _)| offset);
 
         let mut arena = RecordStore::new();
-        let mut intervals: Vec<(i64, i64)> = Vec::new();
+        // Sweep-line: +1 at read start, -1 at read end+1. Prefix sum = depth.
+        const MAX_POS: usize = 301;
+        let mut delta = vec![0i32; MAX_POS + 1];
         for &(offset, len) in &sorted_records {
+            let start = offset as usize;
+            let end_excl = (offset as usize + len as usize).min(MAX_POS);
+            if start < MAX_POS {
+                delta[start] += 1;
+            }
+            if end_excl <= MAX_POS {
+                delta[end_excl] -= 1;
+            }
             arena.push_raw(&make_record(0, offset, 99, 60, len)).unwrap();
-            intervals.push((i64::from(offset), i64::from(offset) + i64::from(len) - 1));
+        }
+
+        let mut expected_depth = vec![0usize; MAX_POS];
+        let mut running = 0i32;
+        for (i, &d) in delta.iter().enumerate().take(MAX_POS) {
+            running += d;
+            expected_depth[i] = running.max(0) as usize;
         }
 
         let engine = PileupEngine::new(arena, 0, 300);
         for col in engine {
-            let expected = intervals.iter()
-                .filter(|&&(s, e)| col.pos() >= s && col.pos() <= e)
-                .count();
-            prop_assert_eq!(col.depth(), expected, "depth wrong at pos {}", col.pos());
+            let pos = col.pos() as usize;
+            let exp = expected_depth.get(pos).copied().unwrap_or(0);
+            prop_assert_eq!(col.depth(), exp, "depth wrong at pos {}", col.pos());
         }
     }
 }
@@ -151,31 +166,65 @@ fn precomputed_matches_indels_accessible_from_record() {
 // r[verify perf.precompute_matches_indels]
 proptest! {
     #[test]
-    fn precomputed_matches_indels_consistent_with_calc(
-        n_match in 1u32..=200,
-        n_ins in 0u32..=20,
-        n_del in 0u32..=20,
+    fn matches_indels_from_varied_cigar_ops(
+        // Generate a sequence of (op_type, length) pairs from {M=0, I=1, D=2, S=4}.
+        // S is only valid at the ends, so we place it as leading/trailing clips.
+        leading_clip in 0u32..=10,
+        trailing_clip in 0u32..=10,
+        inner_ops in prop::collection::vec(
+            (prop::sample::select(vec![0u8, 1u8, 2u8]), 1u32..=50u32),
+            1..=8,
+        ),
     ) {
-        let mut ops = vec![cigar_op(n_match, 0)];
-        let mut seq_len = n_match;
-        if n_ins > 0 {
-            ops.push(cigar_op(n_ins, 1));
-            seq_len += n_ins;
+        // Build CIGAR: optional leading S, inner ops {M,I,D}, optional trailing S.
+        // Per r[cigar.matches_indels]: matching_bases = sum of M(0) lengths only,
+        // indel_bases = sum of I(1) + D(2) lengths.
+        let mut ops: Vec<u32> = Vec::new();
+        let mut seq_len = 0u32;
+
+        if leading_clip > 0 {
+            ops.push(cigar_op(leading_clip, 4)); // S
+            seq_len += leading_clip;
         }
-        if n_del > 0 {
-            ops.push(cigar_op(n_del, 2));
+
+        // Ensure at least one M op so the record has a ref-consuming op.
+        let mut has_m = false;
+        let mut exp_matches = 0u32;
+        let mut exp_indels = 0u32;
+
+        for &(op_type, len) in &inner_ops {
+            ops.push(cigar_op(len, op_type));
+            match op_type {
+                0 => { exp_matches += len; seq_len += len; has_m = true; }
+                1 => { exp_indels += len; seq_len += len; }
+                2 => { exp_indels += len; } // D consumes ref, not query
+                _ => {}
+            }
         }
-        // Add trailing match so record is valid
-        ops.push(cigar_op(10, 0));
-        seq_len += 10;
+
+        // Guarantee at least one M op so the record is usable.
+        if !has_m {
+            ops.push(cigar_op(1, 0)); // M
+            seq_len += 1;
+            exp_matches += 1;
+        }
+
+        if trailing_clip > 0 {
+            ops.push(cigar_op(trailing_clip, 4)); // S
+            seq_len += trailing_clip;
+        }
+
+        prop_assume!(seq_len > 0);
 
         let raw = make_record_with_cigar(0, 0, 99, 60, &ops, seq_len);
         let mut arena = RecordStore::new();
         arena.push_raw(&raw).unwrap();
         let r = arena.record(0);
 
-        prop_assert_eq!(r.matching_bases, n_match + 10);
-        prop_assert_eq!(r.indel_bases, n_ins + n_del);
+        prop_assert_eq!(r.matching_bases, exp_matches,
+            "matching_bases mismatch for ops={:?}", inner_ops);
+        prop_assert_eq!(r.indel_bases, exp_indels,
+            "indel_bases mismatch for ops={:?}", inner_ops);
     }
 }
 
