@@ -223,6 +223,7 @@ pub(crate) struct CompactOp {
 }
 
 impl CigarMapping {
+    #[inline]
     pub(crate) fn new(rec_pos: i64, cigar_bytes: &[u8]) -> Self {
         match try_linear(cigar_bytes) {
             Some((query_offset, match_len)) => Self::Linear { rec_pos, query_offset, match_len },
@@ -230,6 +231,7 @@ impl CigarMapping {
         }
     }
 
+    #[inline]
     pub(crate) fn qpos_at(&self, pos: i64) -> Option<usize> {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => {
@@ -256,6 +258,7 @@ impl CigarMapping {
 /// Returns `(query_offset, match_len)` where `query_offset` is the leading soft-clip length
 /// and `match_len` is the total length of the contiguous match/seq-match/seq-mismatch block.
 /// Returns `None` for CIGARs with insertions, deletions, or multiple disjoint match regions.
+#[inline]
 fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     let n_ops = cigar_bytes.len() / 4;
     let mut query_offset = 0u32;
