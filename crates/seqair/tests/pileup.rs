@@ -4,7 +4,9 @@ mod helpers;
 
 use helpers::{cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
+use seqair::bam::pileup::RefSeq;
 use seqair::bam::{RecordStore, pileup::PileupEngine};
+use seqair_types::Base;
 use std::{cell::Cell, rc::Rc};
 
 // ---- pileup.active_set + pileup.column_contents ----
@@ -414,6 +416,203 @@ proptest! {
         // Should produce exactly `len` columns, not `len + trailing`
         prop_assert_eq!(columns.len(), len as usize,
             "should terminate after last record, not iterate {} trailing positions", trailing);
+    }
+}
+
+// ---- reference_base propagation ----
+
+// r[verify pileup.column_contents]
+#[test]
+fn reference_base_matches_ref_seq() {
+    let ref_bases: Vec<Base> = vec![
+        Base::A,
+        Base::C,
+        Base::G,
+        Base::T,
+        Base::A,
+        Base::C,
+        Base::G,
+        Base::T,
+        Base::A,
+        Base::C,
+    ];
+    let ref_seq = RefSeq::new(Rc::from(ref_bases.as_slice()), 100);
+
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap();
+
+    let mut engine = PileupEngine::new(arena, 100, 109);
+    engine.set_reference_seq(ref_seq);
+    let columns: Vec<_> = engine.collect();
+
+    assert_eq!(columns.len(), 10);
+    for (i, col) in columns.iter().enumerate() {
+        assert_eq!(
+            col.reference_base(),
+            ref_bases[i],
+            "reference_base mismatch at pos {}",
+            col.pos()
+        );
+    }
+}
+
+// r[verify pileup.column_contents]
+#[test]
+fn reference_base_unknown_without_ref_seq() {
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 5)).unwrap();
+
+    let engine = PileupEngine::new(arena, 0, 4);
+    for col in engine {
+        assert_eq!(col.reference_base(), Base::Unknown, "should be Unknown when no ref_seq set");
+    }
+}
+
+// ---- combined filter + dedup + max_depth ----
+
+// r[verify pileup.read_filter]
+// r[verify dedup.per_position]
+// r[verify pileup.max_depth]
+#[test]
+fn filter_dedup_max_depth_combined() {
+    use helpers::{BASE_A, make_named_record, pack_bases};
+
+    let mut arena = RecordStore::new();
+    let first: u16 = 0x41; // paired + first_in_template
+    let second: u16 = 0x81; // paired + second_in_template
+
+    let push = |arena: &mut RecordStore, name: &[u8], flags: u16| {
+        let packed = vec![pack_bases(BASE_A, BASE_A); 10];
+        let raw = make_named_record(name, 0, 0, flags, 60, 20, &packed);
+        arena.push_raw(&raw).unwrap();
+    };
+
+    // 3 proper pairs (6 reads)
+    for i in 0..3u8 {
+        let name = [b'r', b'0' + i];
+        push(&mut arena, &name, first);
+        push(&mut arena, &name, second);
+    }
+    // 2 reads that will be filtered (secondary flag 0x100)
+    arena.push_raw(&make_record(0, 0, 0x100 | 99, 60, 20)).unwrap();
+    arena.push_raw(&make_record(0, 0, 0x100 | 99, 60, 20)).unwrap();
+
+    let mut engine = PileupEngine::new(arena, 0, 19);
+    engine.set_filter(|flags, _| flags & 0x100 == 0); // exclude secondary
+    engine.set_dedup_overlapping();
+    engine.set_max_depth(2);
+
+    let columns: Vec<_> = engine.collect();
+    let col = columns.first().unwrap();
+    // 8 total → filter removes 2 secondary → 6 remain → dedup 3 pairs → 3 → max_depth caps to 2
+    assert_eq!(col.depth(), 2, "filter→dedup→max_depth should yield 2");
+}
+
+// ---- take_store reuse ----
+
+#[test]
+fn take_store_reuse_across_regions() {
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 10)).unwrap();
+
+    // Drive the engine to completion without consuming it via collect().
+    let mut engine = PileupEngine::new(arena, 0, 9);
+    let mut count = 0usize;
+    while engine.next().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 10);
+
+    let mut store = engine.take_store().expect("store should be available");
+    assert!(store.is_empty(), "store should be cleared after take");
+    assert!(store.records_capacity() > 0, "capacity should be retained");
+
+    store.push_raw(&make_record(0, 100, 99, 60, 5)).unwrap();
+    let engine2 = PileupEngine::new(store, 100, 104);
+    let columns2: Vec<_> = engine2.collect();
+    assert_eq!(columns2.len(), 5);
+    assert_eq!(columns2[0].pos(), 100);
+}
+
+#[test]
+fn take_store_returns_none_after_second_take() {
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 5)).unwrap();
+
+    let mut engine = PileupEngine::new(arena, 0, 4);
+    while engine.next().is_some() {}
+
+    let store = engine.take_store();
+    assert!(store.is_some());
+
+    let store2 = engine.take_store();
+    assert!(store2.is_none(), "second take_store should return None");
+}
+
+// ---- region boundary behavior ----
+
+// r[verify pileup.active_set]
+proptest! {
+    #[test]
+    fn read_starting_before_region_contributes_within(
+        read_start in 0i32..50,
+        read_len in 60u32..=100,
+        region_start_offset in 10i64..=40,
+    ) {
+        let mut arena = RecordStore::new();
+        arena.push_raw(&make_record(0, read_start, 99, 60, read_len)).unwrap();
+
+        let region_start = i64::from(read_start) + region_start_offset;
+        let region_end = i64::from(read_start) + i64::from(read_len) - 1;
+        let engine = PileupEngine::new(arena, region_start, region_end);
+        let columns: Vec<_> = engine.collect();
+
+        if !columns.is_empty() {
+            prop_assert_eq!(columns[0].pos(), region_start,
+                "first column should be at region_start");
+        }
+        for col in &columns {
+            prop_assert!(col.pos() >= region_start, "no column before region_start");
+            prop_assert!(col.pos() <= region_end, "no column after region_end");
+        }
+    }
+}
+
+// r[verify pileup.active_set]
+#[test]
+fn read_extending_past_region_end_is_truncated() {
+    let mut arena = RecordStore::new();
+    arena.push_raw(&make_record(0, 0, 99, 60, 100)).unwrap();
+
+    // Region only covers positions 0-9, but read covers 0-99
+    let engine = PileupEngine::new(arena, 0, 9);
+    let columns: Vec<_> = engine.collect();
+    assert_eq!(columns.len(), 10);
+    assert_eq!(columns.last().unwrap().pos(), 9, "last column at region_end");
+}
+
+// ---- unmapped exclusion with complex reads ----
+
+// r[verify pileup.unmapped_excluded]
+proptest! {
+    #[test]
+    fn unmapped_reads_never_appear_in_columns(
+        n_mapped in 1usize..=8,
+        n_unmapped in 1usize..=5,
+    ) {
+        let mut arena = RecordStore::new();
+        for _ in 0..n_mapped {
+            arena.push_raw(&make_record(0, 0, 99, 60, 20)).unwrap();
+        }
+        for _ in 0..n_unmapped {
+            arena.push_raw(&make_record(0, 0, 0x4, 60, 20)).unwrap(); // unmapped flag
+        }
+
+        let engine = PileupEngine::new(arena, 0, 19);
+        for col in engine {
+            prop_assert_eq!(col.depth(), n_mapped,
+                "unmapped reads should be excluded, expected {} at pos {}", n_mapped, col.pos());
+        }
     }
 }
 
