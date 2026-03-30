@@ -251,6 +251,12 @@ impl IndexedBamReader {
         let cache_injected = self.chunk_cache.inject_overlapping(tid, start, end, store)?;
         accepted += cache_injected;
 
+        // Cache records may have earlier positions than nearby records.
+        // The pileup engine assumes position-sorted order.
+        if cache_injected > 0 {
+            store.sort_by_pos();
+        }
+
         tracing::debug!(
             target: super::region_buf::PROFILE_TARGET,
             accepted,
@@ -260,11 +266,6 @@ impl IndexedBamReader {
             skipped_unmapped,
             skipped_out_of_range,
             "fetch_into",
-        );
-
-        eprintln!(
-            "[DIAG] fetch_into tid={tid} [{start},{end}]: nearby={nearby_count} cache_injected={cache_injected} total={accepted} store_len={}",
-            store.len()
         );
 
         tracing::debug!(

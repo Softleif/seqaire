@@ -823,3 +823,58 @@ proptest! {
         }
     }
 }
+
+/// When chunk cache records are appended after nearby records, the store
+/// contains records out of position order. The pileup engine must still
+/// include all records that overlap a given position.
+///
+/// This simulates the real-world scenario where BAM index bins at
+/// different levels produce overlapping file regions, causing distant-bin
+/// records (with earlier positions) to be appended after nearby records.
+#[test]
+fn pileup_includes_out_of_order_records() {
+    let mut store = RecordStore::new();
+
+    // "Nearby" records: positions 100, 200
+    let r1 = make_record(0, 100, 0x63, 60, 50); // pos=100, 50M → covers 100..150
+    let r2 = make_record(0, 200, 0x63, 60, 50); // pos=200, 50M → covers 200..250
+
+    // "Distant bin" record appended AFTER nearby records,
+    // but has an EARLIER position that overlaps both nearby reads' range
+    let r3 = make_record(0, 80, 0x63, 60, 200); // pos=80, 200M → covers 80..280
+
+    store.push_raw(&r1).unwrap();
+    store.push_raw(&r2).unwrap();
+    store.push_raw(&r3).unwrap(); // appended last, but starts at 80
+
+    // Reproduce the fix: sort_by_pos restores the position-sorted invariant
+    // that the pileup engine requires (same as fetch_into does after cache injection)
+    store.sort_by_pos();
+
+    let engine =
+        PileupEngine::new(store, Pos::<Zero>::new(80).unwrap(), Pos::<Zero>::new(280).unwrap());
+    let columns: Vec<_> = engine.collect();
+
+    // At positions 100..150, all three reads should be active:
+    // r1 (100..150), r3 (80..280), and optionally r2 doesn't reach here
+    let col_at_120 = columns.iter().find(|c| c.pos().get() == 120).expect("column at 120");
+    assert_eq!(
+        col_at_120.depth(),
+        2,
+        "expected r1 + r3 at pos 120, got depth {}",
+        col_at_120.depth()
+    );
+
+    // At positions 200..250, r2 and r3 should both be active
+    let col_at_220 = columns.iter().find(|c| c.pos().get() == 220).expect("column at 220");
+    assert_eq!(
+        col_at_220.depth(),
+        2,
+        "expected r2 + r3 at pos 220, got depth {}",
+        col_at_220.depth()
+    );
+
+    // At position 90, only r3 should be active
+    let col_at_90 = columns.iter().find(|c| c.pos().get() == 90).expect("column at 90");
+    assert_eq!(col_at_90.depth(), 1, "expected only r3 at pos 90, got depth {}", col_at_90.depth());
+}

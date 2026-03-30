@@ -176,6 +176,16 @@ impl RecordStore {
         Ok(idx)
     }
 
+    /// Sort records by reference position.
+    ///
+    /// The pileup engine iterates records in store order and assumes they
+    /// are sorted by position. After injecting chunk-cache records (which
+    /// may have earlier positions), this must be called to restore the
+    /// invariant.
+    pub fn sort_by_pos(&mut self) {
+        self.records.sort_by_key(|r| r.pos);
+    }
+
     // r[impl unified.record_store_push]
     // r[impl record_store.push_fields]
     // r[impl unified.push_fields_equivalence]
