@@ -252,9 +252,11 @@ impl IndexedBamReader {
         accepted += cache_injected;
 
         // Cache records may have earlier positions than nearby records.
-        // The pileup engine assumes position-sorted order.
+        // The pileup engine assumes position-sorted order. Nearby and
+        // distant chunks can also overlap in file space, duplicating records.
         if cache_injected > 0 {
             store.sort_by_pos();
+            store.dedup();
         }
 
         tracing::debug!(

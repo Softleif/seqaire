@@ -186,6 +186,23 @@ impl RecordStore {
         self.records.sort_by_key(|r| r.pos);
     }
 
+    /// Remove consecutive duplicate records (same position, flags, and read
+    /// name). Must be called after `sort_by_pos` so duplicates are adjacent.
+    ///
+    /// Nearby and distant BAM index chunks can cover overlapping byte ranges,
+    /// causing the same record to be loaded from both sources.
+    /// Slab data for removed records is left in place (minor waste).
+    pub fn dedup(&mut self) {
+        let names = &self.names;
+        self.records.dedup_by(|a, b| {
+            a.pos == b.pos
+                && a.flags == b.flags
+                && a.name_len == b.name_len
+                && names[a.name_off as usize..a.name_off as usize + a.name_len as usize]
+                    == names[b.name_off as usize..b.name_off as usize + b.name_len as usize]
+        });
+    }
+
     // r[impl unified.record_store_push]
     // r[impl record_store.push_fields]
     // r[impl unified.push_fields_equivalence]

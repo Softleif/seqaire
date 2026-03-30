@@ -878,3 +878,33 @@ fn pileup_includes_out_of_order_records() {
     let col_at_90 = columns.iter().find(|c| c.pos().get() == 90).expect("column at 90");
     assert_eq!(col_at_90.depth(), 1, "expected only r3 at pos 90, got depth {}", col_at_90.depth());
 }
+
+/// When nearby and distant BAM index chunks overlap in file space, the same
+/// record can be loaded from both sources. After sort + dedup, each record
+/// must appear exactly once in the pileup.
+#[test]
+fn pileup_deduplicates_cross_category_records() {
+    let mut store = RecordStore::new();
+
+    // Two unique records
+    let r1 = make_record(0, 100, 0x63, 60, 50); // pos=100, 50M
+    let r2 = make_record(0, 120, 0xA3, 60, 50); // pos=120, 50M, different flags
+
+    // Simulate r1 loaded from both nearby (first) and distant cache (second)
+    let r1_dup = make_record(0, 100, 0x63, 60, 50); // same record
+
+    store.push_raw(&r1).unwrap();
+    store.push_raw(&r2).unwrap();
+    store.push_raw(&r1_dup).unwrap(); // duplicate from cache
+
+    store.sort_by_pos();
+    store.dedup();
+
+    let engine =
+        PileupEngine::new(store, Pos::<Zero>::new(100).unwrap(), Pos::<Zero>::new(170).unwrap());
+    let columns: Vec<_> = engine.collect();
+
+    // At position 120, both r1 and r2 cover it, but r1 should appear only once
+    let col = columns.iter().find(|c| c.pos().get() == 130).expect("column at 130");
+    assert_eq!(col.depth(), 2, "expected exactly 2 (r1 + r2) after dedup, got {}", col.depth());
+}
