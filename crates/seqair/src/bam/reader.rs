@@ -97,7 +97,7 @@ pub struct IndexedBamReader {
     bulk_reader: File,
     shared: Arc<BamShared>,
     /// Per-tid cache for records from distant bins (levels 0–2, ≥8 Mbp).
-    chunk_cache: ChunkCache,
+    _chunk_cache: ChunkCache,
 }
 
 impl std::fmt::Debug for IndexedBamReader {
@@ -121,7 +121,7 @@ impl IndexedBamReader {
         Ok(IndexedBamReader {
             bulk_reader: bulk_file,
             shared: Arc::new(BamShared { index, header, bam_path: path.to_path_buf() }),
-            chunk_cache: ChunkCache::default(),
+            _chunk_cache: ChunkCache::default(),
         })
     }
 
@@ -137,7 +137,7 @@ impl IndexedBamReader {
         Ok(IndexedBamReader {
             bulk_reader: bulk_file,
             shared: Arc::clone(&self.shared),
-            chunk_cache: ChunkCache::default(),
+            _chunk_cache: ChunkCache::default(),
         })
     }
 
@@ -167,15 +167,9 @@ impl IndexedBamReader {
     ) -> Result<usize, BamError> {
         store.clear();
 
-        let query = self.shared.index.query_split(tid, start, end);
-        if query.nearby.is_empty() && query.distant.is_empty() {
+        let chunks = self.shared.index.query(tid, start, end);
+        if chunks.is_empty() {
             return Ok(0);
-        }
-
-        // Lazily load ALL bin 0 records for this tid (once per chromosome).
-        if !query.distant.is_empty() && self.chunk_cache.tid != Some(tid) {
-            let all_distant = self.shared.index.distant_chunks(tid);
-            self.chunk_cache.load(&mut self.bulk_reader, tid, &all_distant)?;
         }
 
         let tid_i32 = validate_tid(tid)?;
@@ -185,14 +179,14 @@ impl IndexedBamReader {
         let mut skipped_out_of_range: u32 = 0;
         let mut accepted: u32 = 0;
 
-        if !query.nearby.is_empty() {
-            let mut region = RegionBuf::load(&mut self.bulk_reader, &query.nearby)?;
+        {
+            let mut region = RegionBuf::load(&mut self.bulk_reader, &chunks)?;
 
             // Scratch buffer for the rare case where a record body straddles a BGZF
             // block boundary; zero-copy slice from RegionBuf::buf is used otherwise.
             let mut scratch: Vec<u8> = Vec::new();
 
-            for chunk in &query.nearby {
+            for chunk in &chunks {
                 region.seek_virtual(chunk.begin)?;
 
                 loop {
@@ -245,25 +239,9 @@ impl IndexedBamReader {
             }
         }
 
-        let nearby_count = accepted;
-
-        // Inject matching records from the distant-bin cache.
-        let cache_injected = self.chunk_cache.inject_overlapping(tid, start, end, store)?;
-        accepted += cache_injected;
-
-        // Cache records may have earlier positions than nearby records.
-        // The pileup engine assumes position-sorted order. Nearby and
-        // distant chunks can also overlap in file space, duplicating records.
-        if cache_injected > 0 {
-            store.sort_by_pos();
-            store.dedup();
-        }
-
         tracing::debug!(
             target: super::region_buf::PROFILE_TARGET,
             accepted,
-            nearby_count,
-            cache_injected,
             skipped_tid,
             skipped_unmapped,
             skipped_out_of_range,
