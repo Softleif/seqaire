@@ -4,6 +4,17 @@ In paired-end sequencing, two reads (mates) are generated from opposite ends of 
 
 > **Sources:** Seqair-specific design with no upstream spec counterpart. Mate detection relies on QNAME matching as defined in [SAM1] §1.4. The first-in-template / second-in-template distinction uses FLAG bits 0x40 and 0x80 defined in [SAM1] §1.4. See [references.md](references.md).
 
+> **Note on usage by rastair:** Rastair does NOT use seqair's built-in overlap
+> dedup (`set_dedup_overlapping`). Instead, it performs dedup in its own code
+> after per-position base quality filtering, using a name-based collector that
+> matches the htslib code path. This is because htslib applies quality/masking
+> filters *before* overlap dedup, so a low-quality mate is filtered out first
+> and never triggers pair matching. Seqair's engine-level dedup runs before
+> per-position quality filtering, which can incorrectly remove a good mate
+> when its pair has low quality at that specific position. The spec below
+> documents seqair's built-in behavior, which remains available for other
+> consumers that filter before creating the pileup engine.
+
 For example, with 150bp reads from a 200bp fragment, positions 50–150 are covered by both mates. At each of these positions, the pileup would show two observations from the same molecule. Deduplication removes one mate at each overlapping position, keeping the observation count honest.
 
 ## Opt-in behavior

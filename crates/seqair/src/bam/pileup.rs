@@ -315,6 +315,11 @@ impl PileupEngine {
         diff.max(0) as usize
     }
 
+    /// Borrow the underlying `RecordStore` for qname lookups during iteration.
+    pub fn store(&self) -> &RecordStore {
+        &self.store
+    }
+
     /// Take the `RecordStore` out for reuse. Returns `None` if already taken.
     ///
     /// Call this after iteration is complete. The returned store retains its
