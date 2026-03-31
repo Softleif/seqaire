@@ -578,35 +578,38 @@ fn dedup_overlapping_pairs(
             let this_base = alignments[aln_idx].base();
             let mate_base = alignments[mate_aln_idx].base();
 
-            // Overlap resolution policy — matches htslib's resolve_pair():
+            // Overlap resolution policy — matches rastair's resolve_pair():
             //
-            // Same base (or both no-base): remove later-encountered read.
-            // Since mates with the same base at a position are interchangeable,
-            // we just keep whichever was seen first in the alignments list.
+            // All cases: keep first-in-template (remove second-in-template).
+            // This is deterministic regardless of iteration order, ensuring
+            // the htslib and seqair pileup engines produce identical output.
             //
-            // Different base: keep first-in-template (FLAG 0x40).
-            // When mates disagree, we trust the primary read. htslib uses
-            // "is second in pair" to decide; the logic is equivalent.
+            // When mates disagree on the base, first-in-template is trusted.
+            // When mates agree, either would be correct; first-in-template is
+            // the deterministic tie-breaker.
             //
-            // No-base vs base: the read with a base is always kept.
-            // The no-base read (deletion/refskip) doesn't contribute to
-            // the pileup at this position, so it's the natural choice to remove.
+            // Special cases:
+            // - No-base vs base: the read with a base is always kept.
+            // - Both no-base: keep first-in-template.
+            // - Both same template position (rare): keep first-encountered.
+            let this_is_second = alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0;
+            let mate_is_second = alignments[mate_aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0;
             let remove_this = match (this_base, mate_base) {
-                (Some(tb), Some(mb)) => {
-                    if tb != mb {
-                        // Different bases: keep first-in-template (remove second)
-                        alignments[aln_idx].flags & FLAG_SECOND_IN_TEMPLATE != 0
-                    } else {
-                        // Same base: keep first encountered (remove this, the later one)
-                        true
-                    }
-                }
                 // This has no base, mate has base → remove this
                 (None, Some(_)) => true,
                 // This has base, mate has no base → keep this
                 (Some(_), None) => false,
-                // Both no base → keep first encountered
-                (None, None) => true,
+                // Both have base (same or different) or both no base:
+                // keep first-in-template
+                _ => {
+                    if this_is_second && !mate_is_second {
+                        true // this is second → remove this
+                    } else if !this_is_second && mate_is_second {
+                        false // mate is second → remove mate
+                    } else {
+                        true // both same flag → remove later-encountered
+                    }
+                }
             };
 
             if remove_this {
