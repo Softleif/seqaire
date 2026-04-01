@@ -15,6 +15,9 @@ arbitrary = { version = "1", features = ["derive"] }
 path = ".."
 features = ["fuzz"]
 
+[dependencies.seqair-types]
+path = "../../seqair-types"
+
 # Prevent this from interfering with workspaces
 [workspace]
 members = ["."]
@@ -86,4 +89,34 @@ doc = false
 [[bin]]
 name = "fuzz_gzi"
 path = "fuzz_targets/fuzz_gzi.rs"
+doc = false
+
+# CRAM bitstream (BitReader) operations
+[[bin]]
+name = "fuzz_cram_bitstream"
+path = "fuzz_targets/fuzz_cram_bitstream.rs"
+doc = false
+
+# CRAM encoding: HuffmanTable construction/decoding and ExternalCursor operations
+[[bin]]
+name = "fuzz_cram_encoding_decode"
+path = "fuzz_targets/fuzz_cram_encoding_decode.rs"
+doc = false
+
+# Base::convert_ascii_in_place and Base::from_ascii_vec
+[[bin]]
+name = "fuzz_base_convert"
+path = "fuzz_targets/fuzz_base_convert.rs"
+doc = false
+
+# RegionString::from_str parsing
+[[bin]]
+name = "fuzz_region_string"
+path = "fuzz_targets/fuzz_region_string.rs"
+doc = false
+
+# SubstitutionMatrix::parse with arbitrary 5-byte arrays
+[[bin]]
+name = "fuzz_cram_substitution"
+path = "fuzz_targets/fuzz_cram_substitution.rs"
 doc = false

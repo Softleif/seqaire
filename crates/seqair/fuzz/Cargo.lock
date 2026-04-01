@@ -273,6 +273,7 @@ dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "seqair",
+ "seqair-types",
 ]
 
 [[package]]
