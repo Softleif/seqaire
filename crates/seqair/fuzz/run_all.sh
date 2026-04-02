@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FUZZ_DIR="$SCRIPT_DIR"
 CRATE_DIR="$(dirname "$FUZZ_DIR")"
 RSS_LIMIT=4096
-JOBS="${THREADS:-1}"
+THREADS="${THREADS:-1}"
 
 # Detect target triple
 ARCH="$(rustc -vV | grep host | awk '{print $2}')"
