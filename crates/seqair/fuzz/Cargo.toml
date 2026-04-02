@@ -158,3 +158,9 @@ doc = false
 name = "fuzz_readers_pileup"
 path = "fuzz_targets/fuzz_readers_pileup.rs"
 doc = false
+
+# Structure-aware: Arbitrary-generated valid BAM records → RecordStore → PileupEngine
+[[bin]]
+name = "fuzz_structured_pileup"
+path = "fuzz_targets/fuzz_structured_pileup.rs"
+doc = false
