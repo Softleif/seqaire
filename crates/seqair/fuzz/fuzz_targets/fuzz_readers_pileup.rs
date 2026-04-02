@@ -45,7 +45,7 @@ fuzz_target!(|data: &[u8]| {
         Err(_) => return,
     };
 
-    let mut readers = match FuzzReaders::from_bytes(
+    let mut readers = match FuzzReaders::from_bam_bytes(
         bam_data.to_vec(),
         bai_data,
         fasta_gz_data.to_vec(),

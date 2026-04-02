@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::instrument;
 
+#[cfg(feature = "fuzz")]
+use std::io::Cursor;
+
 #[derive(Debug, thiserror::Error)]
 pub enum CramError {
     #[error("I/O error opening {path}")]
@@ -217,9 +220,9 @@ pub struct CramShared {
     pub fasta_path: PathBuf,
 }
 
-pub struct IndexedCramReader {
-    file: File,
-    fasta: IndexedFastaReader,
+pub struct IndexedCramReader<R: Read + Seek = File> {
+    file: R,
+    fasta: IndexedFastaReader<R>,
     shared: Arc<CramShared>,
     // Scratch buffers reused across fetch_into calls
     container_buf: Vec<u8>,
@@ -230,13 +233,13 @@ pub struct IndexedCramReader {
     ref_seq_buf: Vec<u8>,
 }
 
-impl std::fmt::Debug for IndexedCramReader {
+impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedCramReader").field("path", &self.shared.cram_path).finish()
     }
 }
 
-impl IndexedCramReader {
+impl IndexedCramReader<File> {
     /// Open a CRAM file with a FASTA reference for sequence reconstruction.
     #[instrument(level = "debug", fields(cram = %cram_path.display(), fasta = %fasta_path.display()), err)]
     pub fn open(cram_path: &Path, fasta_path: &Path) -> Result<Self, CramError> {
@@ -292,10 +295,6 @@ impl IndexedCramReader {
         })
     }
 
-    pub fn header(&self) -> &BamHeader {
-        &self.shared.header
-    }
-
     pub fn fork(&self) -> Result<Self, CramError> {
         let file = File::open(&self.shared.cram_path)
             .map_err(|source| CramError::Open { path: self.shared.cram_path.clone(), source })?;
@@ -311,6 +310,71 @@ impl IndexedCramReader {
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
         })
+    }
+}
+
+#[cfg(feature = "fuzz")]
+impl IndexedCramReader<Cursor<Vec<u8>>> {
+    pub fn from_bytes(
+        cram_data: Vec<u8>,
+        crai_data: &[u8],
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, CramError> {
+        // Parse the 26-byte file definition
+        let mut file_def = [0u8; 26];
+        file_def.copy_from_slice(
+            cram_data.get(..26).ok_or(CramError::Truncated { context: "CRAM file definition" })?,
+        );
+
+        // r[impl cram.file.magic]
+        if file_def[..4] != *b"CRAM" {
+            return Err(CramError::InvalidMagic {
+                found: [file_def[0], file_def[1], file_def[2], file_def[3]],
+            });
+        }
+
+        // r[impl cram.scope.versions]
+        let major = file_def[4];
+        let minor = file_def[5];
+        if major != 3 {
+            return Err(CramError::UnsupportedVersion { major, minor });
+        }
+
+        let mut cursor = Cursor::new(cram_data.clone());
+        cursor.seek(SeekFrom::Start(26))?;
+        let header = read_header_container(&mut cursor)?;
+        header.validate_sort_order()?;
+
+        let crai_text =
+            std::str::from_utf8(crai_data).map_err(|source| CramError::HeaderNotUtf8 { source })?;
+        let cram_index = CramIndex::from_text(crai_text)?;
+
+        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)?;
+
+        Ok(IndexedCramReader {
+            file: Cursor::new(cram_data),
+            fasta,
+            shared: Arc::new(CramShared {
+                index: cram_index,
+                header,
+                cram_path: PathBuf::from("<fuzz>"),
+                fasta_path: PathBuf::from("<fuzz>"),
+            }),
+            container_buf: Vec::new(),
+            cigar_buf: Vec::new(),
+            bases_buf: Vec::new(),
+            qual_buf: Vec::new(),
+            aux_buf: Vec::new(),
+            ref_seq_buf: Vec::new(),
+        })
+    }
+}
+
+impl<R: Read + Seek> IndexedCramReader<R> {
+    pub fn header(&self) -> &BamHeader {
+        &self.shared.header
     }
 
     // r[impl region_buf.not_cram]
@@ -462,7 +526,7 @@ impl IndexedCramReader {
 
 // r[impl cram.file.header_container]
 /// Read the file header container and extract the SAM header text.
-fn read_header_container(file: &mut File) -> Result<BamHeader, CramError> {
+fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, CramError> {
     // Read enough for the container header (usually < 100 bytes)
     let mut buf = [0u8; 4096];
     let pos = file.stream_position()?;

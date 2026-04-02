@@ -64,6 +64,25 @@ impl CramIndex {
         Ok(CramIndex { entries })
     }
 
+    #[cfg(feature = "fuzz")]
+    /// Parse a CRAI index from uncompressed TSV text (skips gzip decompression).
+    pub fn from_text(text: &str) -> Result<Self, CramError> {
+        let mut entries = Vec::new();
+        for line in text.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            let entry = parse_crai_line(line)?;
+            entries.push(entry);
+        }
+
+        entries.sort_by(|a, b| {
+            a.ref_id.cmp(&b.ref_id).then(a.alignment_start.cmp(&b.alignment_start))
+        });
+
+        Ok(CramIndex { entries })
+    }
+
     /// Find all index entries whose range overlaps `[start, end)` for the given
     /// reference ID. Returns entries sorted by alignment_start.
     ///

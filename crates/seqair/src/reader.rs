@@ -13,6 +13,7 @@ use crate::{
     sam::reader::{IndexedSamReader, SamError},
 };
 use seqair_types::{Base, Pos, Zero};
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use tracing::instrument;
@@ -94,34 +95,55 @@ pub enum ReaderError {
     FastaFork { source: FastaError },
 }
 
-/// Format-agnostic indexed alignment reader.
+/// Format-agnostic indexed alignment reader, generic over the I/O backend.
 ///
-/// Auto-detects BAM, bgzf-compressed SAM, or CRAM by inspecting magic bytes.
-/// All formats populate the same `RecordStore` via `fetch_into()`.
+/// `R = File` for production (file-based I/O); `R = Cursor<Vec<u8>>` for fuzzing
+/// (in-memory, no file I/O).
 // r[impl unified.reader_enum]
 #[non_exhaustive]
-pub enum IndexedReader {
-    Bam(IndexedBamReader<std::fs::File>),
-    Sam(IndexedSamReader),
-    Cram(Box<IndexedCramReader>),
-    #[cfg(feature = "fuzz")]
-    BamCursor(IndexedBamReader<std::io::Cursor<Vec<u8>>>),
+pub enum IndexedReader<R: Read + Seek = std::fs::File> {
+    Bam(IndexedBamReader<R>),
+    Sam(IndexedSamReader<R>),
+    Cram(Box<IndexedCramReader<R>>),
 }
 
-impl std::fmt::Debug for IndexedReader {
+impl<R: Read + Seek> std::fmt::Debug for IndexedReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Bam(r) => r.fmt(f),
             Self::Sam(r) => r.fmt(f),
             Self::Cram(r) => r.fmt(f),
-            #[cfg(feature = "fuzz")]
-            Self::BamCursor(r) => r.fmt(f),
+        }
+    }
+}
+
+impl<R: Read + Seek> IndexedReader<R> {
+    pub fn header(&self) -> &BamHeader {
+        match self {
+            Self::Bam(r) => r.header(),
+            Self::Sam(r) => r.header(),
+            Self::Cram(r) => r.header(),
+        }
+    }
+
+    // r[impl unified.fetch_equivalence]
+    pub fn fetch_into(
+        &mut self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+        store: &mut RecordStore,
+    ) -> Result<usize, ReaderError> {
+        match self {
+            Self::Bam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
+            Self::Sam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
+            Self::Cram(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
         }
     }
 }
 
 // r[impl unified.reader_api]
-impl IndexedReader {
+impl IndexedReader<std::fs::File> {
     /// Open a BAM or bgzf-compressed SAM file, auto-detecting the format.
     ///
     /// CRAM files are detected but require a FASTA reference — use
@@ -161,33 +183,6 @@ impl IndexedReader {
         }
     }
 
-    pub fn header(&self) -> &BamHeader {
-        match self {
-            Self::Bam(r) => r.header(),
-            Self::Sam(r) => r.header(),
-            Self::Cram(r) => r.header(),
-            #[cfg(feature = "fuzz")]
-            Self::BamCursor(r) => r.header(),
-        }
-    }
-
-    // r[impl unified.fetch_equivalence]
-    pub fn fetch_into(
-        &mut self,
-        tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
-        store: &mut RecordStore,
-    ) -> Result<usize, ReaderError> {
-        match self {
-            Self::Bam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-            Self::Sam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-            Self::Cram(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-            #[cfg(feature = "fuzz")]
-            Self::BamCursor(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
-        }
-    }
-
     // r[impl unified.fork_bam]
     // r[impl unified.fork_sam]
     // r[impl unified.fork_cram]
@@ -196,10 +191,6 @@ impl IndexedReader {
             Self::Bam(r) => Ok(Self::Bam(r.fork()?)),
             Self::Sam(r) => Ok(Self::Sam(r.fork()?)),
             Self::Cram(r) => Ok(Self::Cram(Box::new(r.fork()?))),
-            #[cfg(feature = "fuzz")]
-            Self::BamCursor(_) => {
-                Err(ReaderError::Format { source: FormatDetectionError::CramRequiresFasta })
-            }
         }
     }
 }
@@ -326,10 +317,15 @@ impl Readers {
     }
 }
 
+/// Cursor-backed type alias for in-memory fuzzing.
+#[cfg(feature = "fuzz")]
+pub type CursorReader = IndexedReader<std::io::Cursor<Vec<u8>>>;
+
 /// In-memory reader bundle for fuzzing. No file I/O — all data from byte slices.
+/// Uses the same `IndexedReader` enum as production code, just with `Cursor` I/O.
 #[cfg(feature = "fuzz")]
 pub struct FuzzReaders {
-    bam: IndexedBamReader<std::io::Cursor<Vec<u8>>>,
+    alignment: CursorReader,
     fasta: IndexedFastaReader<std::io::Cursor<Vec<u8>>>,
     store: RecordStore,
     fasta_buf: Vec<u8>,
@@ -337,8 +333,8 @@ pub struct FuzzReaders {
 
 #[cfg(feature = "fuzz")]
 impl FuzzReaders {
-    /// Build from raw bytes: BAM + BAI + FASTA.gz + FAI + GZI.
-    pub fn from_bytes(
+    /// Build BAM-based readers from raw bytes: BAM + BAI + FASTA.gz + FAI + GZI.
+    pub fn from_bam_bytes(
         bam_data: Vec<u8>,
         bai_data: &[u8],
         fasta_gz_data: Vec<u8>,
@@ -348,11 +344,41 @@ impl FuzzReaders {
         let bam = IndexedBamReader::from_bytes(bam_data, bai_data)?;
         let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
             .map_err(|source| ReaderError::FastaOpen { source })?;
-        Ok(FuzzReaders { bam, fasta, store: RecordStore::default(), fasta_buf: Vec::new() })
+        Ok(FuzzReaders {
+            alignment: CursorReader::Bam(bam),
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+        })
+    }
+
+    /// Build CRAM-based readers from raw bytes.
+    pub fn from_cram_bytes(
+        cram_data: Vec<u8>,
+        crai_text: &str,
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, ReaderError> {
+        let cram = IndexedCramReader::from_bytes(
+            cram_data,
+            crai_text.as_bytes(),
+            fasta_gz_data.clone(),
+            fai_contents,
+            gzi_data,
+        )?;
+        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
+            .map_err(|source| ReaderError::FastaOpen { source })?;
+        Ok(FuzzReaders {
+            alignment: CursorReader::Cram(Box::new(cram)),
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+        })
     }
 
     pub fn header(&self) -> &BamHeader {
-        self.bam.header()
+        self.alignment.header()
     }
 
     /// Full pileup pipeline: fetch_into → PileupEngine with reference sequence.
@@ -362,12 +388,12 @@ impl FuzzReaders {
         start: Pos<Zero>,
         end: Pos<Zero>,
     ) -> Result<PileupEngine, ReaderError> {
-        self.bam.fetch_into(tid, start, end, &mut self.store)?;
+        self.alignment.fetch_into(tid, start, end, &mut self.store)?;
         let store = std::mem::take(&mut self.store);
         let mut engine = PileupEngine::new(store, start, end);
 
         // Try to set reference sequence
-        if let Some(name) = self.bam.header().target_name(tid) {
+        if let Some(name) = self.alignment.header().target_name(tid) {
             let name = name.to_owned();
             if self.fasta.fetch_seq_into(&name, start, end, &mut self.fasta_buf).is_ok() {
                 let buf = std::mem::take(&mut self.fasta_buf);
