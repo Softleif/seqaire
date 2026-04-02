@@ -177,6 +177,26 @@ def main():
     # Wrap as Rans4x8 Arbitrary enum variant (discriminant 0)
     write_seed("fuzz_cram_codecs", "rans4x8_order0", bytes([0]) + rans)
 
+    # --- fuzz_reader_bam: concatenate BAM + BAI as one blob for Arbitrary ---
+    # Arbitrary will split this into bam_data/bai_data/region fields;
+    # the fuzzer mutates from there. Also symlink the raw files.
+    bai = open(os.path.join(DATA_DIR, "test.bam.bai"), "rb").read()
+    # Truncated BAM (first 8KB) + full BAI gives the fuzzer a valid starting point
+    write_seed("fuzz_reader_bam", "bam_bai_concat", bam[:8192] + bai)
+
+    # --- fuzz_pileup_full: reuse BAM record seeds ---
+    # These get Arbitrary-split into records vec + region params
+    for i, record in extract_bam_records(raw_bam, max_records=3):
+        write_seed("fuzz_pileup_full", f"record_{i}", record)
+
+    # --- fuzz_cram_decode_full: CRAM header data ---
+    for cram_name in ["test.cram", "test_v30.cram"]:
+        cram_path = os.path.join(DATA_DIR, cram_name)
+        if os.path.exists(cram_path):
+            cram = open(cram_path, "rb").read()
+            tag = cram_name.replace(".", "_")
+            write_seed("fuzz_cram_decode_full", f"{tag}_start", cram[26:2048])
+
     total = sum(1 for _ in _walk_seeds())
     print(f"\nDone: {total} seed files in {SEED_DIR}")
 

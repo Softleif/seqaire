@@ -74,8 +74,8 @@ pub enum BgzfError {
 ///
 /// Tracks virtual file offsets for index-based seeking. Uses `libdeflater`
 /// for decompression.
-pub struct BgzfReader {
-    inner: BufReader<std::fs::File>,
+pub struct BgzfReader<R: Read + Seek> {
+    inner: BufReader<R>,
     buf: Vec<u8>,
     buf_pos: usize,
     // r[impl bgzf.block_offset_tracking]
@@ -87,7 +87,7 @@ pub struct BgzfReader {
     decompressor: libdeflater::Decompressor,
 }
 
-impl std::fmt::Debug for BgzfReader {
+impl<R: Read + Seek> std::fmt::Debug for BgzfReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BgzfReader")
             .field("block_offset", &self.block_offset)
@@ -121,7 +121,7 @@ pub(crate) unsafe fn resize_uninit(buf: &mut Vec<u8>, new_len: usize) {
     unsafe { buf.set_len(new_len) };
 }
 
-impl BgzfReader {
+impl BgzfReader<std::fs::File> {
     #[instrument(level = "debug", fields(path = %path.display()), err)]
     pub fn open(path: &Path) -> Result<Self, BgzfError> {
         let file = std::fs::File::open(path)
@@ -136,7 +136,24 @@ impl BgzfReader {
             decompressor: libdeflater::Decompressor::new(),
         })
     }
+}
 
+#[cfg(feature = "fuzz")]
+impl BgzfReader<std::io::Cursor<Vec<u8>>> {
+    pub fn from_cursor(data: Vec<u8>) -> Self {
+        Self {
+            inner: BufReader::with_capacity(128 * 1024, std::io::Cursor::new(data)),
+            buf: Vec::with_capacity(MAX_BLOCK_SIZE),
+            buf_pos: 0,
+            block_offset: 0,
+            eof: false,
+            compressed_buf: Vec::with_capacity(MAX_BLOCK_SIZE),
+            decompressor: libdeflater::Decompressor::new(),
+        }
+    }
+}
+
+impl<R: Read + Seek> BgzfReader<R> {
     /// Current virtual offset (block start + position within decompressed data).
     pub fn virtual_offset(&self) -> VirtualOffset {
         VirtualOffset::new(self.block_offset, self.buf_pos as u16)

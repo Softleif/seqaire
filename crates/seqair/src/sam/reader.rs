@@ -614,7 +614,9 @@ fn serialize_bam_int(buf: &mut Vec<u8>, val: i64) -> Result<(), SamRecordError> 
 // r[impl sam.header.sq_required]
 // r[impl sam.header.preserve_full_text]
 // r[impl sam.edge.line_spanning_blocks]
-fn read_sam_header(bgzf: &mut crate::bam::bgzf::BgzfReader) -> Result<String, SamError> {
+fn read_sam_header<R: std::io::Read + std::io::Seek>(
+    bgzf: &mut crate::bam::bgzf::BgzfReader<R>,
+) -> Result<String, SamError> {
     let mut header = Vec::with_capacity(4096);
     let mut line = Vec::with_capacity(256);
 

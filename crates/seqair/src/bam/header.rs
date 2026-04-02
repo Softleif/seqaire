@@ -3,7 +3,11 @@
 
 use super::bgzf::{BgzfError, BgzfReader};
 use seqair_types::SmolStr;
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    io::{Read, Seek},
+    path::Path,
+};
 use tracing::instrument;
 
 #[derive(Debug)]
@@ -75,7 +79,20 @@ impl BamHeader {
     // r[impl bam.header.references]
     /// Parse the BAM header from a BGZF reader positioned at the start of the file.
     #[instrument(level = "debug", skip(bgzf), err)]
-    pub(crate) fn parse(bgzf: &mut BgzfReader) -> Result<Self, BamHeaderError> {
+    /// Parse the BAM binary header from a BGZF reader.
+    #[cfg(feature = "fuzz")]
+    #[instrument(level = "debug", skip(bgzf), err)]
+    pub fn parse<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
+        Self::parse_inner(bgzf)
+    }
+
+    #[cfg(not(feature = "fuzz"))]
+    #[instrument(level = "debug", skip(bgzf), err)]
+    pub(crate) fn parse<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
+        Self::parse_inner(bgzf)
+    }
+
+    fn parse_inner<R: Read + Seek>(bgzf: &mut BgzfReader<R>) -> Result<Self, BamHeaderError> {
         // Magic: BAM\1
         let mut magic = [0u8; 4];
         bgzf.read_exact_into(&mut magic)?;

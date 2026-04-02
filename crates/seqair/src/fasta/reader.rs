@@ -78,7 +78,7 @@ struct FastaShared {
 
 enum FileHandle {
     Plain(File),
-    Bgzf(BgzfReader),
+    Bgzf(BgzfReader<File>),
 }
 
 // r[impl fasta.fetch.coordinates]

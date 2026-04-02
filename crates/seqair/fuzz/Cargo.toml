@@ -139,3 +139,9 @@ doc = false
 name = "fuzz_cram_decode_full"
 path = "fuzz_targets/fuzz_cram_decode_full.rs"
 doc = false
+
+# Full-stack: BGZF stream → BAM header → records → pileup (no file I/O)
+[[bin]]
+name = "fuzz_reader_bam"
+path = "fuzz_targets/fuzz_reader_bam.rs"
+doc = false
