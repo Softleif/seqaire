@@ -99,6 +99,12 @@ impl RegionBuf {
         let merged = merge_chunks(chunks);
         let total_bytes: usize = merged.iter().map(|r| (r.file_end - r.file_start) as usize).sum();
 
+        // Reject obviously corrupt chunk ranges that would cause OOM
+        const MAX_REGION_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+        if total_bytes > MAX_REGION_BYTES {
+            return Err(BgzfError::RecordTooLarge { block_size: total_bytes });
+        }
+
         let load_start = std::time::Instant::now();
         let mut data = Vec::with_capacity(total_bytes);
         let mut range_map = Vec::with_capacity(merged.len());

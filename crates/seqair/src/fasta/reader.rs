@@ -16,6 +16,9 @@ use std::{
 };
 use tracing::instrument;
 
+#[cfg(feature = "fuzz")]
+use std::io::Cursor;
+
 // r[impl fasta.errors]
 #[derive(Debug, thiserror::Error)]
 pub enum FastaError {
@@ -76,20 +79,20 @@ struct FastaShared {
     is_bgzf: bool,
 }
 
-enum FileHandle {
-    Plain(File),
-    Bgzf(BgzfReader<File>),
+enum FileHandle<R: Read + Seek> {
+    Plain(R),
+    Bgzf(BgzfReader<R>),
 }
 
 // r[impl fasta.fetch.coordinates]
-pub struct IndexedFastaReader {
-    handle: FileHandle,
+pub struct IndexedFastaReader<R: Read + Seek = File> {
+    handle: FileHandle<R>,
     shared: Arc<FastaShared>,
     /// Reusable buffer for raw bytes read from plain FASTA (includes newlines).
     raw_buf: Vec<u8>,
 }
 
-impl std::fmt::Debug for IndexedFastaReader {
+impl<R: Read + Seek> std::fmt::Debug for IndexedFastaReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedFastaReader")
             .field("fasta_path", &self.shared.fasta_path)
@@ -98,7 +101,7 @@ impl std::fmt::Debug for IndexedFastaReader {
     }
 }
 
-impl IndexedFastaReader {
+impl IndexedFastaReader<File> {
     #[instrument(level = "debug", fields(path = %path.display()), err)]
     pub fn open(path: &Path) -> Result<Self, FastaError> {
         let fai_path = fai_path_for(path);
@@ -164,7 +167,32 @@ impl IndexedFastaReader {
             raw_buf: Vec::with_capacity(64 * 1024),
         })
     }
+}
 
+#[cfg(feature = "fuzz")]
+impl IndexedFastaReader<Cursor<Vec<u8>>> {
+    pub fn from_bytes(
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, FastaError> {
+        let index = FastaIndex::from_contents(fai_contents)?;
+        let gzi = GziIndex::from_bytes(gzi_data)?;
+        let bgzf = BgzfReader::from_cursor(fasta_gz_data);
+        Ok(IndexedFastaReader {
+            handle: FileHandle::Bgzf(bgzf),
+            shared: Arc::new(FastaShared {
+                index,
+                gzi: Some(gzi),
+                fasta_path: PathBuf::from("<fuzz>"),
+                is_bgzf: true,
+            }),
+            raw_buf: Vec::with_capacity(64 * 1024),
+        })
+    }
+}
+
+impl<R: Read + Seek> IndexedFastaReader<R> {
     pub fn shares_index_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }

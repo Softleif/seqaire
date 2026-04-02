@@ -101,9 +101,11 @@ pub enum ReaderError {
 // r[impl unified.reader_enum]
 #[non_exhaustive]
 pub enum IndexedReader {
-    Bam(IndexedBamReader),
+    Bam(IndexedBamReader<std::fs::File>),
     Sam(IndexedSamReader),
     Cram(Box<IndexedCramReader>),
+    #[cfg(feature = "fuzz")]
+    BamCursor(IndexedBamReader<std::io::Cursor<Vec<u8>>>),
 }
 
 impl std::fmt::Debug for IndexedReader {
@@ -112,6 +114,8 @@ impl std::fmt::Debug for IndexedReader {
             Self::Bam(r) => r.fmt(f),
             Self::Sam(r) => r.fmt(f),
             Self::Cram(r) => r.fmt(f),
+            #[cfg(feature = "fuzz")]
+            Self::BamCursor(r) => r.fmt(f),
         }
     }
 }
@@ -162,6 +166,8 @@ impl IndexedReader {
             Self::Bam(r) => r.header(),
             Self::Sam(r) => r.header(),
             Self::Cram(r) => r.header(),
+            #[cfg(feature = "fuzz")]
+            Self::BamCursor(r) => r.header(),
         }
     }
 
@@ -177,6 +183,8 @@ impl IndexedReader {
             Self::Bam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
             Self::Sam(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
             Self::Cram(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
+            #[cfg(feature = "fuzz")]
+            Self::BamCursor(r) => r.fetch_into(tid, start, end, store).map_err(ReaderError::from),
         }
     }
 
@@ -188,6 +196,10 @@ impl IndexedReader {
             Self::Bam(r) => Ok(Self::Bam(r.fork()?)),
             Self::Sam(r) => Ok(Self::Sam(r.fork()?)),
             Self::Cram(r) => Ok(Self::Cram(Box::new(r.fork()?))),
+            #[cfg(feature = "fuzz")]
+            Self::BamCursor(_) => {
+                Err(ReaderError::Format { source: FormatDetectionError::CramRequiresFasta })
+            }
         }
     }
 }
@@ -311,6 +323,67 @@ impl Readers {
 
     pub fn alignment_mut(&mut self) -> &mut IndexedReader {
         &mut self.alignment
+    }
+}
+
+/// In-memory reader bundle for fuzzing. No file I/O — all data from byte slices.
+#[cfg(feature = "fuzz")]
+pub struct FuzzReaders {
+    bam: IndexedBamReader<std::io::Cursor<Vec<u8>>>,
+    fasta: IndexedFastaReader<std::io::Cursor<Vec<u8>>>,
+    store: RecordStore,
+    fasta_buf: Vec<u8>,
+}
+
+#[cfg(feature = "fuzz")]
+impl FuzzReaders {
+    /// Build from raw bytes: BAM + BAI + FASTA.gz + FAI + GZI.
+    pub fn from_bytes(
+        bam_data: Vec<u8>,
+        bai_data: &[u8],
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, ReaderError> {
+        let bam = IndexedBamReader::from_bytes(bam_data, bai_data)?;
+        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
+            .map_err(|source| ReaderError::FastaOpen { source })?;
+        Ok(FuzzReaders { bam, fasta, store: RecordStore::default(), fasta_buf: Vec::new() })
+    }
+
+    pub fn header(&self) -> &BamHeader {
+        self.bam.header()
+    }
+
+    /// Full pileup pipeline: fetch_into → PileupEngine with reference sequence.
+    pub fn pileup(
+        &mut self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+    ) -> Result<PileupEngine, ReaderError> {
+        self.bam.fetch_into(tid, start, end, &mut self.store)?;
+        let store = std::mem::take(&mut self.store);
+        let mut engine = PileupEngine::new(store, start, end);
+
+        // Try to set reference sequence
+        if let Some(name) = self.bam.header().target_name(tid) {
+            let name = name.to_owned();
+            if self.fasta.fetch_seq_into(&name, start, end, &mut self.fasta_buf).is_ok() {
+                let buf = std::mem::take(&mut self.fasta_buf);
+                let bases = Base::from_ascii_vec(buf);
+                let ref_seq = crate::bam::pileup::RefSeq::new(Rc::from(bases), start);
+                engine.set_reference_seq(ref_seq);
+            }
+        }
+
+        Ok(engine)
+    }
+
+    pub fn recover_store(&mut self, engine: &mut PileupEngine) {
+        if let Some(store) = engine.take_store() {
+            self.store = store;
+        }
     }
 }
 

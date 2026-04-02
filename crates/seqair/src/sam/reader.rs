@@ -11,6 +11,7 @@ use crate::bam::{
 use seqair_types::{Base, One, Pos, Zero};
 use std::{
     fs::File,
+    io::{Read, Seek},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -141,18 +142,18 @@ pub struct SamShared {
     sam_path: PathBuf,
 }
 
-pub struct IndexedSamReader {
-    bulk_reader: File,
+pub struct IndexedSamReader<R = File> {
+    bulk_reader: R,
     shared: Arc<SamShared>,
 }
 
-impl std::fmt::Debug for IndexedSamReader {
+impl<R> std::fmt::Debug for IndexedSamReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedSamReader").field("sam_path", &self.shared.sam_path).finish()
     }
 }
 
-impl IndexedSamReader {
+impl IndexedSamReader<File> {
     // r[impl sam.reader.open]
     #[instrument(level = "debug", fields(path = %path.display()), err)]
     pub fn open(path: &Path) -> Result<Self, SamError> {
@@ -161,7 +162,6 @@ impl IndexedSamReader {
             let mut f = File::open(path)
                 .map_err(|source| SamError::Open { path: path.to_path_buf(), source })?;
             let mut magic = [0u8; 1];
-            use std::io::Read;
             if f.read_exact(&mut magic).is_ok() && magic[0] == b'@' {
                 return Err(SamError::UncompressedSam { path: path.to_path_buf() });
             }
@@ -192,7 +192,9 @@ impl IndexedSamReader {
 
         Ok(IndexedSamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
     }
+}
 
+impl<R: Read + Seek> IndexedSamReader<R> {
     pub fn shared(&self) -> &Arc<SamShared> {
         &self.shared
     }

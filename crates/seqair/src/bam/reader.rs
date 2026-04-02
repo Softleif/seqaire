@@ -14,6 +14,7 @@ use super::{
 use seqair_types::{Pos, SmolStr, Zero};
 use std::{
     fs::File,
+    io::{Read, Seek},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -90,20 +91,20 @@ impl BamShared {
 
 // r[impl bam.reader.open]
 // r[impl bam.reader.header_access]
-pub struct IndexedBamReader {
-    /// Separate file handle for bulk region reads (unbuffered — RegionBuf does
+pub struct IndexedBamReader<R: Read + Seek = File> {
+    /// Separate reader handle for bulk region reads (unbuffered — RegionBuf does
     /// large sequential reads that don't benefit from BufReader).
-    bulk_reader: File,
+    bulk_reader: R,
     shared: Arc<BamShared>,
 }
 
-impl std::fmt::Debug for IndexedBamReader {
+impl<R: Read + Seek> std::fmt::Debug for IndexedBamReader<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("IndexedBamReader").field("bam_path", &self.shared.bam_path).finish()
     }
 }
 
-impl IndexedBamReader {
+impl IndexedBamReader<File> {
     #[instrument(level = "debug", fields(path = %path.display()), err)]
     pub fn open(path: &Path) -> Result<Self, BamError> {
         let mut bgzf = BgzfReader::open(path)?;
@@ -132,7 +133,24 @@ impl IndexedBamReader {
 
         Ok(IndexedBamReader { bulk_reader: bulk_file, shared: Arc::clone(&self.shared) })
     }
+}
 
+#[cfg(feature = "fuzz")]
+impl IndexedBamReader<std::io::Cursor<Vec<u8>>> {
+    pub fn from_bytes(bam_data: Vec<u8>, bai_data: &[u8]) -> Result<Self, BamError> {
+        let mut bgzf = BgzfReader::from_cursor(bam_data.clone());
+        let header = BamHeader::parse(&mut bgzf)?;
+        header.validate_sort_order()?;
+        let index = BamIndex::from_bytes(bai_data)?;
+
+        Ok(IndexedBamReader {
+            bulk_reader: std::io::Cursor::new(bam_data),
+            shared: Arc::new(BamShared { index, header, bam_path: PathBuf::from("<fuzz>") }),
+        })
+    }
+}
+
+impl<R: Read + Seek> IndexedBamReader<R> {
     // r[impl bam.reader.fork_arc_identity]
     pub fn shared(&self) -> &Arc<BamShared> {
         &self.shared

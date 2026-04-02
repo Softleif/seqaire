@@ -152,3 +152,9 @@ doc = false
 name = "fuzz_reader_indexed"
 path = "fuzz_targets/fuzz_reader_indexed.rs"
 doc = false
+
+# Full pipeline: FuzzReaders (BAM+BAI+FASTA+FAI+GZI) → pileup with reference
+[[bin]]
+name = "fuzz_readers_pileup"
+path = "fuzz_targets/fuzz_readers_pileup.rs"
+doc = false
