@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustc-hash = "2.1.1"
+tempfile = "3"
 
 [dependencies.seqair]
 path = ".."
@@ -144,4 +145,10 @@ doc = false
 [[bin]]
 name = "fuzz_reader_bam"
 path = "fuzz_targets/fuzz_reader_bam.rs"
+doc = false
+
+# Full-stack: BAM+BAI → tmpfiles → IndexedBamReader::open → fetch_into → pileup
+[[bin]]
+name = "fuzz_reader_indexed"
+path = "fuzz_targets/fuzz_reader_indexed.rs"
 doc = false

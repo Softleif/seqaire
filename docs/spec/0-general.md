@@ -40,6 +40,25 @@ Only intentionally public types should be exported. Internal implementation modu
 r[io.checked_arithmetic]
 All integer arithmetic on values derived from untrusted input (file data, parsed fields) MUST use checked or saturating operations. Default wrapping arithmetic (`+`, `-`, `*`) MUST NOT be used on untrusted values. The `clippy::arithmetic_side_effects` lint should be enabled.
 
+## Robustness — fuzzing
+
+Seqair processes user-provided files that may be corrupt, truncated, or maliciously crafted. All parsers that read untrusted data SHOULD be fuzz-tested with `cargo-fuzz` (libFuzzer).
+
+r[io.fuzz.readers]
+All file format readers (BAM, SAM, CRAM, FASTA, BAI, FAI, GZI) and their sub-parsers (BGZF blocks, CIGAR ops, aux tags, rANS codecs, varints, Huffman tables) SHOULD have dedicated `cargo-fuzz` targets. Full-stack fuzz targets that exercise the complete read path (e.g., BGZF → header → records → pileup) SHOULD be maintained alongside unit-level targets.
+
+r[io.fuzz.alloc_limits]
+Parsers MUST NOT allocate memory proportional to an untrusted parsed size without a cap. All `Vec::with_capacity(n)` and `vec![0u8; n]` calls where `n` comes from parsed data MUST validate `n` against a reasonable upper bound and return an error if exceeded. This prevents OOM on corrupt files.
+
+r[io.fuzz.no_panic]
+Parsers MUST NOT panic on any input. Arithmetic overflow, out-of-bounds access, and shift overflow MUST be handled gracefully (via checked/saturating ops, `.get()` bounds checks, or early error returns). Fuzz targets SHOULD run with AddressSanitizer enabled to catch memory safety violations.
+
+r[io.fuzz.seeds]
+Fuzz targets SHOULD be seeded with structurally valid inputs derived from real test data files. Seeds dramatically improve coverage by letting the fuzzer start from valid file structures and mutate from there.
+
+r[io.fuzz.simd]
+Platform-specific SIMD code paths (NEON, SSSE3) SHOULD be fuzz-tested on their respective architectures to catch buffer overruns and alignment issues specific to vectorized implementations.
+
 ## Platform portability
 
 r[io.platform_optimizations]

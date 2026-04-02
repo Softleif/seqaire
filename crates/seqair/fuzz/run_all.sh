@@ -52,6 +52,13 @@ for target in $TARGETS; do
         seed_note=""
     fi
 
+    # Targets with large seeds need higher max_len
+    extra_args=""
+    case "$target" in
+        fuzz_reader_indexed) extra_args="-max_len=1600000" ;;
+        fuzz_reader_bam)     extra_args="-max_len=65536" ;;
+    esac
+
     printf "%-35s" "  $target$seed_note"
 
     output=$(cargo +nightly fuzz run \
@@ -60,6 +67,7 @@ for target in $TARGETS; do
         "$target" \
         -- -max_total_time="$DURATION" \
            -rss_limit_mb="$RSS_LIMIT" \
+           $extra_args \
            $seed_args 2>&1) || true
 
     # Check for crashes/OOM (exit codes 77=crash, 71=OOM)
