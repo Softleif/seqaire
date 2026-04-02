@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
+rustc-hash = "2.1.1"
 
 [dependencies.seqair]
 path = ".."
@@ -125,4 +126,16 @@ doc = false
 [[bin]]
 name = "fuzz_bgzf"
 path = "fuzz_targets/fuzz_bgzf.rs"
+doc = false
+
+# Full-stack: BAM records → RecordStore → PileupEngine → column iteration
+[[bin]]
+name = "fuzz_pileup_full"
+path = "fuzz_targets/fuzz_pileup_full.rs"
+doc = false
+
+# Full-stack: CRAM compression header → encoding descriptors → decode context
+[[bin]]
+name = "fuzz_cram_decode_full"
+path = "fuzz_targets/fuzz_cram_decode_full.rs"
 doc = false
