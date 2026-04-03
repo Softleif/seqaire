@@ -6,6 +6,8 @@ use seqair_types::{Base, Offset, Pos, Strand, Zero, strand_from_flags};
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
 
+use crate::utils::TraceErr;
+
 use super::{
     cigar::{CigarMapping, CigarPosInfo},
     flags::FLAG_UNMAPPED,
@@ -320,7 +322,7 @@ impl Iterator for PileupEngine {
                 self.current_pos = self
                     .current_pos
                     .checked_add_offset(Offset::new(1))
-                    .expect("BUG: current_pos + 1 overflowed despite being <= region_end");
+                    .trace_err("BUG: current_pos + 1 overflowed despite being <= region_end")?;
             }
 
             // Evict expired records. Iterate the compact end_pos vec (4-byte stride)
@@ -337,7 +339,7 @@ impl Iterator for PileupEngine {
                         self.active_end_pos.swap_remove(i);
                         self.active.swap_remove(i);
                     } else {
-                        i = i.checked_add(1).expect("active set size exceeded usize::MAX");
+                        i = i.checked_add(1).trace_err("active set size exceeded usize::MAX")?;
                     }
                 }
             }
@@ -351,7 +353,7 @@ impl Iterator for PileupEngine {
                     break;
                 }
                 self.next_entry =
-                    self.next_entry.checked_add(1).expect("next_entry exceeded usize::MAX");
+                    self.next_entry.checked_add(1).trace_err("next_entry exceeded usize::MAX")?;
 
                 if rec.end_pos < pos {
                     continue;
@@ -368,7 +370,8 @@ impl Iterator for PileupEngine {
                     continue;
                 }
 
-                let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx));
+                let cigar = CigarMapping::new(rec.pos, self.store.cigar(idx))
+                    .trace_err("failed to generate cigar mapping")?;
 
                 self.active_end_pos.push(rec.end_pos);
                 self.active.push(ActiveRecord {

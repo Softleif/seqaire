@@ -2,6 +2,7 @@
 //! (linear fast-path for clip+match CIGARs, `SmallVec` fallback for complex ones);
 //! [`CigarPosInfo`] describes what occupies a given reference position.
 
+use crate::utils::TraceErr;
 use seqair_types::{Pos, SmallVec, Zero};
 
 // r[impl cigar.operations]
@@ -144,10 +145,12 @@ pub(crate) struct CompactOp {
 
 impl CigarMapping {
     #[inline]
-    pub fn new(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Self {
+    pub fn new(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Self> {
         match try_linear(cigar_bytes) {
-            Some((query_offset, match_len)) => Self::Linear { rec_pos, query_offset, match_len },
-            None => Self::Complex(build_compact_ops(rec_pos, cigar_bytes)),
+            Some((query_offset, match_len)) => {
+                Some(Self::Linear { rec_pos, query_offset, match_len })
+            }
+            None => Some(Self::Complex(build_compact_ops(rec_pos, cigar_bytes)?)),
         }
     }
 
@@ -160,7 +163,7 @@ impl CigarMapping {
                     return None;
                 }
                 Some(CigarPosInfo::Match {
-                    qpos: (offset as u32).checked_add(*query_offset).expect("qpos overflow"),
+                    qpos: (offset as u32).checked_add(*query_offset).trace_err("qpos overflow")?,
                 })
                 // Linear path never has insertions/deletions (try_linear rejects them)
             }
@@ -189,8 +192,10 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     let mut phase = 0u8;
 
     for i in 0..n_ops {
-        let packed =
-            u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4).expect("cigar loop overflow")));
+        let packed = u32::from_le_bytes(read4(
+            cigar_bytes,
+            i.checked_mul(4).trace_err("cigar loop overflow")?,
+        ));
         let len = packed >> 4;
         let op_type = (packed & 0xF) as u8;
 
@@ -212,15 +217,17 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     if phase >= 1 { Some((query_offset, match_len)) } else { None }
 }
 
-fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<CompactOp, 6> {
+fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<SmallVec<CompactOp, 6>> {
     let n_ops = cigar_bytes.len() / 4;
     let mut ops = SmallVec::with_capacity(n_ops);
     let mut ref_off: i64 = 0;
     let mut query_off: u32 = 0;
 
     for i in 0..n_ops {
-        let packed =
-            u32::from_le_bytes(read4(cigar_bytes, i.checked_mul(4).expect("cigar loop overflow")));
+        let packed = u32::from_le_bytes(read4(
+            cigar_bytes,
+            i.checked_mul(4).trace_err("cigar loop overflow")?,
+        ));
         let len = packed >> 4;
         let op_type = (packed & 0xF) as u8;
 
@@ -237,14 +244,14 @@ fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> SmallVec<Compact
         });
 
         if consumes_ref(op_type) {
-            ref_off = ref_off.checked_add(i64::from(len)).expect("ref offset overflow");
+            ref_off = ref_off.checked_add(i64::from(len)).trace_err("ref offset overflow")?;
         }
         if consumes_query(op_type) {
             query_off = query_off.saturating_add(len);
         }
     }
 
-    ops
+    Some(ops)
 }
 
 /// Sum insertion lengths for consecutive I ops after index `op_idx`.
@@ -277,7 +284,7 @@ fn classify_op(
             op.op_type
         );
         let offset = pos32.wrapping_sub(op.ref_start) as u32;
-        let qpos = op.query_start.checked_add(offset).expect("qpos overflow");
+        let qpos = op.query_start.checked_add(offset).trace_err("qpos overflow")?;
         if pos32 == ref_end.wrapping_sub(1)
             && let Some(insert_len) = next_insertion_len(ops, i)
         {
@@ -376,7 +383,7 @@ mod tests {
         let mut cigar = Vec::new();
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
         let rec_pos = Pos::<Zero>::new((i32::MAX as u32) - 100).unwrap(); // near max BAM position
-        let mapping = CigarMapping::new(rec_pos, &cigar);
+        let mapping = CigarMapping::new(rec_pos, &cigar).unwrap();
         // Should work fine — position fits in i32
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
         assert_eq!(mapping.pos_info_at(rec_pos), Some(CigarPosInfo::Match { qpos: 0 }));
@@ -390,7 +397,7 @@ mod tests {
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_S, 5));
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
 
-        let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &cigar);
+        let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &cigar).unwrap();
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
 
         // Valid positions: 1000..1100

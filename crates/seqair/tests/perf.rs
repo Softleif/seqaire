@@ -257,7 +257,7 @@ fn binary_search_correct_for_many_ops() {
         cigar_op(3000, 3),
         cigar_op(40, 0),
     ]);
-    let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &ops);
+    let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &ops).unwrap();
 
     // First M block: 1000-1029
     assert_eq!(
@@ -317,7 +317,7 @@ proptest! {
             }
         }
         let bytes = cigar_bytes(&ops);
-        let mapping = CigarMapping::new(Pos::<Zero>::new(0).unwrap(), &bytes);
+        let mapping = CigarMapping::new(Pos::<Zero>::new(0).unwrap(), &bytes).unwrap();
 
         // Compute total ref span
         let total_ref: u32 = ops.iter().map(|&op| {
