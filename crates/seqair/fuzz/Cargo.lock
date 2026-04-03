@@ -312,6 +312,7 @@ name = "seqair-fuzz"
 version = "0.0.0"
 dependencies = [
  "arbitrary",
+ "flate2",
  "libfuzzer-sys",
  "rustc-hash",
  "seqair",

@@ -12,6 +12,15 @@ libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustc-hash = "2.1.1"
 tempfile = "3"
+flate2 = "1"
+
+[lib]
+name = "seqair_fuzz"
+path = "src/lib.rs"
+
+[[example]]
+name = "gen_indexed_seeds"
+path = "examples/gen_indexed_seeds.rs"
 
 [dependencies.seqair]
 path = ".."
