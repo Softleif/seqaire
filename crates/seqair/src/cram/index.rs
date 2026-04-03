@@ -107,7 +107,7 @@ impl CramIndex {
                 if e.alignment_span == 0 {
                     return entry_start < end;
                 }
-                let entry_end = entry_start + e.alignment_span as u64;
+                let entry_end = entry_start.saturating_add(e.alignment_span as u64);
                 entry_start < end && entry_end > start
             })
             .collect()
