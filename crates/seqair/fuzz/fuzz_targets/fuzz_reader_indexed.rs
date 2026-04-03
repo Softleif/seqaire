@@ -1,5 +1,8 @@
-//! Full-stack fuzz through IndexedReader<Cursor>: exercises the unified reader
-//! enum with cursor-backed I/O for BAM and CRAM paths.
+//! Full-stack fuzz through FuzzReaders: BAM/CRAM + index + FASTA → fetch → pileup.
+//!
+//! Uses a simple hand-rolled binary format (not Arbitrary) for zero-waste seed usage.
+//! First byte selects BAM (0) or CRAM (2), then fixed-size length headers split
+//! the remaining bytes into alignment data, index, FASTA, FAI, and GZI.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -7,29 +10,42 @@ use seqair::{
     bam::{pileup::PileupEngine, record_store::RecordStore},
     reader::FuzzReaders,
 };
-use seqair_fuzz::indexed_reader::{FastaInput, Input, ReadersInput};
+use seqair_fuzz::indexed_reader::{Format, Input};
 use seqair_types::{Offset, Pos, Zero};
 
-fuzz_target!(|data: Input| {
-    run(data);
-});
-
-fn run(data: Input) {
-    let FastaInput { fasta_gz, fai, gzi } = data.alignment;
-    let reader = match data.readers {
-        ReadersInput::Bam { bam, bai } => {
-            FuzzReaders::from_bam_bytes(bam, &bai, fasta_gz, &fai, &gzi)
-        }
-        ReadersInput::Sam { sam: _, sai: _ } => return,
-        ReadersInput::Cram { cram, crai } => {
-            FuzzReaders::from_cram_bytes(cram, &crai, fasta_gz, &fai, &gzi)
-        }
-    };
-    let Ok(mut reader) = reader else {
+fuzz_target!(|data: &[u8]| {
+    let Some(input) = Input::parse(data) else {
         return;
     };
 
-    let header = reader.header();
+    let fai_str = match std::str::from_utf8(input.fai) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let mut readers = match input.format {
+        Format::Bam => FuzzReaders::from_bam_bytes(
+            input.data1.to_vec(),
+            input.data2,
+            input.fasta_gz.to_vec(),
+            fai_str,
+            input.gzi,
+        ),
+        Format::Sam => return,
+        Format::Cram => FuzzReaders::from_cram_bytes(
+            input.data1.to_vec(),
+            input.data2,
+            input.fasta_gz.to_vec(),
+            fai_str,
+            input.gzi,
+        ),
+    };
+
+    let Ok(mut readers) = readers else {
+        return;
+    };
+
+    let header = readers.header();
     let target_count = header.target_count();
     if target_count == 0 {
         return;
@@ -45,7 +61,7 @@ fn run(data: Input) {
     };
 
     let mut store = RecordStore::new();
-    let _ = reader.fetch_into(0, start, end, &mut store);
+    let _ = readers.fetch_into(0, start, end, &mut store);
 
     if store.len() == 0 {
         return;
@@ -62,4 +78,4 @@ fn run(data: Input) {
             let _qual = aln.qual();
         }
     }
-}
+});
