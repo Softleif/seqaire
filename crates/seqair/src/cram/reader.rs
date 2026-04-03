@@ -426,7 +426,11 @@ impl<R: Read + Seek> IndexedCramReader<R> {
             }
 
             // Read container data
+            if container_header.length < 0 {
+                return Err(CramError::Truncated { context: "container negative length" });
+            }
             let data_len = container_header.length as usize;
+            check_alloc_size(data_len, "container data")?;
             self.container_buf.clear();
             self.container_buf.resize(data_len, 0);
             self.file
@@ -537,7 +541,11 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
     )?;
 
     // Read the container data
+    if container_header.length < 0 {
+        return Err(CramError::Truncated { context: "header container negative length" });
+    }
     let data_len = container_header.length as usize;
+    check_alloc_size(data_len, "header container data")?;
     let mut data = vec![0u8; data_len];
     file.seek(SeekFrom::Start(pos + container_header.header_size as u64))?;
     file.read_exact(&mut data)?;
