@@ -301,19 +301,11 @@ impl RegionBuf {
             return Ok(false);
         }
 
-        let data_start = self.cursor.wrapping_add(12).wrapping_add(xlen);
-        // block_end ≤ data.len() verified above; data_start ≤ block_end by construction.
-        debug_assert!(
-            data_start <= block_end,
-            "data_start past block_end: {data_start} > {block_end}"
-        );
-        debug_assert!(
-            block_end <= self.data.len(),
-            "block_end overrun: {block_end} > {}",
-            self.data.len()
-        );
-        #[allow(clippy::indexing_slicing, reason = "data_start ≤ block_end ≤ data.len()")]
-        let remaining = &self.data[data_start..block_end];
+        let data_start = self.cursor.saturating_add(12).saturating_add(xlen);
+        if data_start > block_end {
+            return Err(BgzfError::BlockSizeTooSmall { bsize });
+        }
+        let remaining = self.data.get(data_start..block_end).ok_or(BgzfError::TruncatedBlock)?;
 
         if remaining.len() < BGZF_FOOTER_SIZE {
             return Err(BgzfError::TruncatedBlock);
