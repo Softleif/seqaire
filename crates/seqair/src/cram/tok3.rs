@@ -294,7 +294,7 @@ fn decode_token_byte_streams(
     }
 
     let mut b: Vec<TokenReader> = Vec::new();
-    let mut t: i32 = -1;
+    let mut t: Option<usize> = None;
 
     while !src.is_empty() {
         let ttype = read_u8(src)?;
@@ -305,7 +305,8 @@ fn decode_token_byte_streams(
         let ty = TokenType::from_byte(ttype)?;
 
         if tok_new {
-            t += 1;
+            let new_t = t.map_or(0, |v| v.wrapping_add(1));
+            t = Some(new_t);
             b.push(TokenReader::default());
 
             if ty != TokenType::Type {
@@ -313,13 +314,14 @@ fn decode_token_byte_streams(
                 if let Some(first) = buf.first_mut() {
                     *first = ty.to_byte();
                 }
-                b.get_mut(t as usize)
+                b.get_mut(new_t)
                     .ok_or(CramError::Truncated { context: "tok3 new token position" })?
                     .set(TokenType::Type, buf);
             }
         }
 
-        let t_idx = t as usize;
+        let t_idx =
+            t.ok_or(CramError::Truncated { context: "tok3 token index before first new token" })?;
 
         if tok_dup {
             let dup_pos = read_u8(src)? as usize;

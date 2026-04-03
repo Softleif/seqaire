@@ -425,11 +425,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 continue;
             }
 
-            // Read container data
-            if container_header.length < 0 {
-                return Err(CramError::Truncated { context: "container negative length" });
-            }
-            let data_len = container_header.length as usize;
+            // Read container data; non-negative checked, so try_from is infallible here.
+            let data_len = usize::try_from(container_header.length)
+                .map_err(|_| CramError::Truncated { context: "container negative length" })?;
             check_alloc_size(data_len, "container data")?;
             self.container_buf.clear();
             self.container_buf.resize(data_len, 0);
@@ -502,7 +500,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
 
             // Decode each slice that belongs to this container and overlaps our query
             for &landmark in &container_header.landmarks {
-                let slice_offset = landmark as usize;
+                let slice_offset = usize::try_from(landmark)
+                    .map_err(|_| CramError::InvalidLength { value: landmark })?;
 
                 // r[impl cram.edge.coordinate_clamp]
                 slice::decode_slice(
@@ -540,11 +539,9 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
         buf.get(..bytes_read).ok_or(CramError::Truncated { context: "header container buf" })?,
     )?;
 
-    // Read the container data
-    if container_header.length < 0 {
-        return Err(CramError::Truncated { context: "header container negative length" });
-    }
-    let data_len = container_header.length as usize;
+    // Read the container data; non-negative checked above so the cast is safe.
+    let data_len = usize::try_from(container_header.length)
+        .map_err(|_| CramError::Truncated { context: "header container negative length" })?;
     check_alloc_size(data_len, "header container data")?;
     let mut data = vec![0u8; data_len];
     file.seek(SeekFrom::Start(pos + container_header.header_size as u64))?;
@@ -560,13 +557,15 @@ fn read_header_container<R: Read + Seek>(file: &mut R) -> Result<BamHeader, Cram
     if blk.data.len() < 4 {
         return Err(CramError::Truncated { context: "file header block data" });
     }
-    let text_len = i32::from_le_bytes(
+    let text_len_i32 = i32::from_le_bytes(
         blk.data
             .get(..4)
             .ok_or(CramError::Truncated { context: "file header block data" })?
             .try_into()
             .map_err(|_| CramError::Truncated { context: "file header block data" })?,
-    ) as usize;
+    );
+    let text_len = usize::try_from(text_len_i32)
+        .map_err(|_| CramError::InvalidLength { value: text_len_i32 })?;
     let text_bytes = blk
         .data
         .get(4..4 + text_len)

@@ -372,9 +372,11 @@ impl ByteArrayEncoding {
             }
             // r[impl cram.encoding.byte_array_len]
             Self::ByteArrayLen { len_encoding, val_encoding } => {
-                let len = len_encoding.decode(ctx)?;
-                super::reader::check_alloc_size(len as usize, "byte array length")?;
-                let mut result = Vec::with_capacity(len as usize);
+                let len_i32 = len_encoding.decode(ctx)?;
+                let len = usize::try_from(len_i32)
+                    .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
+                super::reader::check_alloc_size(len, "byte array length")?;
+                let mut result = Vec::with_capacity(len);
                 for _ in 0..len {
                     result.push(val_encoding.decode(ctx)?);
                 }

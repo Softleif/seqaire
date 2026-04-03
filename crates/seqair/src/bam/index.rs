@@ -31,6 +31,9 @@ pub enum BaiError {
 
     #[error("tabix header is truncated: {reason}")]
     TruncatedTabixHeader { reason: &'static str },
+
+    #[error("BAI/tabix field has negative count: {value}")]
+    NegativeCount { value: i32 },
 }
 
 #[derive(Debug)]

@@ -122,7 +122,9 @@ pub fn decode_slice(
             .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
             .to_zero_based()
             .as_i64();
-        let slice_ref_start = slice_start_0based.wrapping_sub(ref_start_0based) as usize;
+        let slice_ref_start_i64 = slice_start_0based.wrapping_sub(ref_start_0based);
+        let slice_ref_start = usize::try_from(slice_ref_start_i64)
+            .map_err(|_| CramError::InvalidPosition { value: slice_ref_start_i64 })?;
         // r[impl cram.slice.validated_lengths]
         let span = usize::try_from(sh.alignment_span)
             .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
@@ -260,7 +262,9 @@ fn decode_record(
 
     // r[impl cram.record.read_length]
     // 4. RL (read length)
-    let read_length = ds.read_length.decode(ctx)? as usize;
+    let read_length_i32 = ds.read_length.decode(ctx)?;
+    let read_length = usize::try_from(read_length_i32)
+        .map_err(|_| CramError::InvalidLength { value: read_length_i32 })?;
 
     // r[impl cram.record.position]
     // 5. AP (alignment position)
@@ -303,7 +307,9 @@ fn decode_record(
     }
 
     // 9. TL (tag line index)
-    let tag_line_idx = ds.tag_line.decode(ctx)? as usize;
+    let tag_line_idx_i32 = ds.tag_line.decode(ctx)?;
+    let tag_line_idx = usize::try_from(tag_line_idx_i32)
+        .map_err(|_| CramError::InvalidLength { value: tag_line_idx_i32 })?;
 
     // r[impl cram.record.aux_tags]
     // 10. Decode tag values
@@ -326,9 +332,9 @@ fn decode_record(
 
     // r[impl cram.record.rg_tag]
     // Add RG tag if read group >= 0
-    if read_group >= 0 {
+    if let Ok(rg_idx) = usize::try_from(read_group) {
         // Look up @RG ID from header text
-        if let Some(rg_id) = get_read_group_id(header, read_group as usize) {
+        if let Some(rg_id) = get_read_group_id(header, rg_idx) {
             aux_buf.push(b'R');
             aux_buf.push(b'G');
             aux_buf.push(b'Z');
@@ -348,13 +354,15 @@ fn decode_record(
     qual_buf.reserve(read_length);
 
     if !is_unmapped {
-        let feature_count = ds.feature_count.decode(ctx)?;
+        let feature_count_i32 = ds.feature_count.decode(ctx)?;
+        let feature_count = usize::try_from(feature_count_i32)
+            .map_err(|_| CramError::InvalidLength { value: feature_count_i32 })?;
 
         // Decode features and reconstruct sequence + CIGAR
         let result = decode_features_and_reconstruct(
             ch,
             ctx,
-            feature_count as usize,
+            feature_count,
             read_length,
             pos_0based.as_i64(),
             ref_start_0based,
@@ -569,7 +577,10 @@ fn decode_features_and_reconstruct(
     }
 
     // Reconstruct sequence and CIGAR from reference + features
-    let ref_offset = (pos_0based.wrapping_sub(slice_start_0based)) as usize;
+    // pos_0based >= slice_start_0based is guaranteed by CRAM structure; a negative
+    // difference would indicate a malformed file, so clamp to 0 and let ref_base_at
+    // handle out-of-bounds via its warning path.
+    let ref_offset = usize::try_from(pos_0based.wrapping_sub(slice_start_0based)).unwrap_or(0);
     let mut read_pos = 0usize; // 0-based position in the read
     let mut ref_pos = 0usize; // 0-based position relative to alignment start on reference
     let mut ref_warned = false; // log at most one warning per reconstruction
