@@ -102,7 +102,12 @@ fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
         if count >= 5 {
             return Err(CramError::Uint7Overflow);
         }
-        count += 1;
+
+        #[allow(clippy::arithmetic_side_effects, reason = "count < 5")]
+        {
+            count += 1;
+        }
+
         let b = read_u8(src)? as u32;
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {

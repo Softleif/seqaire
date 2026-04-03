@@ -32,7 +32,9 @@ impl RefSeq {
     }
 
     pub fn base_at(&self, pos: Pos<Zero>) -> Base {
-        let offset = pos.as_i64() - self.start_pos.as_i64();
+        let Some(offset) = pos.as_i64().checked_sub(self.start_pos.as_i64()) else {
+            return Base::Unknown;
+        };
         if offset < 0 {
             return Base::Unknown;
         }
@@ -335,7 +337,7 @@ impl Iterator for PileupEngine {
                         self.active_end_pos.swap_remove(i);
                         self.active.swap_remove(i);
                     } else {
-                        i += 1;
+                        i = i.checked_add(1).expect("active set size exceeded usize::MAX");
                     }
                 }
             }
@@ -348,7 +350,8 @@ impl Iterator for PileupEngine {
                 if rec.pos > pos {
                     break;
                 }
-                self.next_entry += 1;
+                self.next_entry =
+                    self.next_entry.checked_add(1).expect("next_entry exceeded usize::MAX");
 
                 if rec.end_pos < pos {
                     continue;
