@@ -1,8 +1,9 @@
-//! Full-stack fuzz through FuzzReaders: BAM/CRAM + index + FASTA → fetch → pileup.
+//! Full-stack fuzz through FuzzReaders: BAM/SAM/CRAM + index + FASTA → fetch → pileup.
 //!
 //! Uses a simple hand-rolled binary format (not Arbitrary) for zero-waste seed usage.
-//! First byte selects BAM (0) or CRAM (2), then fixed-size length headers split
-//! the remaining bytes into alignment data, index, FASTA, FAI, and GZI.
+//! First byte selects BAM (0), SAM-BGZF (1), CRAM (2), or plain SAM (3), then
+//! fixed-size length headers split the remaining bytes into alignment data, index,
+//! FASTA, FAI, and GZI.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -29,10 +30,22 @@ fuzz_target!(|data: &[u8]| {
             fai_str,
             input.gzi,
         ),
-        Format::Sam => return,
+        Format::Sam => FuzzReaders::from_sam_bytes(
+            input.data1.to_vec(),
+            input.data2,
+            input.fasta_gz.to_vec(),
+            fai_str,
+            input.gzi,
+        ),
         Format::Cram => FuzzReaders::from_cram_bytes(
             input.data1.to_vec(),
             input.data2,
+            input.fasta_gz.to_vec(),
+            fai_str,
+            input.gzi,
+        ),
+        Format::PlainSam => FuzzReaders::from_plain_sam_bytes(
+            input.data1.to_vec(),
             input.fasta_gz.to_vec(),
             fai_str,
             input.gzi,

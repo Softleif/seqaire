@@ -117,6 +117,44 @@ impl BamIndex {
         parse_refs(data, &mut pos)
     }
 
+    /// Parse a tabix index from raw (already decompressed) bytes.
+    #[cfg(feature = "fuzz")]
+    pub fn from_tabix_bytes(data: &[u8]) -> Result<Self, BaiError> {
+        if data.len() < 4 {
+            return Err(BaiError::TruncatedTabixHeader { reason: "file too short for magic" });
+        }
+        if !data.starts_with(b"TBI\x01") {
+            let mut found = [0u8; 4];
+            if let Some(src) = data.get(..4) {
+                found.copy_from_slice(src);
+            }
+            return Err(BaiError::InvalidTabixMagic { found });
+        }
+
+        let mut pos = 4;
+        let n_ref = read_i32(data, &mut pos)?;
+        let _format = read_i32(data, &mut pos)?;
+        let _col_seq = read_i32(data, &mut pos)?;
+        let _col_beg = read_i32(data, &mut pos)?;
+        let _col_end = read_i32(data, &mut pos)?;
+        let _meta = read_i32(data, &mut pos)?;
+        let _skip = read_i32(data, &mut pos)?;
+        let l_nm = read_i32(data, &mut pos)? as usize;
+
+        if data.len() < pos.wrapping_add(l_nm) {
+            return Err(BaiError::TruncatedTabixHeader { reason: "names extend past end of data" });
+        }
+        pos = pos.wrapping_add(l_nm);
+
+        parse_refs_with_count(data, &mut pos, n_ref as usize)
+    }
+
+    /// Create an empty index with no references (for plain SAM fuzzing).
+    #[cfg(feature = "fuzz")]
+    pub fn empty() -> Self {
+        BamIndex { references: Vec::new() }
+    }
+
     // r[impl tabix.magic]
     // r[impl tabix.header]
     // r[impl tabix.bai_reuse]

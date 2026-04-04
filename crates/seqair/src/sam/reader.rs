@@ -196,6 +196,107 @@ impl IndexedSamReader<File> {
     }
 }
 
+#[cfg(feature = "fuzz")]
+impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
+    /// Build an in-memory BGZF SAM reader from raw bytes (BGZF-compressed SAM + tabix index).
+    pub fn from_bytes(sam_data: Vec<u8>, tbi_data: &[u8]) -> Result<Self, SamError> {
+        let mut bgzf = crate::bam::bgzf::BgzfReader::from_cursor(sam_data.clone());
+        let header_text = read_sam_header(&mut bgzf)?;
+        let header = BamHeader::from_sam_text(&header_text)?;
+        header.validate_sort_order()?;
+        let index = BamIndex::from_tabix_bytes(tbi_data)?;
+
+        Ok(IndexedSamReader {
+            bulk_reader: std::io::Cursor::new(sam_data),
+            shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz>") }),
+        })
+    }
+
+    /// Build an in-memory plain (uncompressed) SAM reader for fuzzing.
+    /// Parses header from the text, then linearly scans all records into a RecordStore
+    /// on each `fetch_plain_into` call.
+    pub fn from_plain_bytes(sam_data: Vec<u8>) -> Result<Self, SamError> {
+        let text = String::from_utf8(sam_data.clone())
+            .map_err(|source| SamRecordError::HeaderNotUtf8 { source })?;
+
+        // Extract header lines (starting with @)
+        let mut header_text = String::new();
+        for line in text.lines() {
+            if line.starts_with('@') {
+                header_text.push_str(line);
+                header_text.push('\n');
+            } else {
+                break;
+            }
+        }
+
+        let header = BamHeader::from_sam_text(&header_text)?;
+
+        // No index needed — we'll do linear scans
+        // Create a dummy empty index
+        let index = BamIndex::empty();
+
+        Ok(IndexedSamReader {
+            bulk_reader: std::io::Cursor::new(sam_data),
+            shared: Arc::new(SamShared { index, header, sam_path: PathBuf::from("<fuzz-plain>") }),
+        })
+    }
+
+    /// Linear scan of plain (uncompressed) SAM text, parsing all records that overlap [start, end).
+    pub fn fetch_plain_into(
+        &mut self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+        store: &mut RecordStore,
+    ) -> Result<usize, SamError> {
+        store.clear();
+
+        self.bulk_reader.set_position(0);
+        let mut all_data = Vec::new();
+        std::io::Read::read_to_end(&mut self.bulk_reader, &mut all_data)
+            .map_err(|source| SamError::Open { path: PathBuf::from("<fuzz-plain>"), source })?;
+
+        let start_i64 = start.as_i64();
+        let end_i64 = end.as_i64();
+        let tid_i32 = tid as i32;
+
+        let mut cigar_buf = Vec::with_capacity(256);
+        let mut bases_buf = Vec::with_capacity(256);
+        let mut qual_buf = Vec::with_capacity(256);
+        let mut aux_buf = Vec::with_capacity(256);
+
+        for line in all_data.split(|&b| b == b'\n') {
+            if line.is_empty() || line.first() == Some(&b'@') {
+                continue;
+            }
+            // Strip \r
+            let line = if line.last() == Some(&b'\r') {
+                line.get(..line.len().saturating_sub(1)).unwrap_or(line)
+            } else {
+                line
+            };
+            if line.is_empty() {
+                continue;
+            }
+            parse_sam_line(
+                line,
+                &self.shared.header,
+                tid_i32,
+                start_i64,
+                end_i64,
+                store,
+                &mut cigar_buf,
+                &mut bases_buf,
+                &mut qual_buf,
+                &mut aux_buf,
+            )?;
+        }
+
+        Ok(store.len())
+    }
+}
+
 impl<R: Read + Seek> IndexedSamReader<R> {
     pub fn shared(&self) -> &Arc<SamShared> {
         &self.shared

@@ -4,14 +4,21 @@ use crate::{
     cram::reader::IndexedCramReader,
     fasta::IndexedFastaReader,
     reader::indexed::CursorReader,
+    sam::reader::IndexedSamReader,
 };
 use seqair_types::{Base, Pos, Zero};
 use std::rc::Rc;
 
+/// Alignment reader backend — indexed (BGZF+index) or plain (linear scan).
+enum AlignmentBackend {
+    Indexed(CursorReader),
+    PlainSam(IndexedSamReader<std::io::Cursor<Vec<u8>>>),
+}
+
 /// In-memory reader bundle for fuzzing. No file I/O — all data from byte slices.
 /// Uses the same `IndexedReader` enum as production code, just with `Cursor` I/O.
 pub struct FuzzReaders {
-    alignment: CursorReader,
+    alignment: AlignmentBackend,
     fasta: IndexedFastaReader<std::io::Cursor<Vec<u8>>>,
     store: RecordStore,
     fasta_buf: Vec<u8>,
@@ -30,7 +37,7 @@ impl FuzzReaders {
         let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
             .map_err(|source| ReaderError::FastaOpen { source })?;
         Ok(FuzzReaders {
-            alignment: CursorReader::Bam(bam),
+            alignment: AlignmentBackend::Indexed(CursorReader::Bam(bam)),
             fasta,
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
@@ -55,7 +62,45 @@ impl FuzzReaders {
         let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
             .map_err(|source| ReaderError::FastaOpen { source })?;
         Ok(FuzzReaders {
-            alignment: CursorReader::Cram(Box::new(cram)),
+            alignment: AlignmentBackend::Indexed(CursorReader::Cram(Box::new(cram))),
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+        })
+    }
+
+    /// Build BGZF-compressed SAM reader from raw bytes: BGZF SAM + TBI index + FASTA.gz + FAI + GZI.
+    pub fn from_sam_bytes(
+        sam_data: Vec<u8>,
+        tbi_data: &[u8],
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, ReaderError> {
+        let sam = IndexedSamReader::from_bytes(sam_data, tbi_data)?;
+        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
+            .map_err(|source| ReaderError::FastaOpen { source })?;
+        Ok(FuzzReaders {
+            alignment: AlignmentBackend::Indexed(CursorReader::Sam(sam)),
+            fasta,
+            store: RecordStore::default(),
+            fasta_buf: Vec::new(),
+        })
+    }
+
+    /// Build plain (uncompressed) SAM reader — no BGZF, no index, linear scan only.
+    /// Maximizes SAM parsing coverage by removing the BGZF framing requirement.
+    pub fn from_plain_sam_bytes(
+        sam_data: Vec<u8>,
+        fasta_gz_data: Vec<u8>,
+        fai_contents: &str,
+        gzi_data: &[u8],
+    ) -> Result<Self, ReaderError> {
+        let sam = IndexedSamReader::from_plain_bytes(sam_data)?;
+        let fasta = IndexedFastaReader::from_bytes(fasta_gz_data, fai_contents, gzi_data)
+            .map_err(|source| ReaderError::FastaOpen { source })?;
+        Ok(FuzzReaders {
+            alignment: AlignmentBackend::PlainSam(sam),
             fasta,
             store: RecordStore::default(),
             fasta_buf: Vec::new(),
@@ -63,7 +108,10 @@ impl FuzzReaders {
     }
 
     pub fn header(&self) -> &BamHeader {
-        self.alignment.header()
+        match &self.alignment {
+            AlignmentBackend::Indexed(r) => r.header(),
+            AlignmentBackend::PlainSam(r) => r.header(),
+        }
     }
 
     /// Full pileup pipeline: fetch_into → PileupEngine with reference sequence.
@@ -73,12 +121,17 @@ impl FuzzReaders {
         start: Pos<Zero>,
         end: Pos<Zero>,
     ) -> Result<PileupEngine, ReaderError> {
-        self.alignment.fetch_into(tid, start, end, &mut self.store)?;
+        match &mut self.alignment {
+            AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, &mut self.store)?,
+            AlignmentBackend::PlainSam(r) => {
+                r.fetch_plain_into(tid, start, end, &mut self.store).map_err(ReaderError::from)?
+            }
+        };
         let store = std::mem::take(&mut self.store);
         let mut engine = PileupEngine::new(store, start, end);
 
         // Try to set reference sequence
-        if let Some(name) = self.alignment.header().target_name(tid) {
+        if let Some(name) = self.header().target_name(tid) {
             let name = name.to_owned();
             if self.fasta.fetch_seq_into(&name, start, end, &mut self.fasta_buf).is_ok() {
                 let buf = std::mem::take(&mut self.fasta_buf);
@@ -91,6 +144,21 @@ impl FuzzReaders {
         Ok(engine)
     }
 
+    fn fetch_records(
+        &mut self,
+        tid: u32,
+        start: Pos<Zero>,
+        end: Pos<Zero>,
+        store: &mut RecordStore,
+    ) -> Result<usize, ReaderError> {
+        match &mut self.alignment {
+            AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, store),
+            AlignmentBackend::PlainSam(r) => {
+                r.fetch_plain_into(tid, start, end, store).map_err(ReaderError::from)
+            }
+        }
+    }
+
     pub fn fetch_into(
         &mut self,
         tid: u32,
@@ -98,7 +166,7 @@ impl FuzzReaders {
         end: Pos<Zero>,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
-        self.alignment.fetch_into(tid, start, end, store)
+        self.fetch_records(tid, start, end, store)
     }
 
     pub fn recover_store(&mut self, engine: &mut PileupEngine) {

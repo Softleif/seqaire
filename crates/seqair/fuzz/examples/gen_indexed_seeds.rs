@@ -45,6 +45,24 @@ fn main() {
         gzi.len(),
     );
 
+    // === Plain SAM seed (format byte = 3) ===
+    // Synthetic minimal SAM: header + one aligned record
+    let plain_sam = b"@HD\tVN:1.6\tSO:coordinate\n\
+        @SQ\tSN:chr1\tLN:1000\n\
+        read1\t0\tchr1\t100\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\n";
+
+    let plain_sam_seed = Input::encode(3, plain_sam, &[], &[], &fai, &gzi);
+    let parsed = Input::parse(&plain_sam_seed).expect("plain SAM seed must round-trip");
+    assert_eq!(parsed.data1.len(), plain_sam.len());
+    fs::write(seed_dir.join("plain_sam_seed"), &plain_sam_seed).unwrap();
+    println!(
+        "plain_sam_seed: {} bytes (sam={}, fai={}, gzi={})",
+        plain_sam_seed.len(),
+        plain_sam.len(),
+        fai.len(),
+        gzi.len(),
+    );
+
     // === CRAM seed ===
     let cram = fs::read(data_dir.join("test.cram")).unwrap();
     let crai_gz = fs::read(data_dir.join("test.cram.crai")).unwrap();

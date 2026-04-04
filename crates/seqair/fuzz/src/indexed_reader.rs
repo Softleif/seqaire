@@ -5,9 +5,9 @@
 //! Arbitrary's length encoding wastes most of the seed data on bad Vec splits.
 
 /// Header layout (16 bytes):
-///   [0]    format: 0=BAM, 1=SAM, 2=CRAM
+///   [0]    format: 0=BAM, 1=SAM(BGZF), 2=CRAM, 3=PlainSAM
 ///   [1..5] data1_len: u32 LE (BAM/SAM/CRAM file bytes)
-///   [5..9] data2_len: u32 LE (BAI/TBI/CRAI index bytes)
+///   [5..9] data2_len: u32 LE (BAI/TBI/CRAI index bytes; unused for PlainSAM)
 ///   [9..11] fai_len: u16 LE (FAI text bytes)
 ///   [11..13] gzi_len: u16 LE (GZI binary bytes)
 ///   [13..16] reserved (0)
@@ -19,8 +19,11 @@ pub const HEADER_SIZE: usize = 16;
 #[derive(Debug)]
 pub enum Format {
     Bam,
+    /// BGZF-compressed SAM with tabix index.
     Sam,
     Cram,
+    /// Plain (uncompressed) SAM — no BGZF, no index, linear scan.
+    PlainSam,
 }
 
 #[derive(Debug)]
@@ -40,10 +43,11 @@ impl<'a> Input<'a> {
             return None;
         }
 
-        let format = match data[0] % 3 {
+        let format = match data[0] % 4 {
             0 => Format::Bam,
             1 => Format::Sam,
-            _ => Format::Cram,
+            2 => Format::Cram,
+            _ => Format::PlainSam,
         };
 
         let data1_len = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
