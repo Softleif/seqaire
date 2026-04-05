@@ -67,8 +67,8 @@ impl<W: Write> BcfWriter<W> {
     // r[impl bcf_writer.magic]
     /// Write the BCF magic and header. Must be called once before write_record.
     pub fn write_header(&mut self) -> Result<(), VcfError> {
-        // Magic: BCF\x02\x01
-        self.bgzf.write_all(b"BCF\x02\x01")?;
+        // Magic: BCF\x02\x02 (BCF version 2.2, the current version expected by htslib)
+        self.bgzf.write_all(b"BCF\x02\x02")?;
 
         // Header text (NUL-terminated)
         let header_text = self.header.to_vcf_text();
@@ -688,7 +688,7 @@ mod tests {
         let mut data = Vec::new();
         reader.read_to_end(&mut data).unwrap();
 
-        assert_eq!(&data[..5], b"BCF\x02\x01");
+        assert_eq!(&data[..5], b"BCF\x02\x02");
         // l_text follows
         let l_text = u32::from_le_bytes([data[5], data[6], data[7], data[8]]) as usize;
         // Header text should end with NUL
