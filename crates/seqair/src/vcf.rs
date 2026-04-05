@@ -6,6 +6,7 @@ pub mod error;
 pub mod header;
 pub mod index_builder;
 pub mod record;
+pub mod writer;
 
 pub use alleles::Alleles;
 pub use error::{AllelesError, VcfEncodeError, VcfError, VcfHeaderError};
