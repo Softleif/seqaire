@@ -94,6 +94,12 @@ pub enum VcfError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    #[error(transparent)]
+    Index(#[from] super::index_builder::IndexError),
+
     #[error("write_header() must be called before write_record()")]
     HeaderNotWritten,
+
+    #[error("header text too large for BCF (exceeds u32::MAX)")]
+    HeaderTooLarge,
 }

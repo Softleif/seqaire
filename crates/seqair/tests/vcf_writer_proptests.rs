@@ -1,4 +1,11 @@
 //! Property-based tests for VCF writer round-trip and BCF encoding correctness.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use proptest::prelude::*;
 use seqair::vcf::alleles::Alleles;
@@ -172,7 +179,7 @@ proptest! {
     ) {
         // Header with a custom filter so we can test the Failed path
         use seqair::vcf::header::FilterDef;
-        use seqair::vcf::record::Filters;
+
         let header = Arc::new(
             VcfHeader::builder()
                 .add_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap()

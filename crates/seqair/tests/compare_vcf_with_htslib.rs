@@ -1,4 +1,11 @@
 //! Validate seqair BCF output using bcftools (htslib reference implementation).
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 //!
 //! Writes BCF with seqair, runs `bcftools view` to verify the file is valid
 //! and fields are parsed correctly. This is the strongest validation available:
@@ -52,6 +59,7 @@ fn shared_header() -> Arc<VcfHeader> {
 }
 
 /// Write a BCF file with seqair to a temp file.
+#[allow(clippy::too_many_arguments)]
 fn write_seqair_bcf(
     header: &Arc<VcfHeader>,
     pos: u32,

@@ -191,9 +191,7 @@ impl<W: Write> VcfWriter<W> {
                 let tid = self.header.contig_id(&record.contig)? as i32;
                 let beg = record.pos.to_zero_based().get() as u64;
                 let end = beg.saturating_add(record.alleles.rlen() as u64);
-                index
-                    .push(tid, beg, end, bgzf.virtual_offset())
-                    .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
+                index.push(tid, beg, end, bgzf.virtual_offset())?;
             }
         }
 
@@ -211,9 +209,7 @@ impl<W: Write> VcfWriter<W> {
             }
             Output::Bgzf { bgzf, mut index } => {
                 let voff = bgzf.virtual_offset();
-                index
-                    .finish(voff)
-                    .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
+                index.finish(voff)?;
                 bgzf.finish()?;
                 Ok(Some(index))
             }

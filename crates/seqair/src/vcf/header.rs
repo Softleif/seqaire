@@ -357,6 +357,7 @@ impl VcfHeaderBuilder {
 
     // r[impl vcf_header.builder]
     // r[impl vcf_header.string_map]
+    #[must_use = "build() returns the header; ignoring it discards all configuration"]
     pub fn build(mut self) -> Result<VcfHeader, VcfHeaderError> {
         // Ensure PASS filter is present and first
         if !self.filters.contains_key("PASS") {

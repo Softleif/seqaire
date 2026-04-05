@@ -1,4 +1,11 @@
 //! Deep round-trip property tests: write VCF/BCF with seqair, read back with
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 //! noodles, assert every field comes back identical. Covers edge cases that
 //! simpler tests miss: multi-allelic, indels, missing values, phasing, flags.
 
@@ -7,7 +14,7 @@ use proptest::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::bcf_writer::BcfWriter;
 use seqair::vcf::header::{ContigDef, FilterDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Filters, Genotype, InfoValue, SampleValue, VcfRecordBuilder};
+use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
 use seqair::vcf::writer::VcfWriter;
 use seqair_types::{Base, One, Pos, SmolStr};
 use std::io::Cursor;
@@ -289,6 +296,7 @@ fn vcf_roundtrip(
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct ParsedRecord {
     pos: u32,
     ref_allele: String,
@@ -332,7 +340,7 @@ fn extract_fields(
 ) -> ParsedRecord {
     let pos = rec.variant_start().map(|p| p.get() as u32).unwrap_or(0);
     let qual = rec.quality_score().map(|q| {
-        let f: f32 = q.into();
+        let f: f32 = q;
         f.to_bits()
     });
     let ref_allele = rec.reference_bases().to_string();
@@ -590,8 +598,8 @@ proptest! {
 
         let header = roundtrip_header();
         let record = input.to_vcf_record(&header);
-        let bcf_parsed = bcf_roundtrip(&header, &[record.clone()]);
-        let vcf_parsed = vcf_roundtrip(&header, &[record]);
+        let bcf_parsed = bcf_roundtrip(&header, std::slice::from_ref(&record));
+        let vcf_parsed = vcf_roundtrip(&header, std::slice::from_ref(&record));
 
         prop_assert_eq!(bcf_parsed.len(), 1);
         prop_assert_eq!(vcf_parsed.len(), 1);

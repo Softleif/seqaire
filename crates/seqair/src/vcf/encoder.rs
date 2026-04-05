@@ -13,6 +13,7 @@
 //! enc.emit()?;
 //! ```
 
+use super::bcf_encoding::*;
 use super::error::VcfError;
 use super::index_builder::IndexBuilder;
 use super::record::Genotype;
@@ -20,38 +21,6 @@ use crate::bam::bgzf::VirtualOffset;
 use crate::bam::bgzf_writer::BgzfWriter;
 use std::io::Write;
 use std::marker::PhantomData;
-
-// Re-use BCF constants from bcf_writer
-const BCF_BT_NULL: u8 = 0;
-const BCF_BT_INT8: u8 = 1;
-const BCF_BT_INT16: u8 = 2;
-const BCF_BT_INT32: u8 = 3;
-const BCF_BT_FLOAT: u8 = 5;
-const BCF_BT_CHAR: u8 = 7;
-
-// Sentinel values — some are used by BcfValue trait impls, others reserved for multi-sample
-#[allow(dead_code)]
-const INT8_MISSING: u8 = 0x80;
-#[allow(dead_code)]
-const INT16_MISSING: u16 = 0x8000;
-const INT32_MISSING: u32 = 0x80000000;
-const FLOAT_MISSING: u32 = 0x7F800001;
-
-#[allow(dead_code)]
-const INT8_END_OF_VECTOR: u8 = 0x81;
-#[allow(dead_code)]
-const INT16_END_OF_VECTOR: u16 = 0x8001;
-#[allow(dead_code)]
-const INT32_END_OF_VECTOR: u32 = 0x80000001;
-const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
-
-// Int ranges for BCF type selection — MIN values reserved for multi-sample smallest_int_type
-#[allow(dead_code)]
-const INT8_MIN: i32 = -120;
-const INT8_MAX: i32 = 127;
-#[allow(dead_code)]
-const INT16_MIN: i32 = -32760;
-const INT16_MAX: i32 = 32767;
 
 // ── BcfValue trait ──────────────────────────────────────────────────────
 
@@ -419,9 +388,7 @@ impl<'a> BcfRecordEncoder<'a> {
         if let Some(ref mut index) = self.index {
             let beg = self.pos_0based as u64;
             let end = beg.saturating_add(self.rlen as u64);
-            index
-                .push(self.tid, beg, end, self.bgzf.virtual_offset())
-                .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
+            index.push(self.tid, beg, end, self.bgzf.virtual_offset())?;
         }
 
         Ok(())
@@ -475,16 +442,17 @@ impl Alleles {
         encode_type_byte(enc.shared_buf, 1, BCF_BT_CHAR);
         enc.shared_buf.push(b'.');
 
-        // REF allele (zero-alloc)
-        let ref_start = enc.shared_buf.len();
-        // Reserve space for type byte, fill in after
-        enc.shared_buf.push(0); // placeholder type byte
+        // REF allele (zero-alloc): write type header, then data.
+        // For short alleles (< 15 bases), the type byte encodes the count directly.
+        // For long alleles (>= 15 bases, e.g. long deletions), we need the overflow
+        // encoding: type byte with count=15 + typed int with actual count.
+        let ref_data_start = enc.shared_buf.len();
         self.write_ref_into(enc.shared_buf);
-        let ref_len = enc.shared_buf.len().saturating_sub(ref_start).saturating_sub(1);
-        // Patch the type byte
-        if let Some(b) = enc.shared_buf.get_mut(ref_start) {
-            *b = ((ref_len.min(14) as u8) << 4) | BCF_BT_CHAR;
-        }
+        let ref_len = enc.shared_buf.len().saturating_sub(ref_data_start);
+        // Move data aside, write type header, put data back
+        let ref_data: Vec<u8> = enc.shared_buf.drain(ref_data_start..).collect();
+        encode_type_byte(enc.shared_buf, ref_len, BCF_BT_CHAR);
+        enc.shared_buf.extend_from_slice(&ref_data);
 
         // ALT alleles (zero-alloc, one typed string each)
         match self {
@@ -518,27 +486,6 @@ impl Alleles {
 
 // ── Encoding helpers ────────────────────────────────────────────────────
 
-fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
-    if count < 15 {
-        buf.push(((count as u8) << 4) | type_code);
-    } else {
-        buf.push((15 << 4) | type_code);
-        if count <= INT8_MAX as usize {
-            buf.push((1 << 4) | BCF_BT_INT8);
-            buf.push(count as u8);
-        } else if count <= INT16_MAX as usize {
-            buf.push((1 << 4) | BCF_BT_INT16);
-            buf.extend_from_slice(&(count as u16).to_le_bytes());
-        } else {
-            buf.push((1 << 4) | BCF_BT_INT32);
-            buf.extend_from_slice(&(count as u32).to_le_bytes());
-        }
-    }
-}
-
-/// Encode an array of BcfValue items. For i32, scans all values to select
-/// the smallest BCF int type per r[bcf_writer.smallest_int_type].
-/// For f32, uses BCF_BT_FLOAT directly (no type selection needed).
 /// Encode an array of BcfValue items. For i32, scans all values to select
 /// the smallest BCF int type that fits ALL values per r[bcf_writer.smallest_int_type].
 fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
@@ -547,7 +494,6 @@ fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
         return;
     }
     // Find the widest type needed across all values.
-    // Start from 0 (narrowest) and widen as needed.
     let mut type_code: u8 = 0;
     for v in values {
         let vtc = v.scalar_type_code();
@@ -555,7 +501,6 @@ fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
             type_code = vtc;
         }
     }
-    // If no values contributed (shouldn't happen since !is_empty), fall back to TYPE_CODE
     if type_code == 0 {
         type_code = T::TYPE_CODE;
     }
@@ -565,36 +510,16 @@ fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
     }
 }
 
-fn encode_typed_string(buf: &mut Vec<u8>, s: &[u8]) {
-    encode_type_byte(buf, s.len(), BCF_BT_CHAR);
-    buf.extend_from_slice(s);
-}
-
-/// Encode a dictionary index as a typed int (used for INFO/FORMAT/FILTER keys).
-fn encode_typed_int_key(buf: &mut Vec<u8>, dict_idx: u32) {
-    if dict_idx <= INT8_MAX as u32 {
-        encode_type_byte(buf, 1, BCF_BT_INT8);
-        buf.push(dict_idx as u8);
-    } else if dict_idx <= INT16_MAX as u32 {
-        encode_type_byte(buf, 1, BCF_BT_INT16);
-        buf.extend_from_slice(&(dict_idx as u16).to_le_bytes());
-    } else {
-        encode_type_byte(buf, 1, BCF_BT_INT32);
-        buf.extend_from_slice(&dict_idx.to_le_bytes());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::vcf::alleles::Alleles;
-    use crate::vcf::header::{
-        ContigDef, FilterDef, FormatDef, InfoDef, Number, ValueType, VcfHeader,
-    };
+    use crate::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
     use crate::vcf::record::Genotype;
     use seqair_types::{Base, SmolStr};
     use std::sync::Arc;
 
+    #[allow(dead_code)]
     fn test_header() -> Arc<VcfHeader> {
         Arc::new(
             VcfHeader::builder()
