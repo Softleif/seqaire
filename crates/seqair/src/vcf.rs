@@ -4,6 +4,7 @@
 pub mod alleles;
 pub mod error;
 pub mod header;
+pub mod index_builder;
 pub mod record;
 
 pub use alleles::Alleles;

@@ -1,0 +1,476 @@
+//! Single-pass index builder for TBI/CSI. Mirrors htslib's `hts_idx_push`
+//! algorithm: accumulates bin/chunk/linear index data during writing.
+
+use crate::bam::bgzf::VirtualOffset;
+use seqair_types::SmolStr;
+use std::collections::HashMap;
+
+/// A chunk: contiguous range of virtual offsets in the compressed file.
+#[derive(Debug, Clone, Copy)]
+pub struct IndexChunk {
+    pub begin: VirtualOffset,
+    pub end: VirtualOffset,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum IndexError {
+    #[error("input not sorted: tid={tid}, pos={pos}")]
+    UnsortedInput { tid: i32, pos: u64 },
+
+    #[error("I/O error writing index")]
+    Io(#[from] std::io::Error),
+
+    #[error("BGZF error writing index")]
+    Bgzf(#[from] crate::bam::bgzf::BgzfError),
+}
+
+/// Per-reference accumulated index data.
+#[derive(Debug)]
+struct RefIndexBuilder {
+    bins: HashMap<u32, Vec<IndexChunk>>,
+    linear_index: Vec<VirtualOffset>,
+    // Pseudo-bin metadata
+    off_beg: VirtualOffset,
+    off_end: VirtualOffset,
+    n_mapped: u64,
+    n_unmapped: u64,
+}
+
+impl RefIndexBuilder {
+    fn new() -> Self {
+        Self {
+            bins: HashMap::new(),
+            linear_index: Vec::new(),
+            off_beg: VirtualOffset(u64::MAX),
+            off_end: VirtualOffset(0),
+            n_mapped: 0,
+            n_unmapped: 0,
+        }
+    }
+}
+
+const UNSET: u64 = u64::MAX;
+
+// r[impl index_builder.single_pass]
+// r[impl index_builder.sort_validation]
+// r[impl index_builder.offset_convention]
+/// Incrementally builds a TBI or CSI index during writing.
+///
+/// Follows htslib's single-pass `hts_idx_push` algorithm. The offset
+/// passed to `push()` is the virtual offset AFTER writing the record;
+/// the previous call's offset is used as the start of the current record.
+pub struct IndexBuilder {
+    min_shift: u32,
+    depth: u32,
+
+    refs: Vec<RefIndexBuilder>,
+
+    // State machine (mirrors htslib's hts_idx_t.z)
+    last_off: VirtualOffset,
+    save_off: VirtualOffset,
+    last_bin: u32,
+    save_bin: u32,
+    last_tid: i32,
+    save_tid: i32,
+    last_coor: u64,
+}
+
+impl IndexBuilder {
+    /// Create a new index builder.
+    ///
+    /// - `n_refs`: number of reference sequences
+    /// - `min_shift`: minimum bin shift (14 for BAI/TBI)
+    /// - `depth`: binning depth (5 for BAI/TBI)
+    /// - `header_end_offset`: virtual offset after writing the file header
+    pub fn new(
+        n_refs: usize,
+        min_shift: u32,
+        depth: u32,
+        header_end_offset: VirtualOffset,
+    ) -> Self {
+        let refs = (0..n_refs).map(|_| RefIndexBuilder::new()).collect();
+        Self {
+            min_shift,
+            depth,
+            refs,
+            last_off: header_end_offset,
+            save_off: header_end_offset,
+            last_bin: u32::MAX,
+            save_bin: u32::MAX,
+            last_tid: -1,
+            save_tid: -1,
+            last_coor: 0,
+        }
+    }
+
+    /// Create a TBI-compatible builder (min_shift=14, depth=5).
+    pub fn tbi(n_refs: usize, header_end_offset: VirtualOffset) -> Self {
+        Self::new(n_refs, 14, 5, header_end_offset)
+    }
+
+    // r[impl index_builder.single_pass]
+    // r[impl index_builder.sort_validation]
+    // r[impl index_builder.binning]
+    // r[impl index_builder.chunk_flush]
+    // r[impl index_builder.linear_index]
+    /// Register a record that was just written.
+    ///
+    /// - `tid`: reference sequence index (0-based)
+    /// - `beg`: 0-based start position
+    /// - `end`: 0-based exclusive end position
+    /// - `offset`: virtual offset AFTER writing the record
+    pub fn push(
+        &mut self,
+        tid: i32,
+        beg: u64,
+        end: u64,
+        offset: VirtualOffset,
+    ) -> Result<(), IndexError> {
+        // Validate sort order
+        if tid < self.last_tid {
+            return Err(IndexError::UnsortedInput { tid, pos: beg });
+        }
+        if tid == self.last_tid && beg < self.last_coor {
+            return Err(IndexError::UnsortedInput { tid, pos: beg });
+        }
+
+        let bin = reg2bin(beg, end, self.min_shift, self.depth);
+
+        if tid != self.last_tid {
+            // New reference sequence
+            if self.save_bin != u32::MAX {
+                self.flush_chunk();
+            }
+            if self.last_tid >= 0 {
+                self.flush_pseudo_bin();
+            }
+            // Initialize for new tid
+            if let Some(r) = self.refs.get_mut(tid as usize) {
+                r.off_beg = self.last_off;
+            }
+            self.save_off = self.last_off;
+            self.save_bin = bin;
+            self.save_tid = tid;
+        } else if bin != self.last_bin {
+            // Same tid, different bin
+            self.flush_chunk();
+            self.save_off = self.last_off;
+            self.save_bin = bin;
+        }
+
+        // Update linear index
+        if let Some(r) = self.refs.get_mut(tid as usize) {
+            let beg_window = (beg >> self.min_shift) as usize;
+            let end_window = (end.saturating_sub(1) >> self.min_shift) as usize;
+            if r.linear_index.len() <= end_window {
+                r.linear_index.resize(end_window.saturating_add(1), VirtualOffset(UNSET));
+            }
+            for slot in r.linear_index.get_mut(beg_window..=end_window).unwrap_or(&mut []) {
+                if slot.0 == UNSET {
+                    *slot = self.last_off;
+                }
+            }
+            r.n_mapped = r.n_mapped.saturating_add(1);
+            if r.off_beg.0 == u64::MAX {
+                r.off_beg = self.last_off;
+            }
+            r.off_end = offset;
+        }
+
+        self.last_bin = bin;
+        self.last_tid = tid;
+        self.last_coor = beg;
+        self.last_off = offset;
+
+        Ok(())
+    }
+
+    fn flush_chunk(&mut self) {
+        if self.save_bin == u32::MAX || self.save_tid < 0 {
+            return;
+        }
+        let chunk = IndexChunk { begin: self.save_off, end: self.last_off };
+        if let Some(r) = self.refs.get_mut(self.save_tid as usize) {
+            r.bins.entry(self.save_bin).or_default().push(chunk);
+        }
+    }
+
+    // r[impl index_builder.pseudo_bin]
+    fn flush_pseudo_bin(&mut self) {
+        if self.last_tid < 0 {
+            return;
+        }
+        let pseudo_bin_id = pseudo_bin(self.depth);
+        if let Some(r) = self.refs.get_mut(self.last_tid as usize) {
+            let chunks = vec![
+                // Chunk 0: virtual offset range
+                IndexChunk { begin: r.off_beg, end: r.off_end },
+                // Chunk 1: mapped/unmapped counts packed as virtual offsets
+                IndexChunk { begin: VirtualOffset(r.n_mapped), end: VirtualOffset(r.n_unmapped) },
+            ];
+            r.bins.insert(pseudo_bin_id, chunks);
+        }
+    }
+
+    // r[impl index_builder.linear_backfill]
+    /// Finalize the index after all records have been written.
+    pub fn finish(&mut self, final_offset: VirtualOffset) -> Result<(), IndexError> {
+        self.last_off = final_offset;
+        if self.save_bin != u32::MAX {
+            self.flush_chunk();
+        }
+        if self.last_tid >= 0 {
+            self.flush_pseudo_bin();
+        }
+
+        // Backfill linear index gaps (right-to-left propagation)
+        for r in &mut self.refs {
+            backfill_linear_index(&mut r.linear_index);
+        }
+        Ok(())
+    }
+
+    // r[impl index_builder.tbi_format]
+    /// Write TBI format to a writer. The output is BGZF-compressed.
+    pub fn write_tbi<W: std::io::Write>(
+        &self,
+        writer: W,
+        contig_names: &[SmolStr],
+    ) -> Result<(), IndexError> {
+        use crate::bam::bgzf_writer::BgzfWriter;
+
+        let mut bgzf = BgzfWriter::new(writer);
+        let mut buf = Vec::new();
+
+        // Magic
+        buf.extend_from_slice(b"TBI\x01");
+        // n_ref
+        write_i32(&mut buf, self.refs.len() as i32);
+        // format = 2 (VCF)
+        write_i32(&mut buf, 2);
+        // col_seq = 1, col_beg = 2, col_end = 0
+        write_i32(&mut buf, 1);
+        write_i32(&mut buf, 2);
+        write_i32(&mut buf, 0);
+        // meta = '#' = 35
+        write_i32(&mut buf, 35);
+        // skip = 0
+        write_i32(&mut buf, 0);
+
+        // Concatenated null-terminated sequence names
+        let mut names_buf = Vec::new();
+        for name in contig_names {
+            names_buf.extend_from_slice(name.as_bytes());
+            names_buf.push(0);
+        }
+        write_i32(&mut buf, names_buf.len() as i32);
+        buf.extend_from_slice(&names_buf);
+
+        // Per-reference bin/chunk/linear data (BAI format)
+        for r in &self.refs {
+            write_ref_index(&mut buf, r);
+        }
+
+        bgzf.write_all(&buf)?;
+        bgzf.finish()?;
+        Ok(())
+    }
+
+    /// Number of references in the index.
+    pub fn n_refs(&self) -> usize {
+        self.refs.len()
+    }
+}
+
+fn write_ref_index(buf: &mut Vec<u8>, r: &RefIndexBuilder) {
+    // n_bin
+    write_i32(buf, r.bins.len() as i32);
+
+    for (&bin_id, chunks) in &r.bins {
+        // bin_id
+        write_u32(buf, bin_id);
+        // n_chunk
+        write_i32(buf, chunks.len() as i32);
+        for chunk in chunks {
+            write_u64(buf, chunk.begin.0);
+            write_u64(buf, chunk.end.0);
+        }
+    }
+
+    // Linear index
+    write_i32(buf, r.linear_index.len() as i32);
+    for &offset in &r.linear_index {
+        let val = if offset.0 == UNSET { 0 } else { offset.0 };
+        write_u64(buf, val);
+    }
+}
+
+// r[impl index_builder.binning]
+/// Compute the bin for a genomic interval.
+/// Matches htslib's `hts_reg2bin(beg, end, min_shift, n_lvls)`.
+pub fn reg2bin(beg: u64, end: u64, min_shift: u32, depth: u32) -> u32 {
+    let end = end.saturating_sub(1);
+    let mut s = min_shift;
+    // Leaf-level offset: ((1 << depth*3) - 1) / 7
+    let mut t = ((1u64 << depth.saturating_mul(3)).saturating_sub(1)).checked_div(7).unwrap_or(0);
+
+    let mut l = depth;
+    while l > 0 {
+        if beg >> s == end >> s {
+            return t.saturating_add(beg >> s) as u32;
+        }
+        // htslib: decrement l first, then update s and t with new l
+        l = l.saturating_sub(1);
+        s = s.saturating_add(3);
+        t = t.saturating_sub(1u64 << l.saturating_mul(3));
+    }
+    0
+}
+
+/// Pseudo-bin ID for the given depth (one past the max valid bin).
+/// For depth=5: 37450.
+fn pseudo_bin(depth: u32) -> u32 {
+    // max_bin_id = ((1 << (depth+1)*3) - 1) / 7
+    let bits = depth.saturating_add(1).saturating_mul(3);
+    let max_id = ((1u64 << bits).saturating_sub(1)).checked_div(7).unwrap_or(0);
+    max_id.saturating_add(1) as u32
+}
+
+// r[impl index_builder.linear_backfill]
+fn backfill_linear_index(linear: &mut [VirtualOffset]) {
+    if linear.is_empty() {
+        return;
+    }
+    // Right-to-left: each unset slot gets the next valid value
+    let mut last_valid = VirtualOffset(0);
+    for slot in linear.iter_mut().rev() {
+        if slot.0 == UNSET {
+            *slot = last_valid;
+        } else {
+            last_valid = *slot;
+        }
+    }
+}
+
+fn write_i32(buf: &mut Vec<u8>, val: i32) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn write_u32(buf: &mut Vec<u8>, val: u32) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn write_u64(buf: &mut Vec<u8>, val: u64) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // r[verify index_builder.binning]
+    #[test]
+    fn reg2bin_leaf_level() {
+        // Position 0..16384 should be in bin 4681 (first leaf)
+        assert_eq!(reg2bin(0, 16384, 14, 5), 4681);
+        // Position 16384..32768 should be in bin 4682
+        assert_eq!(reg2bin(16384, 32768, 14, 5), 4682);
+    }
+
+    // r[verify index_builder.binning]
+    #[test]
+    fn reg2bin_spanning_bins() {
+        // Interval spanning two leaf bins → goes to parent
+        assert_eq!(reg2bin(0, 32768, 14, 5), 585);
+    }
+
+    // r[verify index_builder.binning]
+    #[test]
+    fn reg2bin_root() {
+        // Very large interval → root bin 0
+        assert_eq!(reg2bin(0, 512_000_000, 14, 5), 0);
+    }
+
+    #[test]
+    fn pseudo_bin_id() {
+        assert_eq!(pseudo_bin(5), 37450);
+    }
+
+    // r[verify index_builder.linear_backfill]
+    #[test]
+    fn backfill_linear() {
+        let mut linear = vec![
+            VirtualOffset(100),
+            VirtualOffset(UNSET),
+            VirtualOffset(UNSET),
+            VirtualOffset(300),
+            VirtualOffset(UNSET),
+        ];
+        backfill_linear_index(&mut linear);
+        assert_eq!(linear[0].0, 100);
+        assert_eq!(linear[1].0, 300); // backfilled from slot 3
+        assert_eq!(linear[2].0, 300);
+        assert_eq!(linear[3].0, 300);
+        assert_eq!(linear[4].0, 0); // no valid slot to the right → 0
+    }
+
+    // r[verify index_builder.sort_validation]
+    #[test]
+    fn rejects_unsorted_tid() {
+        let mut builder = IndexBuilder::tbi(2, VirtualOffset(0));
+        builder.push(1, 100, 200, VirtualOffset(100)).unwrap();
+        let result = builder.push(0, 50, 100, VirtualOffset(200));
+        assert!(result.is_err());
+    }
+
+    // r[verify index_builder.sort_validation]
+    #[test]
+    fn rejects_unsorted_pos() {
+        let mut builder = IndexBuilder::tbi(1, VirtualOffset(0));
+        builder.push(0, 200, 300, VirtualOffset(100)).unwrap();
+        let result = builder.push(0, 100, 200, VirtualOffset(200));
+        assert!(result.is_err());
+    }
+
+    // r[verify index_builder.single_pass]
+    // r[verify index_builder.chunk_flush]
+    #[test]
+    fn basic_index_building() {
+        let mut builder = IndexBuilder::tbi(1, VirtualOffset(0));
+        // Push a few records in the same bin
+        builder.push(0, 100, 200, VirtualOffset(1000)).unwrap();
+        builder.push(0, 150, 250, VirtualOffset(2000)).unwrap();
+        // Push record in a different bin
+        builder.push(0, 20000, 20100, VirtualOffset(3000)).unwrap();
+        builder.finish(VirtualOffset(4000)).unwrap();
+
+        // Should have bins + pseudo-bin for ref 0
+        let r = &builder.refs[0];
+        assert!(!r.bins.is_empty());
+        // Pseudo-bin should exist
+        assert!(r.bins.contains_key(&37450));
+    }
+
+    // r[verify index_builder.tbi_format]
+    #[test]
+    fn write_tbi_produces_valid_bgzf() {
+        let mut builder = IndexBuilder::tbi(1, VirtualOffset(0));
+        builder.push(0, 100, 200, VirtualOffset(1000)).unwrap();
+        builder.finish(VirtualOffset(2000)).unwrap();
+
+        let names = vec![SmolStr::from("chr1")];
+        let mut output = Vec::new();
+        builder.write_tbi(&mut output, &names).unwrap();
+
+        // Output should be BGZF-compressed — starts with gzip magic
+        assert!(output.len() > 28);
+        assert_eq!(output[0], 0x1f);
+        assert_eq!(output[1], 0x8b);
+
+        // Decompress and check TBI magic
+        let mut reader = crate::bam::bgzf::BgzfReader::from_reader(std::io::Cursor::new(output));
+        let mut decompressed = Vec::new();
+        reader.read_to_end(&mut decompressed).unwrap();
+        assert_eq!(&decompressed[..4], b"TBI\x01");
+    }
+}
