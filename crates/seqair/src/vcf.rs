@@ -1,8 +1,24 @@
-//! VCF/BCF writing. Construct a [`VcfHeader`] via its builder, create
-//! [`VcfRecord`]s with type-safe [`Alleles`], and write to VCF text or BCF binary.
+//! VCF/BCF writing with type-safe alleles and zero-allocation encoding.
 //!
-//! Use [`open_writer`] to create a writer based on file extension, or construct
-//! [`VcfWriter`](writer::VcfWriter) / [`BcfWriter`](bcf_writer::BcfWriter) directly.
+//! # Two encoding paths
+//!
+//! 1. **[`VcfRecord`] path** — construct records via [`VcfRecordBuilder`], pass to
+//!    [`VcfWriter`](writer::VcfWriter) or [`BcfWriter`](bcf_writer::BcfWriter).
+//!    Simple and correct; suitable for most use cases.
+//!
+//! 2. **[`encoder`] path** — pre-resolve [`ScalarInfoHandle`](encoder::ScalarInfoHandle),
+//!    [`GtFormatHandle`](encoder::GtFormatHandle), etc. at setup time, then encode
+//!    directly into BCF buffers with zero allocations per record. Use this when
+//!    writing millions of records in a hot loop (e.g., per-base variant calling).
+//!
+//! Both paths produce identical BCF output (verified by proptest equivalence tests).
+//!
+//! # Output formats
+//!
+//! Use [`open_writer`] with [`OutputFormat`] to create a writer for any format:
+//! - `.vcf` → plain text VCF
+//! - `.vcf.gz` → BGZF-compressed VCF with automatic TBI index co-production
+//! - `.bcf` → BCF binary with automatic CSI index co-production
 
 pub mod alleles;
 pub mod bcf_writer;
