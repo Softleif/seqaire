@@ -5,7 +5,7 @@
 > *[BCF2] — magic `BCF\2\1`, l_text header length, NUL-terminated VCF header text*
 
 r[bcf_writer.magic]
-The BCF stream MUST begin with the 5-byte magic `BCF\x02\x01`, followed by `l_text: u32` (header text length including NUL), followed by the NUL-terminated VCF header text. The entire stream MUST be BGZF-compressed.
+The BCF stream MUST begin with the 5-byte magic `BCF\x02\x02` (BCF version 2.2, the current version expected by htslib/bcftools), followed by `l_text: u32` (header text length including NUL), followed by the NUL-terminated VCF header text. The entire stream MUST be BGZF-compressed.
 
 r[bcf_writer.coordinate_system]
 BCF positions are 0-based. The writer MUST subtract 1 from the 1-based VcfRecord position when encoding. CHROM MUST be encoded as the contig's integer index from the header dictionary.

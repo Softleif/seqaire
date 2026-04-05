@@ -41,6 +41,7 @@ rust-htslib = { workspace = true, default-features = false, features = [
 noodles = { version = "0.109.0", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "vcf"] }
 noodles-bgzf = { version = "0.46.0", features = ["libdeflate"] }
 noodles-util = { version = "0.78.0", features = ["alignment"] }
+cstr8 = "0.1.4"
 
 [[bench]]
 name = "comparison"
