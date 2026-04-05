@@ -2,6 +2,7 @@
 //! [`VcfRecord`]s with type-safe [`Alleles`], and write to VCF text or BCF binary.
 
 pub mod alleles;
+pub mod bcf_writer;
 pub mod error;
 pub mod header;
 pub mod index_builder;
