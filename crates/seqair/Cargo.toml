@@ -14,7 +14,9 @@ fuzz = []
 thiserror = { workspace = true }
 tracing = { workspace = true }
 indexmap = "2"
+itoa = "1"
 libdeflater = "1.25.2"
+ryu = "1"
 seqair-types = { path = "../seqair-types" }
 rustc-hash = "2.1.1"
 flate2 = "1.1.9"
