@@ -21,6 +21,7 @@
 //! - `.bcf` → BCF binary with automatic CSI index co-production
 
 pub mod alleles;
+pub(crate) mod bcf_encoding;
 pub mod bcf_writer;
 pub mod encoder;
 pub mod error;

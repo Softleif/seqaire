@@ -414,7 +414,7 @@ mod proptests {
         #[test]
         fn n_allele_equals_one_plus_alts(alleles in arb_alleles()) {
             let alts = alleles.alt_texts();
-            let expected = 1 + alts.len();
+            let expected = 1usize.saturating_add(alts.len());
             prop_assert_eq!(alleles.n_allele(), expected);
         }
     }

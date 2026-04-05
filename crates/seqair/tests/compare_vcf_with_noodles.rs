@@ -1,12 +1,17 @@
 //! Round-trip tests: write BCF/VCF with seqair, read back with noodles, compare.
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 
 use proptest::prelude::*;
-use seqair::bam::bgzf::{BgzfReader, VirtualOffset};
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::bcf_writer::BcfWriter;
 use seqair::vcf::encoder::{
-    BcfRecordEncoder, BcfValue, ContigHandle, FilterHandle, GtFormatHandle, PerAlleleInfoHandle,
-    PerAltInfoHandle, ScalarFormatHandle, ScalarInfoHandle,
+    ContigHandle, FilterHandle, GtFormatHandle, ScalarFormatHandle, ScalarInfoHandle,
 };
 use seqair::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
 use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
@@ -239,6 +244,7 @@ fn arb_alleles() -> impl Strategy<Value = Alleles> {
     ]
 }
 
+#[allow(dead_code)]
 fn arb_genotype() -> impl Strategy<Value = Genotype> {
     prop_oneof![
         (0u16..4, 0u16..4).prop_map(|(a, b)| Genotype::unphased(a, b)),

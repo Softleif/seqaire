@@ -1,6 +1,7 @@
 //! BCF binary writer. Encodes [`VcfRecord`]s in BCF2 format with BGZF
 //! compression and optional CSI index co-production.
 
+use super::bcf_encoding::*;
 use super::error::VcfError;
 use super::header::VcfHeader;
 use super::index_builder::IndexBuilder;
@@ -8,31 +9,6 @@ use super::record::{Filters, InfoValue, SampleValue, VcfRecord};
 use crate::bam::bgzf_writer::BgzfWriter;
 use std::io::Write;
 use std::sync::Arc;
-
-// BCF type codes
-const BCF_BT_NULL: u8 = 0;
-const BCF_BT_INT8: u8 = 1;
-const BCF_BT_INT16: u8 = 2;
-const BCF_BT_INT32: u8 = 3;
-const BCF_BT_FLOAT: u8 = 5;
-const BCF_BT_CHAR: u8 = 7;
-
-// Sentinel values
-const INT8_MISSING: u8 = 0x80;
-const INT16_MISSING: u16 = 0x8000;
-const INT32_MISSING: u32 = 0x80000000;
-const FLOAT_MISSING: u32 = 0x7F800001;
-
-const INT8_END_OF_VECTOR: u8 = 0x81;
-const INT16_END_OF_VECTOR: u16 = 0x8001;
-const INT32_END_OF_VECTOR: u32 = 0x80000001;
-const FLOAT_END_OF_VECTOR: u32 = 0x7F800002;
-
-// Int ranges (excluding sentinel values)
-const INT8_MIN: i32 = -120;
-const INT8_MAX: i32 = 127;
-const INT16_MIN: i32 = -32760;
-const INT16_MAX: i32 = 32767;
 
 // r[impl bcf_writer.magic]
 // r[impl bcf_writer.buffer_reuse]
@@ -72,11 +48,9 @@ impl<W: Write> BcfWriter<W> {
 
         // Header text (NUL-terminated)
         let header_text = self.header.to_vcf_text();
-        let l_text = header_text
-            .len()
-            .checked_add(1)
-            .ok_or_else(|| VcfError::Io(std::io::Error::other("header too large")))?;
-        self.bgzf.write_all(&(l_text as u32).to_le_bytes())?;
+        let l_text = header_text.len().checked_add(1).ok_or(VcfError::HeaderTooLarge)?;
+        let l_text_u32 = u32::try_from(l_text).map_err(|_| VcfError::HeaderTooLarge)?;
+        self.bgzf.write_all(&l_text_u32.to_le_bytes())?;
         self.bgzf.write_all(header_text.as_bytes())?;
         self.bgzf.write_all(&[0u8])?; // NUL terminator
 
@@ -99,11 +73,14 @@ impl<W: Write> BcfWriter<W> {
             return Err(VcfError::HeaderNotWritten);
         }
 
+        // Resolve contig once — used by both encode_shared and index push
+        let tid = self.header.contig_id(&record.contig)?;
+
         // r[impl bcf_writer.buffer_reuse]
         self.shared_buf.clear();
         self.indiv_buf.clear();
 
-        self.encode_shared(record)?;
+        self.encode_shared(record, tid)?;
         self.encode_individual(record)?;
 
         let l_shared = self.shared_buf.len() as u32;
@@ -119,14 +96,11 @@ impl<W: Write> BcfWriter<W> {
         self.bgzf.write_all(&self.shared_buf)?;
         self.bgzf.write_all(&self.indiv_buf)?;
 
-        // Index co-production
+        // Index co-production — reuse tid from above
         if let Some(ref mut index) = self.index {
-            let tid = self.header.contig_id(&record.contig)? as i32;
             let beg = record.pos.to_zero_based().get() as u64;
             let end = beg.saturating_add(record.alleles.rlen() as u64);
-            index
-                .push(tid, beg, end, self.bgzf.virtual_offset())
-                .map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
+            index.push(tid as i32, beg, end, self.bgzf.virtual_offset())?;
         }
 
         Ok(())
@@ -134,11 +108,11 @@ impl<W: Write> BcfWriter<W> {
 
     // r[impl bcf_writer.fixed_fields]
     // r[impl bcf_writer.shared_variable]
-    fn encode_shared(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
+    fn encode_shared(&mut self, record: &VcfRecord, tid: usize) -> Result<(), VcfError> {
         let buf = &mut self.shared_buf;
 
         // r[impl bcf_writer.coordinate_system]
-        let chrom = self.header.contig_id(&record.contig)? as i32;
+        let chrom = tid as i32;
         let pos = record.pos.to_zero_based().get() as i32;
         let rlen = record.alleles.rlen() as i32;
 
@@ -268,110 +242,14 @@ impl<W: Write> BcfWriter<W> {
         let voff = self.bgzf.virtual_offset();
         let mut index = self.index;
         if let Some(ref mut idx) = index {
-            idx.finish(voff).map_err(|e| VcfError::Io(std::io::Error::other(e.to_string())))?;
+            idx.finish(voff)?;
         }
         self.bgzf.finish()?;
         Ok(index)
     }
 }
 
-// --- Encoding helpers ---
-
-// r[impl bcf_writer.typed_values]
-fn encode_type_byte(buf: &mut Vec<u8>, count: usize, type_code: u8) {
-    if count < 15 {
-        buf.push(((count as u8) << 4) | type_code);
-    } else {
-        buf.push((15 << 4) | type_code);
-        // Encode the actual count as a typed integer
-        if count <= INT8_MAX as usize {
-            buf.push((1 << 4) | BCF_BT_INT8);
-            buf.push(count as u8);
-        } else if count <= INT16_MAX as usize {
-            buf.push((1 << 4) | BCF_BT_INT16);
-            buf.extend_from_slice(&(count as u16).to_le_bytes());
-        } else {
-            buf.push((1 << 4) | BCF_BT_INT32);
-            buf.extend_from_slice(&(count as u32).to_le_bytes());
-        }
-    }
-}
-
-// r[impl bcf_writer.string_encoding]
-fn encode_typed_string(buf: &mut Vec<u8>, s: &[u8]) {
-    if s.is_empty() {
-        encode_type_byte(buf, 0, BCF_BT_CHAR);
-    } else {
-        encode_type_byte(buf, s.len(), BCF_BT_CHAR);
-        buf.extend_from_slice(s);
-    }
-}
-
-// r[impl bcf_writer.smallest_int_type]
-fn smallest_int_type(values: &[i32]) -> u8 {
-    smallest_int_type_iter(values.iter().copied())
-}
-
-/// Like `smallest_int_type` but takes an iterator — avoids collecting into a Vec.
-fn smallest_int_type_iter(values: impl Iterator<Item = i32>) -> u8 {
-    let mut needs_16 = false;
-    for v in values {
-        if !(INT8_MIN..=INT8_MAX).contains(&v) {
-            if !(INT16_MIN..=INT16_MAX).contains(&v) {
-                return BCF_BT_INT32;
-            }
-            needs_16 = true;
-        }
-    }
-    if needs_16 { BCF_BT_INT16 } else { BCF_BT_INT8 }
-}
-
-fn encode_typed_int_vec(buf: &mut Vec<u8>, values: &[i32]) {
-    if values.is_empty() {
-        encode_type_byte(buf, 0, BCF_BT_INT8);
-        return;
-    }
-    let typ = smallest_int_type(values);
-    encode_type_byte(buf, values.len(), typ);
-    for &v in values {
-        match typ {
-            BCF_BT_INT8 => buf.push(v as u8),
-            BCF_BT_INT16 => buf.extend_from_slice(&(v as i16).to_le_bytes()),
-            BCF_BT_INT32 => buf.extend_from_slice(&v.to_le_bytes()),
-            _ => {}
-        }
-    }
-}
-
-/// Encode an integer value or missing sentinel, using the given BCF type.
-fn encode_int_value_or_missing(buf: &mut Vec<u8>, value: Option<i32>, typ: u8) {
-    match value {
-        Some(n) => match typ {
-            BCF_BT_INT8 => buf.push(n as u8),
-            BCF_BT_INT16 => buf.extend_from_slice(&(n as i16).to_le_bytes()),
-            _ => buf.extend_from_slice(&n.to_le_bytes()),
-        },
-        None => encode_int_missing(buf, typ),
-    }
-}
-
-/// Write the missing sentinel for the given int type.
-fn encode_int_missing(buf: &mut Vec<u8>, typ: u8) {
-    match typ {
-        BCF_BT_INT8 => buf.push(INT8_MISSING),
-        BCF_BT_INT16 => buf.extend_from_slice(&INT16_MISSING.to_le_bytes()),
-        _ => buf.extend_from_slice(&INT32_MISSING.to_le_bytes()),
-    }
-}
-
-/// Write the end-of-vector sentinel for the given int type.
-fn encode_int_eov(buf: &mut Vec<u8>, typ: u8) {
-    match typ {
-        BCF_BT_INT8 => buf.push(INT8_END_OF_VECTOR),
-        BCF_BT_INT16 => buf.extend_from_slice(&INT16_END_OF_VECTOR.to_le_bytes()),
-        _ => buf.extend_from_slice(&INT32_END_OF_VECTOR.to_le_bytes()),
-    }
-}
+// --- Encoding helpers (using shared bcf_encoding module) ---
 
 // r[impl bcf_writer.flag_encoding]
 fn encode_info_value(buf: &mut Vec<u8>, value: &InfoValue) {
@@ -909,11 +787,11 @@ mod proptests {
             for &v in &values {
                 match typ {
                     BCF_BT_INT8 => {
-                        prop_assert!(v >= INT8_MIN && v <= INT8_MAX,
+                        prop_assert!((INT8_MIN..=INT8_MAX).contains(&v),
                             "value {v} doesn't fit int8 [{INT8_MIN}, {INT8_MAX}]");
                     }
                     BCF_BT_INT16 => {
-                        prop_assert!(v >= INT16_MIN && v <= INT16_MAX,
+                        prop_assert!((INT16_MIN..=INT16_MAX).contains(&v),
                             "value {v} doesn't fit int16 [{INT16_MIN}, {INT16_MAX}]");
                     }
                     BCF_BT_INT32 => {} // always fits
@@ -927,12 +805,12 @@ mod proptests {
             let typ = smallest_int_type(&values);
             // If we got INT16, at least one value must not fit INT8
             if typ == BCF_BT_INT16 {
-                prop_assert!(values.iter().any(|&v| v < INT8_MIN || v > INT8_MAX),
+                prop_assert!(values.iter().any(|&v| !(INT8_MIN..=INT8_MAX).contains(&v)),
                     "selected INT16 but all values fit INT8");
             }
             // If we got INT32, at least one value must not fit INT16
             if typ == BCF_BT_INT32 {
-                prop_assert!(values.iter().any(|&v| v < INT16_MIN || v > INT16_MAX),
+                prop_assert!(values.iter().any(|&v| !(INT16_MIN..=INT16_MAX).contains(&v)),
                     "selected INT32 but all values fit INT16");
             }
         }

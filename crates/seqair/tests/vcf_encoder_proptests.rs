@@ -1,10 +1,16 @@
 //! Encoder equivalence proptests: verify that BcfRecordEncoder produces
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 //! identical BCF output to BcfWriter::write_record(&VcfRecord).
 //!
 //! This is the strongest internal consistency check: both encoding paths
 //! must produce byte-identical BCF records.
 
-use noodles::vcf::variant::record::AlternateBases as _;
 use proptest::prelude::*;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::bcf_writer::BcfWriter;
@@ -68,6 +74,7 @@ fn test_header() -> Arc<VcfHeader> {
 
 /// Write a record using BcfWriter::write_record() (the VcfRecord path).
 /// Returns the raw BGZF-compressed output.
+#[allow(clippy::too_many_arguments)]
 fn write_via_record(
     header: &Arc<VcfHeader>,
     pos: u32,
@@ -98,6 +105,7 @@ fn write_via_record(
 
 /// Write the same record using BcfRecordEncoder (the direct-encode path).
 /// Returns the raw BGZF-compressed output.
+#[allow(clippy::too_many_arguments)]
 fn write_via_encoder(
     header: &Arc<VcfHeader>,
     pos: u32,
@@ -234,7 +242,7 @@ fn parse_bcf_with_noodles(bcf_bytes: &[u8]) -> Vec<ParsedRecord> {
         let rec = result.unwrap();
         let pos = rec.variant_start().map(|p| p.get() as i32 - 1).unwrap_or(0);
         let qual = rec.quality_score().map(|q| {
-            let f: f32 = q.into();
+            let f: f32 = q;
             f.to_bits()
         });
         let ref_allele = rec.reference_bases().to_string();

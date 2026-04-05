@@ -214,6 +214,7 @@ impl VcfRecordBuilder {
 
     // r[impl vcf_record.builder]
     /// Build the record, validating against the header.
+    #[must_use = "build() returns the record; ignoring it discards the variant data"]
     pub fn build(self, header: &VcfHeader) -> Result<VcfRecord, VcfHeaderError> {
         // r[impl vcf_record.fields]
         header.contig_id(&self.contig)?;
