@@ -209,8 +209,27 @@ impl VcfRecordBuilder {
         self
     }
 
+    /// INFO integer array where all values are present (no missing).
+    /// Avoids the `Vec<Option<i32>>` allocation — wraps each value in `Some` internally.
+    pub fn info_integers(mut self, key: impl Into<SmolStr>, values: &[i32]) -> Self {
+        self.info.push(
+            key.into(),
+            InfoValue::IntegerArray(values.iter().map(|&v| Some(v)).collect()),
+        );
+        self
+    }
+
     pub fn info_float_array(mut self, key: impl Into<SmolStr>, values: Vec<Option<f32>>) -> Self {
         self.info.push(key.into(), InfoValue::FloatArray(values));
+        self
+    }
+
+    /// INFO float array where all values are present (no missing).
+    pub fn info_floats(mut self, key: impl Into<SmolStr>, values: &[f32]) -> Self {
+        self.info.push(
+            key.into(),
+            InfoValue::FloatArray(values.iter().map(|&v| Some(v)).collect()),
+        );
         self
     }
 
