@@ -12,17 +12,7 @@ mod strand;
 
 pub use smol_str::{self, SmolStr};
 
-#[cfg(debug_assertions)]
-/// A simple replacement for smallvec in debug mode.
-pub mod smallvec {
-    pub use std::vec as smallvec;
-    pub use std::vec as smallvec_inline;
-    /// A simple replacement for smallvec in debug mode.
-    pub type SmallVec<T, const _N: usize> = Vec<T>;
-}
-#[cfg(not(debug_assertions))]
 pub use smallvec;
-
 pub use smallvec::SmallVec;
 
 pub use pos::{Offset, One, Pos, Pos0, Pos1, Zero};

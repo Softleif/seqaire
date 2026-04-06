@@ -293,7 +293,7 @@ impl VcfRecordBuilder {
 mod tests {
     use super::*;
     use crate::vcf::header::{ContigDef, InfoDef, Number, ValueType};
-    use seqair_types::Base;
+    use seqair_types::{Base, smallvec::smallvec};
 
     fn test_header() -> VcfHeader {
         VcfHeader::builder()
@@ -361,7 +361,7 @@ mod tests {
     #[test]
     fn filter_states() {
         let pass = Filters::Pass;
-        let failed = Filters::Failed(vec![SmolStr::from("q10"), SmolStr::from("dp20")]);
+        let failed = Filters::Failed(smallvec![SmolStr::from("q10"), SmolStr::from("dp20")]);
         let not_applied = Filters::NotApplied;
 
         assert_eq!(pass, Filters::Pass);
@@ -373,18 +373,18 @@ mod tests {
     #[test]
     fn genotype_construction() {
         let gt = Genotype::unphased(0, 1);
-        assert_eq!(gt.alleles, vec![Some(0), Some(1)]);
-        assert_eq!(gt.phased, vec![false]);
+        assert_eq!(&gt.alleles, &[Some(0), Some(1)]);
+        assert_eq!(&gt.phased, &[false]);
 
         let gt_phased = Genotype::phased_diploid(0, 1);
-        assert_eq!(gt_phased.phased, vec![true]);
+        assert_eq!(&gt_phased.phased, &[true]);
 
         let gt_haploid = Genotype::haploid(0);
         assert_eq!(gt_haploid.alleles.len(), 1);
         assert!(gt_haploid.phased.is_empty());
 
         let gt_missing = Genotype::missing_diploid();
-        assert_eq!(gt_missing.alleles, vec![None, None]);
+        assert_eq!(&gt_missing.alleles, &[None, None]);
     }
 
     // r[verify vcf_record.info_fields]
@@ -422,8 +422,8 @@ mod tests {
         let result =
             VcfRecordBuilder::new("chr1", Pos::<One>::new(1).unwrap(), Alleles::reference(Base::A))
                 .format_keys(&["GT"])
-                .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 0))])
-                .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 0))])
+                .add_sample(smallvec![SampleValue::Genotype(Genotype::unphased(0, 0))])
+                .add_sample(smallvec![SampleValue::Genotype(Genotype::unphased(0, 0))])
                 .build(&header);
         assert!(result.is_err());
     }

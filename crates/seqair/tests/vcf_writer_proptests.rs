@@ -198,7 +198,7 @@ proptest! {
             1 => ".",  // NotApplied (default)
             _ => {
                 // r[verify vcf_record.filters] — test Failed with declared filter
-                builder = builder.filter_failed(vec![SmolStr::from("q20")]);
+                builder = builder.filter_failed(seqair_types::smallvec::smallvec![SmolStr::from("q20")]);
                 "q20"
             },
         };
