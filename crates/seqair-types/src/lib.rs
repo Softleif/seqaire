@@ -25,7 +25,7 @@ pub use smallvec;
 
 pub use smallvec::SmallVec;
 
-pub use pos::{Offset, One, Pos, Zero};
+pub use pos::{Offset, One, Pos, Pos0, Pos1, Zero};
 
 pub use {
     base::{Base, BaseError},
