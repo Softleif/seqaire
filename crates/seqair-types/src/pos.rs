@@ -26,6 +26,11 @@ pub struct Zero;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct One;
 
+/// 0-based position (BAM, BED). Alias for `Pos<Zero>`.
+pub type Pos0 = Pos<Zero>;
+/// 1-based position (SAM, VCF). Alias for `Pos<One>`.
+pub type Pos1 = Pos<One>;
+
 // r[impl pos.type]
 // r[impl pos.size]
 // r[impl pos.incompatible]
