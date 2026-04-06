@@ -372,6 +372,7 @@ impl OwnedBamRecord {
 #[cfg(test)]
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
+    use super::super::cigar::CigarOpType;
     use super::*;
 
     fn simple_record() -> OwnedBamRecord {
@@ -386,6 +387,7 @@ mod tests {
     }
 
     // r[verify bam.owned_record.to_bam_bytes]
+    // r[verify bam.owned_record.test_roundtrip_bytes]
     #[test]
     fn serialize_and_decode_roundtrip() {
         let rec = simple_record();
@@ -500,6 +502,7 @@ mod tests {
     }
 
     // r[verify bam.owned_record.set_alignment]
+    // r[verify bam.owned_record.test_modification]
     #[test]
     fn set_alignment_validates_cigar_seq_mismatch() {
         let mut rec = simple_record(); // seq len = 5

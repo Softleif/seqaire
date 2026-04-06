@@ -16,6 +16,7 @@ use thiserror::Error;
 /// Maximum record size the writer will accept (soft limit, matching reader's cap).
 const MAX_RECORD_SIZE: usize = 2 * 1024 * 1024; // 2 MiB
 
+// r[impl bam_writer.error_type]
 /// Errors from BAM writing operations.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -126,9 +127,9 @@ impl<W: Write> BamWriter<W> {
         header: &BamHeader,
         build_index: bool,
     ) -> Result<Self, BamWriteError> {
-        // r[impl bam_writer.magic]
         write_bam_header(&mut bgzf, header)?;
 
+        // r[impl bam_writer.index_coproduction]
         let index = if build_index {
             let voff = bgzf.virtual_offset();
             Some(IndexBuilder::bai(header.target_count(), voff))
@@ -140,12 +141,9 @@ impl<W: Write> BamWriter<W> {
     }
 
     // r[impl bam_writer.write_record]
-    // r[impl bam_writer.flush_before_record]
-    // r[impl bam_writer.reuse_buffers]
-    // r[impl bam_writer.error_poisoning]
-    // r[impl bam_writer.index_record_dispatch]
     /// Write a single record to the BAM file.
     pub fn write(&mut self, record: &OwnedBamRecord) -> Result<(), BamWriteError> {
+        // r[impl bam_writer.error_poisoning]
         if self.poisoned {
             return Err(BamWriteError::Poisoned);
         }
@@ -160,7 +158,7 @@ impl<W: Write> BamWriter<W> {
     }
 
     fn write_inner(&mut self, record: &OwnedBamRecord) -> Result<(), BamWriteError> {
-        // Serialize record into reusable buffer
+        // r[impl bam_writer.reuse_buffers]
         self.buf.clear();
         record.to_bam_bytes(&mut self.buf)?;
 
@@ -169,41 +167,41 @@ impl<W: Write> BamWriter<W> {
             return Err(BamWriteError::RecordTooLarge { size: self.buf.len() });
         }
 
-        // block_size prefix (i32 LE) + record bytes
         let block_size = self.buf.len() as i32;
         let total = 4usize.saturating_add(self.buf.len());
 
-        // Flush BGZF block if this record won't fit
+        // r[impl bam_writer.flush_before_record]
         self.bgzf.flush_if_needed(total)?;
 
-        // Write block_size + record data
+        // r[impl bam_writer.insertion_order]
+        // Records are written immediately to the BGZF stream in call order.
         self.bgzf.write_all(&block_size.to_le_bytes())?;
         self.bgzf.write_all(&self.buf)?;
 
-        // Index co-production
+        // r[impl bam_writer.index_record_dispatch]
         if let Some(ref mut index) = self.index {
             let flags = record.flags;
             let ref_id = record.ref_id;
             let is_unmapped = flags & 0x4 != 0;
 
             if ref_id == -1 {
-                // Fully unmapped — do not index
+                // Case 3: fully unmapped — do not index
                 if !is_unmapped {
                     // Mapped but no reference — structurally invalid
                     return Err(BamWriteError::MappedWithoutReference);
                 }
             } else {
+                // r[impl bam_writer.index_sort_order]
+                // Sort validation is delegated to IndexBuilder::push()
                 let voff = self.bgzf.virtual_offset();
                 let beg = if record.pos < 0 { 0u64 } else { record.pos as u64 };
                 let end = if is_unmapped {
-                    // Placed unmapped: beg = end = pos
+                    // Case 2: placed unmapped — beg = end = pos
                     beg
                 } else {
+                    // Case 1: mapped — use end_pos from CIGAR
                     record.end_pos() as u64
                 };
-                // For placed unmapped, end == beg. IndexBuilder handles zero-span by using
-                // beg..beg+1 internally via reg2bin (which subtracts 1 from end).
-                // But we need end >= beg+1 for the index to work. Use max(end, beg+1).
                 let end = end.max(beg.saturating_add(1));
                 index.push(ref_id, beg, end, voff)?;
             }
@@ -236,18 +234,16 @@ fn write_bam_header<W: Write>(
 ) -> Result<(), BamWriteError> {
     let mut buf = Vec::new();
 
-    // Magic: BAM\1
+    // r[impl bam_writer.magic]
     buf.extend_from_slice(b"BAM\x01");
 
-    // l_text (i32 LE) + header text bytes (no NUL terminator)
+    // r[impl bam_writer.header_text]
     let text = header.header_text().as_bytes();
     buf.extend_from_slice(&(text.len() as i32).to_le_bytes());
     buf.extend_from_slice(text);
 
-    // n_ref (i32 LE)
+    // r[impl bam_writer.header_references]
     buf.extend_from_slice(&(header.target_count() as i32).to_le_bytes());
-
-    // Per-reference: l_name (i32 LE, including NUL) + name + NUL + l_ref (i32 LE)
     for target in header.targets() {
         let name = target.target_name().as_bytes();
         let l_name = (name.len() as i32).saturating_add(1); // +1 for NUL
@@ -487,6 +483,7 @@ mod tests {
     }
 
     // r[verify bam_writer.insertion_order]
+    // r[verify bam_writer.record_spanning_blocks]
     #[test]
     fn records_written_in_insertion_order() {
         let header = test_header();
