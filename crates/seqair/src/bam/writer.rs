@@ -122,7 +122,7 @@ impl BamWriter<io::Stdout> {
 
 impl<W: Write> BamWriter<W> {
     /// Construct from any `BgzfWriter`. Writes the BAM header eagerly.
-    fn new_inner(
+    pub fn new_inner(
         mut bgzf: BgzfWriter<W>,
         header: &BamHeader,
         build_index: bool,

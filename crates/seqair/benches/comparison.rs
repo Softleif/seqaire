@@ -188,6 +188,144 @@ fn bam_record_decode(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Group 2b: BAM read → write roundtrip
+// Read all records from a region, write them to a new BAM in memory.
+// Measures the full read-modify-write pipeline cost.
+// ---------------------------------------------------------------------------
+
+fn bam_roundtrip(c: &mut Criterion) {
+    use noodles::bam as nbam;
+    use noodles::sam;
+    use noodles::sam::alignment::io::Write as _;
+    use rust_htslib::bam::{self, FetchDefinition, Read as _};
+
+    let mut group = c.benchmark_group("bam_roundtrip");
+
+    // --- seqair: IndexedBamReader → OwnedBamRecord → BamWriter ---
+    group.bench_function("seqair", |b| {
+        b.iter(|| {
+            use seqair::bam::BamHeader;
+            use seqair::bam::bgzf_writer::BgzfWriter;
+            use seqair::bam::owned_record::OwnedBamRecord;
+            use seqair::bam::writer::BamWriter;
+
+            let path = std::path::Path::new(BAM_PATH);
+            let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
+            let header = BamHeader::from_template(reader.header());
+            let tid = reader.header().tid(CHROM).unwrap();
+            let mut store = seqair::bam::RecordStore::new();
+            reader.fetch_into(tid, start_pos(), end_pos(), &mut store).unwrap();
+
+            let mut output = Vec::with_capacity(2_000_000);
+            let bgzf = BgzfWriter::new(&mut output);
+            let mut writer = BamWriter::new_inner(bgzf, &header, false).unwrap();
+
+            for i in 0..store.len() {
+                let idx = i as u32;
+                let slim = store.record(idx);
+                let cigar_bytes = store.cigar(idx);
+                let mut cigar = Vec::with_capacity(slim.n_cigar_ops as usize);
+                for j in 0..slim.n_cigar_ops as usize {
+                    let off = j * 4;
+                    let packed = u32::from_le_bytes([
+                        cigar_bytes[off],
+                        cigar_bytes[off + 1],
+                        cigar_bytes[off + 2],
+                        cigar_bytes[off + 3],
+                    ]);
+                    cigar.push(seqair::bam::CigarOp::from_bam_u32(packed).unwrap());
+                }
+
+                let rec = OwnedBamRecord {
+                    ref_id: tid as i32,
+                    pos: slim.pos.get() as i64,
+                    mapq: slim.mapq,
+                    flags: slim.flags,
+                    next_ref_id: -1,
+                    next_pos: -1,
+                    template_len: 0,
+                    qname: store.qname(idx).to_vec(),
+                    cigar,
+                    seq: store.seq(idx).to_vec(),
+                    qual: store.qual(idx).to_vec(),
+                    aux: seqair::bam::AuxData::from_bytes(store.aux(idx).to_vec()),
+                };
+                writer.write(&rec).unwrap();
+            }
+            writer.finish().unwrap();
+            black_box(output.len())
+        });
+    });
+
+    // --- htslib: IndexedReader → Record (reused) → Writer ---
+    group.bench_function("htslib", |b| {
+        b.iter(|| {
+            // Read
+            let mut reader = bam::IndexedReader::from_path(BAM_PATH).unwrap();
+            reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
+            let hdr = bam::Header::from_template(reader.header());
+
+            // Write to temp file (htslib Writer requires a path or fd, not a Vec)
+            let tmp = tempfile::NamedTempFile::new().unwrap();
+            let mut writer = bam::Writer::from_path(tmp.path(), &hdr, bam::Format::Bam).unwrap();
+
+            let mut record = bam::Record::new();
+            while let Some(Ok(())) = reader.read(&mut record) {
+                writer.write(&record).unwrap();
+            }
+            drop(writer);
+            black_box(std::fs::metadata(tmp.path()).unwrap().len())
+        });
+    });
+
+    // --- noodles: Reader → Record → Writer ---
+    group.bench_function("noodles", |b| {
+        b.iter(|| {
+            // Read (sequential scan — noodles BAM indexed access requires extra setup)
+            let file = std::fs::File::open(BAM_PATH).unwrap();
+            let mut reader = nbam::io::Reader::new(file);
+            let header: sam::Header = reader.read_header().unwrap();
+            let contig_idx = header.reference_sequences().get_index_of(CHROM.as_bytes()).unwrap();
+
+            let mut records = Vec::new();
+            for result in reader.records() {
+                let record = result.unwrap();
+                if record.flags().is_unmapped() {
+                    continue;
+                }
+                let ref_seq_id = match record.reference_sequence_id().and_then(|r| r.ok()) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                if ref_seq_id != contig_idx {
+                    continue;
+                }
+                let aln_start = match record.alignment_start().and_then(|r| r.ok()) {
+                    Some(pos) => usize::from(pos) as i64 - 1,
+                    None => continue,
+                };
+                if aln_start >= START as i64 && aln_start < END as i64 {
+                    records.push(record);
+                }
+            }
+
+            // Write — noodles BAM writer handles header + ref seqs + records
+            let mut output = Vec::with_capacity(2_000_000);
+            {
+                let mut writer = nbam::io::Writer::new(&mut output);
+                writer.write_header(&header).unwrap();
+                for record in &records {
+                    writer.write_alignment_record(&header, record).unwrap();
+                }
+            }
+            black_box(output.len())
+        });
+    });
+
+    group.finish();
+}
+
+// ---------------------------------------------------------------------------
 // Group 3: FASTA fetch (100KB region)
 // ---------------------------------------------------------------------------
 
@@ -762,6 +900,7 @@ criterion_group!(
     benches,
     bgzf_decompress,
     bam_record_decode,
+    bam_roundtrip,
     fasta_fetch,
     pileup_e2e,
     write_vcf_text,
