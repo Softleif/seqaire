@@ -248,22 +248,41 @@ fn write_bam_header<W: Write>(
 
     // r[impl bam_writer.header_text]
     let text = header.header_text().as_bytes();
-    buf.extend_from_slice(&(text.len() as i32).to_le_bytes());
+    let l_text = i32::try_from(text.len()).map_err(|_| BamHeaderError::FieldTooLarge {
+        field: "l_text",
+        value: text.len(),
+        limit: i32::MAX as usize,
+    })?;
+    buf.extend_from_slice(&l_text.to_le_bytes());
     buf.extend_from_slice(text);
 
     // r[impl bam_writer.header_references]
-    // BAM stores reference count and lengths as i32. Truncation is harmless for
-    // practical genomes (human chr1 ≈ 249 Mbp) but would silently corrupt headers
-    // for contigs > 2.1 Gbp (e.g. some T2T scaffolds). We cap at i32::MAX.
-    buf.extend_from_slice(&(header.target_count().min(i32::MAX as usize) as i32).to_le_bytes());
+    let n_ref =
+        i32::try_from(header.target_count()).map_err(|_| BamHeaderError::FieldTooLarge {
+            field: "n_ref",
+            value: header.target_count(),
+            limit: i32::MAX as usize,
+        })?;
+    buf.extend_from_slice(&n_ref.to_le_bytes());
     for target in header.targets() {
         let name = target.target_name().as_bytes();
-        let l_name = name.len().saturating_add(1).min(i32::MAX as usize) as i32; // +1 for NUL
+        let l_name = i32::try_from(name.len().saturating_add(1)).map_err(|_| {
+            BamHeaderError::FieldTooLarge {
+                field: "l_name",
+                value: name.len().saturating_add(1),
+                limit: i32::MAX as usize,
+            }
+        })?;
         buf.extend_from_slice(&l_name.to_le_bytes());
         buf.extend_from_slice(name);
         buf.push(0); // NUL terminator
-        let tlen = target.target_length().min(i32::MAX as u64) as i32;
-        buf.extend_from_slice(&tlen.to_le_bytes());
+        let l_ref =
+            i32::try_from(target.target_length()).map_err(|_| BamHeaderError::FieldTooLarge {
+                field: "l_ref",
+                value: target.target_length() as usize,
+                limit: i32::MAX as usize,
+            })?;
+        buf.extend_from_slice(&l_ref.to_le_bytes());
     }
 
     bgzf.write_all(&buf)?;
