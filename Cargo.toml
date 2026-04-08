@@ -24,6 +24,45 @@ undocumented_unsafe_blocks = "deny"
 unwrap_used = "warn"
 unwrap_in_result = "warn"
 arithmetic_side_effects = "warn"
+ok_expect = "warn"
+
+# Use tracing
+print_stdout = "warn"
+
+# Numbers are hard
+cast_lossless = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+comparison_chain = "warn"
+range_minus_one = "warn"
+range_plus_one = "warn"
+lossy_float_literal = "warn"
+non_zero_suggestions = "warn"
+
+# Some pedantic lints we like
+doc_link_with_quotes = "warn"
+doc_markdown = "warn"
+explicit_into_iter_loop = "warn"
+format_collect = "warn"
+format_push_string = "warn"
+index_refutable_slice = "warn"
+default_trait_access = "warn"
+rc_buffer = "warn"
+mem_forget = "warn"
+return_and_then = "warn"
+same_name_method = "warn"
+implicit_clone = "warn"
+inefficient_to_string = "warn"
+manual_let_else = "warn"
+manual_is_variant_and = "warn"
+manual_assert = "warn"
+manual_string_new = "warn"
+option_option = "warn"
+equatable_if_let = "warn"
+allow_attributes_without_reason = "warn"
+infinite_loop = "warn"
+create_dir = "warn"
+pathbuf_init_then_push = "warn"
 
 [profile.dev.package]
 rand_chacha.opt-level = 3
