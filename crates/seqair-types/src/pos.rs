@@ -259,6 +259,10 @@ impl Offset {
     /// Absolute value as usize (for lengths, capacities).
     #[inline]
     #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Offset wraps i64; unsigned_abs() ≤ i64::MAX which fits in usize on 64-bit; on 32-bit platforms the calling code guarantees values bounded by BAM/FASTA region sizes"
+    )]
     pub const fn abs_usize(self) -> usize {
         self.0.unsigned_abs() as usize
     }

@@ -42,7 +42,12 @@ impl Phred {
         if phred >= 99.0 {
             return 99;
         }
-        phred.round() as i32
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "value is clamped to [0.0, 99.0] before rounding; round() returns a value in [0.0, 99.0] which fits in i32"
+        )]
+        let r = phred.round() as i32;
+        r
     }
 
     /// Create a Phred quality score from an integer.
