@@ -160,12 +160,12 @@ unsafe fn from_ascii_avx2(bytes: &mut [u8]) {
 
     // Safety: AVX2 intrinsics require AVX2 availability (ensured by #[target_feature]).
     let (upper_mask, v_a, v_c, v_g, v_t, v_n) = (
-        _mm256_set1_epi8(0xDFu8 as i8),
-        _mm256_set1_epi8(b'A' as i8),
-        _mm256_set1_epi8(b'C' as i8),
-        _mm256_set1_epi8(b'G' as i8),
-        _mm256_set1_epi8(b'T' as i8),
-        _mm256_set1_epi8(b'N' as i8),
+        _mm256_set1_epi8(0xDFu8.cast_signed()),
+        _mm256_set1_epi8(b'A'.cast_signed()),
+        _mm256_set1_epi8(b'C'.cast_signed()),
+        _mm256_set1_epi8(b'G'.cast_signed()),
+        _mm256_set1_epi8(b'T'.cast_signed()),
+        _mm256_set1_epi8(b'N'.cast_signed()),
     );
 
     let len = bytes.len();
@@ -219,12 +219,12 @@ unsafe fn from_ascii_ssse3(bytes: &mut [u8]) {
 
     // Safety: SSE2 intrinsics require SSSE3 availability (ensured by #[target_feature]).
     let (upper_mask, v_a, v_c, v_g, v_t, v_n) = (
-        _mm_set1_epi8(0xDFu8 as i8),
-        _mm_set1_epi8(b'A' as i8),
-        _mm_set1_epi8(b'C' as i8),
-        _mm_set1_epi8(b'G' as i8),
-        _mm_set1_epi8(b'T' as i8),
-        _mm_set1_epi8(b'N' as i8),
+        _mm_set1_epi8(0xDFu8.cast_signed()),
+        _mm_set1_epi8(b'A'.cast_signed()),
+        _mm_set1_epi8(b'C'.cast_signed()),
+        _mm_set1_epi8(b'G'.cast_signed()),
+        _mm_set1_epi8(b'T'.cast_signed()),
+        _mm_set1_epi8(b'N'.cast_signed()),
     );
 
     let len = bytes.len();
