@@ -38,7 +38,7 @@ pub struct TagDictEntry {
 #[derive(Debug, Clone)]
 pub struct SubstitutionMatrix {
     /// `matrix[ref_base_index]` gives 4 alternatives.
-    /// ref_base_index: 0=A, 1=C, 2=G, 3=T, 4=N
+    /// `ref_base_index`: 0=A, 1=C, 2=G, 3=T, 4=N
     pub matrix: [[u8; 4]; 5],
 }
 

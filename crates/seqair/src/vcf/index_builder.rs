@@ -111,13 +111,13 @@ impl IndexBuilder {
         }
     }
 
-    /// Create a TBI-compatible builder (min_shift=14, depth=5).
+    /// Create a TBI-compatible builder (`min_shift=14`, depth=5).
     pub fn tbi(n_refs: usize, header_end_offset: VirtualOffset) -> Self {
         Self::new(n_refs, 14, 5, header_end_offset)
     }
 
     // r[impl index_builder.bai_constructor]
-    /// Create a BAI-compatible builder (min_shift=14, depth=5).
+    /// Create a BAI-compatible builder (`min_shift=14`, depth=5).
     pub fn bai(n_refs: usize, header_end_offset: VirtualOffset) -> Self {
         Self::new(n_refs, 14, 5, header_end_offset)
     }
@@ -199,7 +199,7 @@ impl IndexBuilder {
         Ok(())
     }
 
-    /// Register a placed-unmapped record (flag 0x4 set, ref_id >= 0).
+    /// Register a placed-unmapped record (flag 0x4 set, `ref_id` >= 0).
     /// Same as `push()` but increments `n_unmapped` instead of `n_mapped` in the
     /// pseudo-bin, matching htslib's `hts_idx_push` behavior for unmapped reads.
     pub fn push_unmapped(
@@ -324,7 +324,7 @@ impl IndexBuilder {
     /// Write BAI format to a writer. The output is uncompressed (not BGZF-wrapped).
     ///
     /// `n_refs` is the total number of reference sequences in the BAM header — BAI
-    /// includes an entry for every reference, even those with no records (n_bin=0, n_intv=0).
+    /// includes an entry for every reference, even those with no records (`n_bin=0`, `n_intv=0`).
     pub fn write_bai<W: std::io::Write>(
         &self,
         mut writer: W,
@@ -363,7 +363,7 @@ impl IndexBuilder {
 }
 
 /// Safe i32 cast for index field counts. These are structurally bounded
-/// (max ~37451 bins for depth=5, linear index ≤ genome_size / 16KiB), but
+/// (max ~37451 bins for depth=5, linear index ≤ `genome_size` / 16KiB), but
 /// we validate at the serialization boundary to catch corruption.
 fn count_i32(n: usize, field: &'static str) -> Result<i32, IndexError> {
     i32::try_from(n).map_err(|_| IndexError::CountOverflow { field, value: n })

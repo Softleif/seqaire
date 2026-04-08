@@ -36,9 +36,9 @@ pub enum ByteArrayEncoding {
 /// Precomputed canonical Huffman decode table.
 #[derive(Debug, Clone)]
 pub struct HuffmanTable {
-    /// (symbol, bit_length) pairs sorted by (bit_length, symbol) for canonical assignment.
+    /// (symbol, `bit_length`) pairs sorted by (`bit_length`, symbol) for canonical assignment.
     symbols: Vec<(i32, u32)>,
-    /// For single-symbol codes (bit_length=0), the symbol value.
+    /// For single-symbol codes (`bit_length=0`), the symbol value.
     single_symbol: Option<i32>,
 }
 

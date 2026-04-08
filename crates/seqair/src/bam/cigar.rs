@@ -91,7 +91,7 @@ pub struct CigarOp {
 }
 
 impl CigarOp {
-    /// BAM packs length into the upper 28 bits, so max length is 2^28-1 = 268_435_455.
+    /// BAM packs length into the upper 28 bits, so max length is 2^28-1 = `268_435_455`.
     pub const fn new(op: CigarOpType, len: u32) -> Self {
         debug_assert!(len < (1 << 28), "CIGAR op length exceeds 28-bit BAM limit");
         Self { op, len }
@@ -141,7 +141,7 @@ pub fn calc_matches_indels(cigar_bytes: &[u8]) -> (u32, u32) {
     (matches, indels)
 }
 
-/// Position information returned by CigarMapping for the pileup engine.
+/// Position information returned by `CigarMapping` for the pileup engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CigarPosInfo {
     /// M/=/X op: read has a base aligned here.
@@ -159,7 +159,6 @@ pub enum CigarPosInfo {
 /// For the ~90% of reads with simple CIGARs (clips + one match block),
 /// `Linear` avoids any allocation and computes qpos with a single subtraction.
 /// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
-#[allow(private_interfaces)]
 pub enum CigarMapping {
     /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
     Linear { rec_pos: Pos<Zero>, query_offset: u32, match_len: u32 },
@@ -183,7 +182,7 @@ impl std::fmt::Debug for CigarMapping {
 
 /// 16-byte CIGAR op for the compact index.
 #[derive(Clone, Copy)]
-pub(crate) struct CompactOp {
+pub struct CompactOp {
     ref_start: i32,
     query_start: u32,
     len: u32,

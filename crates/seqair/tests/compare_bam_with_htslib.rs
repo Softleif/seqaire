@@ -36,7 +36,7 @@ fn fetch_hts_records(contig: &str, start: u64, end: u64) -> Vec<HtsRecord> {
 
     let mut records = Vec::new();
     let mut record = bam::Record::new();
-    while let Some(Ok(())) = reader.read(&mut record) {
+    while reader.read(&mut record) == Some(Ok(())) {
         if record.flags() & 0x4 != 0 {
             continue;
         }
@@ -150,7 +150,7 @@ fn fetch_hts_pileup(contig: &str, start: u64, end: u64) -> Vec<HtsPileupCol> {
     let mut columns = Vec::new();
     for p in reader.pileup() {
         let p = p.expect("pileup");
-        let pos = p.pos() as i64;
+        let pos = i64::from(p.pos());
         if (pos as u64) < start || (pos as u64) > end {
             continue;
         }
@@ -334,7 +334,7 @@ fn fetch_hts_aux_records(contig: &str, start: u64, end: u64) -> Vec<HtsAuxRecord
 
     let mut records = Vec::new();
     let mut record = bam::Record::new();
-    while let Some(Ok(())) = reader.read(&mut record) {
+    while reader.read(&mut record) == Some(Ok(())) {
         if record.flags() & 0x4 != 0 {
             continue;
         }
@@ -344,12 +344,12 @@ fn fetch_hts_aux_records(contig: &str, start: u64, end: u64) -> Vec<HtsAuxRecord
             _ => None,
         };
         let nm = match record.aux(b"NM") {
-            Ok(Aux::I8(v)) => Some(v as i64),
-            Ok(Aux::U8(v)) => Some(v as i64),
-            Ok(Aux::I16(v)) => Some(v as i64),
-            Ok(Aux::U16(v)) => Some(v as i64),
-            Ok(Aux::I32(v)) => Some(v as i64),
-            Ok(Aux::U32(v)) => Some(v as i64),
+            Ok(Aux::I8(v)) => Some(i64::from(v)),
+            Ok(Aux::U8(v)) => Some(i64::from(v)),
+            Ok(Aux::I16(v)) => Some(i64::from(v)),
+            Ok(Aux::U16(v)) => Some(i64::from(v)),
+            Ok(Aux::I32(v)) => Some(i64::from(v)),
+            Ok(Aux::U32(v)) => Some(i64::from(v)),
             _ => None,
         };
         let md = match record.aux(b"MD") {
@@ -373,12 +373,12 @@ fn aux_z_tag<'a>(aux: &'a [u8], tag: &[u8; 2]) -> Option<&'a str> {
 /// Extract an integer aux tag (any integer sub-type) from raw BAM aux bytes.
 fn aux_int_tag(aux: &[u8], tag: &[u8; 2]) -> Option<i64> {
     match find_aux_tag(aux, *tag)? {
-        AuxValue::I8(v) => Some(v as i64),
-        AuxValue::U8(v) => Some(v as i64),
-        AuxValue::I16(v) => Some(v as i64),
-        AuxValue::U16(v) => Some(v as i64),
-        AuxValue::I32(v) => Some(v as i64),
-        AuxValue::U32(v) => Some(v as i64),
+        AuxValue::I8(v) => Some(i64::from(v)),
+        AuxValue::U8(v) => Some(i64::from(v)),
+        AuxValue::I16(v) => Some(i64::from(v)),
+        AuxValue::U16(v) => Some(i64::from(v)),
+        AuxValue::I32(v) => Some(i64::from(v)),
+        AuxValue::U32(v) => Some(i64::from(v)),
         _ => None,
     }
 }

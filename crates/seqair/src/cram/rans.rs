@@ -124,7 +124,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
 
 fn renormalize(state: &mut u32, src: &mut &[u8]) -> Result<(), CramError> {
     while *state < LOWER_BOUND {
-        let b = read_u8(src)? as u32;
+        let b = u32::from(read_u8(src)?);
         *state = (*state << 8) | b;
     }
     Ok(())

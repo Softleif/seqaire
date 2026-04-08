@@ -459,7 +459,7 @@ fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
             return Err(CramError::Uint7Overflow);
         }
         count = count.checked_add(1).ok_or(CramError::Uint7Overflow)?;
-        let b = read_u8(src)? as u32;
+        let b = u32::from(read_u8(src)?);
         n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {
             break;

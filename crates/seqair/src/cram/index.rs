@@ -84,7 +84,7 @@ impl CramIndex {
     }
 
     /// Find all index entries whose range overlaps `[start, end)` for the given
-    /// reference ID. Returns entries sorted by alignment_start.
+    /// reference ID. Returns entries sorted by `alignment_start`.
     ///
     /// Positions are 0-based half-open (matching the query convention).
     /// CRAI entries use 1-based positions internally, but the comparison

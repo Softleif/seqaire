@@ -572,7 +572,7 @@ mod tests {
 
     // --- query_split tests ---
 
-    /// Build a minimal BamIndex with specific bins populated.
+    /// Build a minimal `BamIndex` with specific bins populated.
     fn index_with_bins(bins: Vec<(u32, Vec<Chunk>)>) -> BamIndex {
         BamIndex {
             references: vec![RefIndex {

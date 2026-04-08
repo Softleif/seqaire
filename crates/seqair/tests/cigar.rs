@@ -1,4 +1,4 @@
-//! Tests for CIGAR operations, CigarMapping, and pos_info_at computation.
+//! Tests for CIGAR operations, `CigarMapping`, and `pos_info_at` computation.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 #![allow(clippy::arithmetic_side_effects)]
 mod helpers;

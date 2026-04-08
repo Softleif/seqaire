@@ -450,7 +450,7 @@ impl<R: Read + Seek> BgzfReader<R> {
         Ok(u32::from_le_bytes(buf))
     }
 
-    /// Advance block_offset to the stream position where the next block starts.
+    /// Advance `block_offset` to the stream position where the next block starts.
     /// Called before reading a new block in sequential mode.
     fn advance_block_offset(&mut self) {
         // We know block_offset points to the start of the current block.
@@ -561,7 +561,8 @@ pub(crate) fn find_bsize(extra: &[u8]) -> Option<u16> {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test code with controlled values")]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
+#[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
 

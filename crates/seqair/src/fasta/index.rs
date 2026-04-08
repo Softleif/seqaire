@@ -166,7 +166,8 @@ impl FastaIndex {
     }
 
     pub fn get(&self, name: &str) -> Option<&FaiEntry> {
-        self.name_to_idx.get(name).and_then(|&idx| self.entries.get(idx))
+        let &idx = self.name_to_idx.get(name)?;
+        self.entries.get(idx)
     }
 
     pub fn sequence_names(&self) -> Vec<SmolStr> {

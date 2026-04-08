@@ -70,7 +70,7 @@ pub enum BamWriteError {
     #[error("record size {size} exceeds {MAX_RECORD_SIZE} byte limit")]
     RecordTooLarge { size: usize },
 
-    /// Mapped record (flags & 0x4 == 0) has ref_id == -1.
+    /// Mapped record (flags & 0x4 == 0) has `ref_id` == -1.
     #[error("mapped record has ref_id == -1 (structurally invalid)")]
     MappedWithoutReference,
 }
@@ -230,7 +230,7 @@ impl<W: Write> BamWriter<W> {
     // r[impl bam_writer.finish]
     // r[impl bam_writer.index_finish]
     /// Flush all data, finalize the index, write the BGZF EOF block, and return
-    /// the inner writer and optional finished IndexBuilder.
+    /// the inner writer and optional finished `IndexBuilder`.
     pub fn finish(mut self) -> Result<(W, Option<IndexBuilder>), BamWriteError> {
         if let Some(ref mut index) = self.index {
             let voff = self.bgzf.virtual_offset();

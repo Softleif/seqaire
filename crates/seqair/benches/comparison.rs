@@ -1,8 +1,10 @@
 //! Criterion benchmarks comparing seqair against htslib, noodles, and the bgzf crate.
 //!
 //! All libraries use libdeflate for BGZF decompression (fair comparison).
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
-#![allow(clippy::arithmetic_side_effects)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "benches")]
+#![allow(clippy::arithmetic_side_effects, reason = "benches")]
+#![allow(clippy::cast_possible_truncation, reason = "benches")]
+#![allow(clippy::cast_possible_wrap, reason = "benches")]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
@@ -126,7 +128,7 @@ fn bam_record_decode(c: &mut Criterion) {
             reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
             let mut record = bam::Record::new();
             let mut count = 0usize;
-            while let Some(Ok(())) = reader.read(&mut record) {
+            while reader.read(&mut record) == Some(Ok(())) {
                 count += 1;
             }
             black_box(count)
@@ -141,7 +143,7 @@ fn bam_record_decode(c: &mut Criterion) {
             reader.fetch(FetchDefinition::Region(0, START as i64, END as i64)).unwrap();
             let mut record = bam::Record::new();
             let mut total_bases = 0usize;
-            while let Some(Ok(())) = reader.read(&mut record) {
+            while reader.read(&mut record) == Some(Ok(())) {
                 let bases: Vec<seqair_types::Base> = (0..record.seq_len())
                     .map(|i| seqair_types::Base::from(record.seq()[i]))
                     .collect();
@@ -165,9 +167,8 @@ fn bam_record_decode(c: &mut Criterion) {
                 if record.flags().is_unmapped() {
                     continue;
                 }
-                let ref_seq_id = match record.reference_sequence_id().and_then(|r| r.ok()) {
-                    Some(id) => id,
-                    None => continue,
+                let Some(ref_seq_id) = record.reference_sequence_id().and_then(|r| r.ok()) else {
+                    continue;
                 };
                 if ref_seq_id != contig_idx {
                     continue;
@@ -238,7 +239,7 @@ fn bam_roundtrip(c: &mut Criterion) {
 
                 let rec = OwnedBamRecord {
                     ref_id: tid as i32,
-                    pos: slim.pos.get() as i64,
+                    pos: i64::from(slim.pos.get()),
                     mapq: slim.mapq,
                     flags: slim.flags,
                     next_ref_id: -1,
@@ -270,7 +271,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             let mut writer = bam::Writer::from_path(tmp.path(), &hdr, bam::Format::Bam).unwrap();
 
             let mut record = bam::Record::new();
-            while let Some(Ok(())) = reader.read(&mut record) {
+            while reader.read(&mut record) == Some(Ok(())) {
                 writer.write(&record).unwrap();
             }
             drop(writer);
@@ -293,9 +294,8 @@ fn bam_roundtrip(c: &mut Criterion) {
                 if record.flags().is_unmapped() {
                     continue;
                 }
-                let ref_seq_id = match record.reference_sequence_id().and_then(|r| r.ok()) {
-                    Some(id) => id,
-                    None => continue,
+                let Some(ref_seq_id) = record.reference_sequence_id().and_then(|r| r.ok()) else {
+                    continue;
                 };
                 if ref_seq_id != contig_idx {
                     continue;
@@ -426,11 +426,11 @@ fn pileup_e2e(c: &mut Criterion) {
             let mut columns: u64 = 0;
             for p in reader.pileup() {
                 let p = p.unwrap();
-                let pos = p.pos() as u64;
+                let pos = u64::from(p.pos());
                 if !(START..=END).contains(&pos) {
                     continue;
                 }
-                total_depth += p.depth() as u64;
+                total_depth += u64::from(p.depth());
                 columns += 1;
             }
             black_box((columns, total_depth))
@@ -547,7 +547,7 @@ fn htslib_header() -> rust_htslib::bcf::Header {
     h
 }
 
-/// Write N_RECORDS with rust-htslib to a temp file, return the file.
+/// Write `N_RECORDS` with rust-htslib to a temp file, return the file.
 fn write_htslib(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
     use rust_htslib::bcf;
 
@@ -557,7 +557,7 @@ fn write_htslib(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
     let rid = writer.header().name2rid(b"chr1").unwrap();
     let pass_id = writer.header().name_to_id(cstr8::cstr8!("PASS")).unwrap();
 
-    for i in 0..N_RECORDS as i64 {
+    for i in 0..i64::from(N_RECORDS) {
         let mut record = writer.empty_record();
         record.set_rid(Some(rid));
         record.set_pos(i);
@@ -585,7 +585,7 @@ fn write_htslib(format: rust_htslib::bcf::Format) -> tempfile::NamedTempFile {
 
 fn write_vcf_text(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_vcf_text");
-    group.throughput(Throughput::Elements(N_RECORDS as u64));
+    group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
     let header = vcf_header();
 
@@ -685,7 +685,7 @@ fn write_vcf_text(c: &mut Criterion) {
 
 fn write_vcf_gz(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_vcf_gz");
-    group.throughput(Throughput::Elements(N_RECORDS as u64));
+    group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
     let header = vcf_header();
 
@@ -734,7 +734,7 @@ fn write_vcf_gz(c: &mut Criterion) {
             .unwrap();
             let rid = writer.header().name2rid(b"chr1").unwrap();
             let pass_id = writer.header().name_to_id(cstr8::cstr8!("PASS")).unwrap();
-            for i in 0..N_RECORDS as i64 {
+            for i in 0..i64::from(N_RECORDS) {
                 let mut record = writer.empty_record();
                 record.set_rid(Some(rid));
                 record.set_pos(i);
@@ -766,7 +766,7 @@ fn write_vcf_gz(c: &mut Criterion) {
 
 fn write_bcf(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_bcf");
-    group.throughput(Throughput::Elements(N_RECORDS as u64));
+    group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
     let header = vcf_header();
 

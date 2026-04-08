@@ -30,8 +30,8 @@ use std::marker::PhantomData;
 pub trait BcfValue: Copy {
     /// The BCF type code used for scalar encoding.
     const TYPE_CODE: u8;
-    /// BCF type code for a specific scalar value. Defaults to TYPE_CODE.
-    /// Overridden by i32 to select the smallest fitting type per r[bcf_writer.smallest_int_type].
+    /// BCF type code for a specific scalar value. Defaults to `TYPE_CODE`.
+    /// Overridden by i32 to select the smallest fitting type per r[`bcf_writer.smallest_int_type`].
     fn scalar_type_code(self) -> u8 {
         Self::TYPE_CODE
     }
@@ -68,7 +68,7 @@ impl BcfValue for f32 {
 impl BcfValue for i32 {
     const TYPE_CODE: u8 = BCF_BT_INT32;
 
-    /// Select smallest BCF int type for this value per r[bcf_writer.smallest_int_type].
+    /// Select smallest BCF int type for this value per r[`bcf_writer.smallest_int_type`].
     fn scalar_type_code(self) -> u8 {
         if (INT8_MIN..=INT8_MAX).contains(&self) {
             BCF_BT_INT8
@@ -298,7 +298,7 @@ impl GtFormatHandle {
                     } else {
                         gt.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
                     };
-                    (i32::from(*idx).saturating_add(1) << 1) | (phased as i32)
+                    (i32::from(*idx).saturating_add(1) << 1) | i32::from(phased)
                 }
                 None => 0, // missing allele
             };
@@ -328,7 +328,7 @@ pub struct BcfRecordEncoder<'a> {
     pub(crate) rlen: i32,
 }
 
-/// Trait to abstract over BgzfWriter<W> for different W types.
+/// Trait to abstract over `BgzfWriter`<W> for different W types.
 pub(crate) trait BgzfWrite {
     fn virtual_offset(&self) -> VirtualOffset;
     fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::bam::bgzf::BgzfError>;
@@ -415,7 +415,7 @@ impl Alleles {
     // r[impl bcf_encoder.begin_record]
     // r[impl bcf_encoder.checked_casts]
     /// Begin a BCF record: write the 24-byte fixed header, ID, and alleles.
-    /// Sets n_allele/n_alt on the encoder for downstream field validation.
+    /// Sets `n_allele/n_alt` on the encoder for downstream field validation.
     pub fn begin_record(
         &self,
         enc: &mut BcfRecordEncoder<'_>,
@@ -438,7 +438,7 @@ impl Alleles {
         enc.pos_0based =
             i32::try_from(pos.to_zero_based().get()).map_err(|_| VcfError::ValueOverflow {
                 field: "pos",
-                value: pos.to_zero_based().get() as u64,
+                value: u64::from(pos.to_zero_based().get()),
                 target_type: "i32",
             })?;
         enc.rlen = i32::try_from(self.rlen()).map_err(|_| VcfError::ValueOverflow {
@@ -708,7 +708,7 @@ pub(crate) fn encode_gt_field(
                             } else {
                                 g.phased.get(i.saturating_sub(1)).copied().unwrap_or(false)
                             };
-                            ((i32::from(*idx).saturating_add(1)) << 1) | (phased as i32)
+                            ((i32::from(*idx).saturating_add(1)) << 1) | i32::from(phased)
                         }
                         None => 0,
                     }
@@ -892,8 +892,8 @@ pub(crate) fn encode_format_field(
     }
 }
 
-/// Encode an array of BcfValue items. For i32, scans all values to select
-/// the smallest BCF int type that fits ALL values per r[bcf_writer.smallest_int_type].
+/// Encode an array of `BcfValue` items. For i32, scans all values to select
+/// the smallest BCF int type that fits ALL values per r[`bcf_writer.smallest_int_type`].
 fn encode_array_values<T: BcfValue>(buf: &mut Vec<u8>, values: &[T]) {
     if values.is_empty() {
         encode_type_byte(buf, 0, T::TYPE_CODE);

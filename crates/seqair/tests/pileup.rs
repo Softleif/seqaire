@@ -1,4 +1,4 @@
-//! Tests for PileupEngine: column iteration, filtering, max depth, edge cases.
+//! Tests for `PileupEngine`: column iteration, filtering, max depth, edge cases.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 #![allow(clippy::arithmetic_side_effects)]
 mod helpers;

@@ -41,7 +41,7 @@ fn fetch_htslib_pileup() -> Vec<HtsPileupColumn> {
     for p in pileup {
         let p = p.expect("htslib pileup");
         let pos = p.pos();
-        if (pos as u64) < TEST_START || (pos as u64) > TEST_END {
+        if u64::from(pos) < TEST_START || u64::from(pos) > TEST_END {
             continue;
         }
         let mut alignments = Vec::new();
@@ -82,7 +82,7 @@ fn fetch_htslib_pileup_region(region: &str, start: u64, end: u64) -> Vec<HtsFull
     for p in pileup {
         let p = p.expect("htslib pileup");
         let pos = p.pos();
-        if (pos as u64) < start || (pos as u64) > end {
+        if u64::from(pos) < start || u64::from(pos) > end {
             continue;
         }
         let alignments = p

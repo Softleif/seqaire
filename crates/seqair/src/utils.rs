@@ -1,5 +1,5 @@
 pub trait TraceErr<T> {
-    /// Like [`Option::and`] identity, but traces a message when the value is `None`.
+    /// Like [`Option::and`], but traces a message when the value is `None`.
     fn trace_err(self, message: &'static str) -> Option<T>;
 }
 
@@ -14,10 +14,6 @@ impl<T> TraceErr<T> for Option<T> {
     }
 }
 
-#[allow(
-    unused,
-    reason = "better to have this available for future use than to need it and not have it"
-)]
 pub trait TraceOk<T> {
     /// Like [`Result::ok`], but traces the error before discarding it.
     fn trace_ok(self, message: &'static str) -> Option<T>;

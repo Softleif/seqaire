@@ -414,7 +414,7 @@ impl RegionBuf {
         Ok(u32::from_le_bytes(buf))
     }
 
-    /// Read a complete BAM record body (block_size bytes, not including the
+    /// Read a complete BAM record body (`block_size` bytes, not including the
     /// 4-byte length prefix which this method reads itself) and return a slice
     /// of its bytes.
     ///
@@ -885,7 +885,7 @@ mod tests {
     }
 
     /// Build a fake BGZF file with N blocks, each containing `block_data[i]`.
-    /// Returns (file_bytes, block_offsets) where block_offsets[i] is the
+    /// Returns (`file_bytes`, `block_offsets`) where `block_offsets`[i] is the
     /// file offset of block i.
     fn make_bgzf_file(blocks: &[Vec<u8>]) -> (Vec<u8>, Vec<u64>) {
         let mut file = Vec::new();
@@ -1265,7 +1265,7 @@ mod tests {
         });
     }
 
-    /// Zero-length body: a record with block_size=0 should be read back as
+    /// Zero-length body: a record with `block_size=0` should be read back as
     /// an empty slice without error.
     #[test]
     fn read_record_zero_length_body() {

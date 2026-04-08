@@ -213,7 +213,7 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
     }
 
     /// Build an in-memory plain (uncompressed) SAM reader for fuzzing.
-    /// Parses header from the text, then linearly scans all records into a RecordStore
+    /// Parses header from the text, then linearly scans all records into a `RecordStore`
     /// on each `fetch_plain_into` call.
     pub fn from_plain_bytes(sam_data: Vec<u8>) -> Result<Self, SamError> {
         let text = String::from_utf8(sam_data.clone())
@@ -368,7 +368,7 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                     }
 
                     // Parse the SAM line
-                    if let Some(()) = parse_sam_line(
+                    if parse_sam_line(
                         &line_buf,
                         &self.shared.header,
                         tid_i32,
@@ -379,7 +379,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
                         &mut bases_buf,
                         &mut qual_buf,
                         &mut aux_buf,
-                    )? {
+                    )? == Some(())
+                    {
                         // record was added to store
                     }
 
@@ -1120,12 +1121,12 @@ mod tests {
 
         // u32::MAX should still work
         buf.clear();
-        serialize_bam_int(&mut buf, u32::MAX as i64).expect("u32::MAX should be valid");
+        serialize_bam_int(&mut buf, i64::from(u32::MAX)).expect("u32::MAX should be valid");
         assert_eq!(buf[0], b'I');
 
         // i32::MIN should still work
         buf.clear();
-        serialize_bam_int(&mut buf, i32::MIN as i64).expect("i32::MIN should be valid");
+        serialize_bam_int(&mut buf, i64::from(i32::MIN)).expect("i32::MIN should be valid");
         assert_eq!(buf[0], b'i');
     }
 

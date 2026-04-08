@@ -1,4 +1,4 @@
-//! Tests for RegionBuf: bulk-read BGZF buffer for high-latency I/O.
+//! Tests for `RegionBuf`: bulk-read BGZF buffer for high-latency I/O.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use seqair::bam::{
     Pos, Zero, reader::IndexedBamReader, record_store::RecordStore, region_buf::RegionBuf,

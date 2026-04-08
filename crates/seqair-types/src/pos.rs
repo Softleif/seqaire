@@ -121,7 +121,7 @@ impl Pos<Zero> {
         Self::new(value as u32)
     }
 
-    /// Maximum valid 0-based position (u32::MAX - 1).
+    /// Maximum valid 0-based position (`u32::MAX` - 1).
     /// Used as "end of contig" sentinel in queries.
     pub fn max_value() -> Self {
         // u32::MAX - 1 is always valid for NonMaxU32
@@ -167,8 +167,8 @@ impl Pos<One> {
     // r[impl pos.explicit_conversion]
     /// Convert to 0-based. Infallible: 1-based 1 → 0-based 0.
     ///
-    /// The result of subtracting 1 from a value in 1..u32::MAX is always in
-    /// 0..(u32::MAX-1), which is always a valid NonMaxU32.
+    /// The result of subtracting 1 from a value in `1..u32::MAX` is always in
+    /// `0..(u32::MAX-1)`, which is always a valid `NonMaxU32`.
     #[inline]
     pub fn to_zero_based(self) -> Pos<Zero> {
         // 1-based min is 1, so result is >= 0 and < u32::MAX — NonMaxU32 invariant always holds.
@@ -177,7 +177,7 @@ impl Pos<One> {
             .expect("BUG: to_zero_based produced u32::MAX (impossible for valid Pos<One>)")
     }
 
-    /// Maximum valid 1-based position (u32::MAX - 1).
+    /// Maximum valid 1-based position (`u32::MAX` - 1).
     pub fn max_value() -> Self {
         // u32::MAX - 1 is non-zero and < u32::MAX, always valid
         Self::new(u32::MAX - 1).expect("BUG: u32::MAX - 1 is a valid Pos<One> value")
@@ -209,7 +209,7 @@ impl<S> Pos<S> {
     #[inline]
     #[must_use]
     pub fn as_i64(self) -> i64 {
-        self.value.get() as i64
+        i64::from(self.value.get())
     }
 
     /// Convenience for 64-bit arithmetic: returns the raw value as u64.
@@ -223,7 +223,7 @@ impl<S> Pos<S> {
     /// Checked position + offset. Returns `None` if result is negative, exceeds u32 range, or hits the niche.
     #[inline]
     pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
-        let result = (self.value.get() as i64).wrapping_add(offset.0);
+        let result = i64::from(self.value.get()).wrapping_add(offset.0);
         let result_u32 = u32::try_from(result).ok()?;
         NonMaxU32::new(result_u32).map(|v| Self { value: v, _system: PhantomData })
     }
@@ -245,7 +245,7 @@ impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset((self.value.get() as i64).wrapping_sub(rhs.value.get() as i64))
+        Offset(i64::from(self.value.get()).wrapping_sub(i64::from(rhs.value.get())))
     }
 }
 
@@ -343,7 +343,7 @@ impl fmt::Display for Offset {
 
 #[cfg(test)]
 impl Pos<Zero> {
-    /// Test-only convenience: panics if value is u32::MAX.
+    /// Test-only convenience: panics if value is `u32::MAX`.
     pub fn at(value: u32) -> Self {
         Self::new(value).expect("test position must not be u32::MAX")
     }
@@ -351,14 +351,14 @@ impl Pos<Zero> {
 
 #[cfg(test)]
 impl Pos<One> {
-    /// Test-only convenience: panics if value is 0 or u32::MAX.
+    /// Test-only convenience: panics if value is 0 or `u32::MAX`.
     pub fn at(value: u32) -> Self {
         Self::new(value).expect("test position must be 1..u32::MAX")
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
 mod tests {
     use proptest::prelude::*;
 
@@ -432,8 +432,8 @@ mod tests {
     // r[verify pos.niche]
     #[test]
     fn try_from_i64_rejects_u32_max() {
-        assert!(Pos::<Zero>::try_from_i64(u32::MAX as i64).is_none());
-        assert!(Pos::<One>::try_from_i64(u32::MAX as i64).is_none());
+        assert!(Pos::<Zero>::try_from_i64(i64::from(u32::MAX)).is_none());
+        assert!(Pos::<One>::try_from_i64(i64::from(u32::MAX)).is_none());
     }
 
     // r[verify pos.try_from]
@@ -454,7 +454,7 @@ mod tests {
     // r[verify pos.niche]
     #[test]
     fn try_from_u64_rejects_u32_max() {
-        assert!(Pos::<Zero>::try_from_u64(u32::MAX as u64).is_none());
+        assert!(Pos::<Zero>::try_from_u64(u64::from(u32::MAX)).is_none());
     }
 
     // r[verify pos.derives]
@@ -601,8 +601,8 @@ mod tests {
             v in 0u32..1_000_000,
             off in -500_000i64..=500_000,
         ) {
-            let result = v as i64 + off;
-            if result >= 0 && result < u32::MAX as i64 {
+            let result = i64::from(v) + off;
+            if result >= 0 && result < i64::from(u32::MAX) {
                 let p = Pos::<Zero>::new(v).unwrap();
                 let q = p.checked_add_offset(Offset::new(off)).unwrap();
                 let r = q.checked_sub_offset(Offset::new(off)).unwrap();
@@ -616,7 +616,7 @@ mod tests {
             let pa = Pos::<Zero>::new(a).unwrap();
             let pb = Pos::<Zero>::new(b).unwrap();
             let off = pa - pb;
-            prop_assert_eq!(off.get(), a as i64 - b as i64);
+            prop_assert_eq!(off.get(), i64::from(a) - i64::from(b));
         }
 
         // r[verify pos.niche]

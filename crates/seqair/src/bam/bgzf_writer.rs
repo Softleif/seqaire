@@ -42,7 +42,7 @@ const EOF_BLOCK: [u8; 28] = [
 /// BGZF block. Tracks virtual offsets for index co-production.
 pub struct BgzfWriter<W: Write> {
     inner: Option<W>,
-    /// Uncompressed data buffer (up to MAX_UNCOMPRESSED_SIZE).
+    /// Uncompressed data buffer (up to `MAX_UNCOMPRESSED_SIZE`).
     buf: Vec<u8>,
     /// Reusable buffer for compressed output.
     compressed_buf: Vec<u8>,
@@ -81,9 +81,15 @@ impl<W: Write> BgzfWriter<W> {
     /// Upper 48 bits = compressed offset of the current block.
     /// Lower 16 bits = bytes written into the current (unflushed) block.
     pub fn virtual_offset(&self) -> VirtualOffset {
+        debug_assert!(
+            self.buf.len() <= MAX_UNCOMPRESSED_SIZE,
+            "buffer overflow: {} bytes (should never happen)",
+            self.buf.len()
+        );
         // Buffer can be at most MAX_UNCOMPRESSED_SIZE (65536) which doesn't fit u16.
         // When buffer is exactly full, flush_block hasn't run yet — cap at 65535.
         // This is safe: a full buffer will be flushed on the next write_all/flush_if_needed.
+        #[allow(clippy::cast_possible_truncation, reason = "min")]
         let within = self.buf.len().min(u16::MAX as usize) as u16;
         VirtualOffset::new(self.block_offset, within)
     }
@@ -110,8 +116,7 @@ impl<W: Write> BgzfWriter<W> {
                 continue;
             }
             let take = remaining.len().min(space);
-            // Safe: take <= remaining.len()
-            #[allow(clippy::indexing_slicing)]
+            #[allow(clippy::indexing_slicing, reason = "take <= remaining.len()")]
             {
                 self.buf.extend_from_slice(&remaining[..take]);
                 remaining = &remaining[take..];
@@ -153,7 +158,7 @@ impl<W: Write> BgzfWriter<W> {
         let mut header = BGZF_HEADER;
         let bsize_bytes = u16::try_from(bsize).map_err(|_| BgzfError::CorruptHeader)?.to_le_bytes();
         // Bytes 16-17 are the BSIZE field
-        #[allow(clippy::indexing_slicing)]
+        #[allow(clippy::indexing_slicing, reason = "fixed-size header with known offsets")]
         {
             header[16] = bsize_bytes[0];
             header[17] = bsize_bytes[1];
@@ -204,6 +209,8 @@ impl<W: Write> Drop for BgzfWriter<W> {
     }
 }
 
+#[allow(clippy::cast_possible_truncation, reason = "tests")]
+#[allow(clippy::indexing_slicing, reason = "tests")]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,10 +264,7 @@ mod tests {
         let writer = BgzfWriter::new(&mut output);
         writer.finish().unwrap();
         assert!(output.len() >= 28);
-        #[allow(clippy::indexing_slicing)]
-        {
-            assert_eq!(&output[output.len() - 28..], &EOF_BLOCK);
-        }
+        assert_eq!(&output[output.len() - 28..], &EOF_BLOCK);
     }
 
     // r[verify bgzf.writer.virtual_offset]

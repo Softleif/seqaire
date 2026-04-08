@@ -1,5 +1,5 @@
 //! Encode and decode BAM 4-bit packed sequences. [`decode_seq`] and [`encode_seq`] dispatch to
-//! SSSE3 (x86_64), NEON (aarch64), or scalar paths; all produce identical output.
+//! SSSE3 (`x86_64`), NEON (aarch64), or scalar paths; all produce identical output.
 
 // r[impl seq.decode_scalar]
 // r[impl seq.decode_pair_table]

@@ -67,7 +67,7 @@ impl std::str::FromStr for RegionString {
     }
 }
 
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, reason = "parser combinator types are complex")]
 fn parser(input: &mut &str) -> winnow::Result<RegionString> {
     fn chromosome_name<'d>(input: &mut &'d str) -> winnow::Result<&'d str> {
         take_till(1.., |c| c == ':')
@@ -135,12 +135,12 @@ mod hts {
             match (region.start, region.end) {
                 (Some(start), Some(end)) => FetchDefinition::from((
                     chromosome,
-                    start.to_zero_based().get() as i64,
-                    end.get() as i64,
+                    i64::from(start.to_zero_based().get()),
+                    i64::from(end.get()),
                 )),
                 (Some(start), None) => FetchDefinition::from((
                     chromosome,
-                    start.to_zero_based().get() as i64,
+                    i64::from(start.to_zero_based().get()),
                     i64::MAX,
                 )),
                 (None, None) => FetchDefinition::from(chromosome),
@@ -153,7 +153,7 @@ mod hts {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects)]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
 mod tests {
     use super::*;
     use std::str::FromStr;

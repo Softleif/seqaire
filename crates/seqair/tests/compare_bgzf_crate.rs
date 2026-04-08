@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use seqair::bam::{bgzf::VirtualOffset, index::Chunk, region_buf::RegionBuf};
 use std::io::{Read, Write};
 
-/// Compress data using bgzf::Writer (handles block splitting via Write trait).
+/// Compress data using `bgzf::Writer` (handles block splitting via Write trait).
 fn bgzf_compress(data: &[u8], level: u8) -> Vec<u8> {
     let mut output = Vec::new();
     let mut writer = BgzfWriter::new(&mut output, CompressionLevel::new(level).unwrap());
@@ -15,7 +15,7 @@ fn bgzf_compress(data: &[u8], level: u8) -> Vec<u8> {
     output
 }
 
-/// Decompress using bgzf::Reader.
+/// Decompress using `bgzf::Reader`.
 fn bgzf_decompress(compressed: &[u8]) -> Vec<u8> {
     let mut reader = BgzfReader::new(compressed);
     let mut output = Vec::new();
@@ -30,7 +30,7 @@ fn bgzf_decompress(compressed: &[u8]) -> Vec<u8> {
     output
 }
 
-/// Decompress using seqair's RegionBuf.
+/// Decompress using seqair's `RegionBuf`.
 /// `expected_len` is used to pre-allocate and read the exact amount.
 fn seqair_decompress(compressed: &[u8], expected_len: usize) -> Vec<u8> {
     let mut cursor = std::io::Cursor::new(compressed.to_vec());

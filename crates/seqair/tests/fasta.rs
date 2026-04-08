@@ -102,8 +102,8 @@ proptest! {
         let data = make_gzi_data(&entries);
         let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
-        let target_a = block_start_uncompressed + offset_a as u64;
-        let target_b = block_start_uncompressed + offset_b as u64;
+        let target_a = block_start_uncompressed + u64::from(offset_a);
+        let target_b = block_start_uncompressed + u64::from(offset_b);
 
         let loc_a = gzi.translate(target_a).unwrap();
         let loc_b = gzi.translate(target_b).unwrap();
@@ -138,7 +138,7 @@ proptest! {
         let data = make_gzi_data(&[]);
         let gzi = seqair::fasta::GziIndex::parse_test(&data);
 
-        let target = u16::MAX as u64 + overflow;
+        let target = u64::from(u16::MAX) + overflow;
         let result = gzi.translate(target);
         prop_assert!(result.is_err(),
             "translate({}) should fail but returned {:?}", target, result);
