@@ -24,7 +24,7 @@ pub enum OwnedRecordError {
     #[error("CIGAR op count {count} exceeds maximum of 65535")]
     CigarCountOverflow { count: usize },
 
-    /// Sequence length exceeds i32::MAX (BAM `l_seq` is i32).
+    /// Sequence length exceeds `i32::MAX` (BAM `l_seq` is i32).
     #[error("sequence length {len} exceeds i32::MAX")]
     SeqLengthOverflow { len: usize },
 
@@ -175,10 +175,10 @@ impl OwnedBamRecordBuilder {
 }
 
 impl OwnedBamRecord {
-    /// Decode a complete owned record from raw BAM bytes (after the 4-byte block_size prefix).
+    /// Decode a complete owned record from raw BAM bytes (after the 4-byte `block_size` prefix).
     ///
     /// Unlike [`BamRecord::decode`](super::record::BamRecord::decode), this preserves ALL fields
-    /// including mate info (next_ref_id, next_pos, template_len) that the read-path type drops.
+    /// including mate info (`next_ref_id`, `next_pos`, `template_len`) that the read-path type drops.
     /// This is essential for BAM rewriting pipelines that need to modify records and write them back.
     pub fn from_raw_bam(raw: &[u8]) -> Result<Self, OwnedRecordError> {
         use super::record::parse_header;
@@ -303,7 +303,7 @@ impl OwnedBamRecord {
     }
 
     // r[impl bam.owned_record.bin]
-    /// Compute the BAI bin value from pos and end_pos (BAI scheme: min_shift=14, depth=5).
+    /// Compute the BAI bin value from pos and `end_pos` (BAI scheme: `min_shift=14`, depth=5).
     pub fn bin(&self) -> u16 {
         let beg = if self.pos < 0 { 0u64 } else { self.pos as u64 };
         let ep = self.end_pos();
@@ -316,7 +316,7 @@ impl OwnedBamRecord {
     }
 
     // r[impl bam.owned_record.aligned_pairs]
-    /// Iterator over (query_pos, ref_pos) alignment pairs.
+    /// Iterator over (`query_pos`, `ref_pos`) alignment pairs.
     ///
     /// Yields one tuple per consumed base:
     /// - M/=/X: `(Some(qpos), Some(rpos))`

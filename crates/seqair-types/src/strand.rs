@@ -57,7 +57,7 @@ impl fmt::Display for Strand {
 /// | `0x20` |      32 | Mate is mapped to the reverse strand |
 /// | `0x40` |      64 | Read is first in pair                |
 /// | `0x80` |     128 | Read is second in pair               |
-#[allow(clippy::collapsible_else_if)] // clearer
+#[allow(clippy::collapsible_else_if, reason = "clearer")]
 pub fn strand_from_flags(flags: u16) -> Strand {
     if flags & 0x1 == 0 {
         // Unpaired read: strand determined solely by alignment direction

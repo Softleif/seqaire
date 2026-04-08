@@ -1,4 +1,4 @@
-//! Tests for pileup indel reporting: PileupOp::Deletion, RefSkip, Insertion.
+//! Tests for pileup indel reporting: `PileupOp::Deletion`, `RefSkip`, Insertion.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 #![allow(clippy::arithmetic_side_effects)]
 mod helpers;

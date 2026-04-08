@@ -163,8 +163,8 @@ impl ContainerHeader {
             // Unmapped or multi-ref — can't do coordinate filtering
             return self.ref_seq_id == -2;
         }
-        let container_start = self.alignment_start as i64;
-        let container_end = container_start.saturating_add(self.alignment_span as i64);
+        let container_start = i64::from(self.alignment_start);
+        let container_end = container_start.saturating_add(i64::from(self.alignment_span));
         container_start < query_end && container_end > query_start
     }
 }

@@ -113,7 +113,7 @@ impl FuzzReaders {
         }
     }
 
-    /// Full pileup pipeline: fetch_into → PileupEngine with reference sequence.
+    /// Full pileup pipeline: `fetch_into` → `PileupEngine` with reference sequence.
     pub fn pileup(
         &mut self,
         tid: u32,

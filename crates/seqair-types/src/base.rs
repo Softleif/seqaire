@@ -134,11 +134,11 @@ fn from_ascii_dispatch(bytes: &mut [u8]) {
         return;
     }
 
-    #[allow(unreachable_code)]
+    #[allow(unreachable_code, reason = "fallback for unsupported architectures")]
     from_ascii_scalar(bytes);
 }
 
-/// Scalar fallback: uses the existing BASE_LUT per byte.
+/// Scalar fallback: uses the existing `BASE_LUT` per byte.
 #[allow(clippy::indexing_slicing, reason = "byte < 256 = BASE_LUT.len()")]
 fn from_ascii_scalar(bytes: &mut [u8]) {
     for b in bytes.iter_mut() {

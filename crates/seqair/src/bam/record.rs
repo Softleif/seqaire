@@ -35,7 +35,7 @@ pub struct BamRecord {
 }
 
 impl BamRecord {
-    /// Decode from raw BAM bytes (after the 4-byte block_size prefix).
+    /// Decode from raw BAM bytes (after the 4-byte `block_size` prefix).
     pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
         let h = parse_header(raw)?;
         let seq_len_usize = h.seq_len as usize;
@@ -120,7 +120,7 @@ impl BamRecord {
     }
 }
 
-/// Compute end_pos from raw BAM record bytes (before full decode).
+/// Compute `end_pos` from raw BAM record bytes (before full decode).
 pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos<Zero>> {
     let h = parse_header(raw).ok()?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
@@ -197,7 +197,7 @@ pub(crate) struct ParsedHeader {
     pub flags: u16,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
-    /// Start of variable-length data (32 + name_len).
+    /// Start of variable-length data (32 + `name_len`).
     pub var_start: usize,
     /// End of CIGAR bytes.
     pub cigar_end: usize,

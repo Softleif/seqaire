@@ -1,4 +1,4 @@
-//! Encoder equivalence proptests: verify that BcfRecordEncoder produces
+//! Encoder equivalence proptests: verify that `BcfRecordEncoder` produces
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -6,7 +6,7 @@
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects
 )]
-//! identical BCF output to BcfWriter::write_record(&VcfRecord).
+//! identical BCF output to `BcfWriter::write_record(&VcfRecord)`.
 //!
 //! This is the strongest internal consistency check: both encoding paths
 //! must produce byte-identical BCF records.
@@ -72,7 +72,7 @@ fn test_header() -> Arc<VcfHeader> {
     )
 }
 
-/// Write a record using BcfWriter::write_record() (the VcfRecord path).
+/// Write a record using `BcfWriter::write_record()` (the `VcfRecord` path).
 /// Returns the raw BGZF-compressed output.
 #[allow(clippy::too_many_arguments)]
 fn write_via_record(
@@ -103,7 +103,7 @@ fn write_via_record(
     output
 }
 
-/// Write the same record using BcfRecordEncoder (the direct-encode path).
+/// Write the same record using `BcfRecordEncoder` (the direct-encode path).
 /// Returns the raw BGZF-compressed output.
 #[allow(clippy::too_many_arguments)]
 fn write_via_encoder(

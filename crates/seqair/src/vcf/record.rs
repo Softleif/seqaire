@@ -72,7 +72,7 @@ pub struct Genotype {
     /// Allele indices (0=REF, 1+=ALT, None=missing).
     pub alleles: SmallVec<Option<u16>, 2>,
     /// Per-separator phasing (true=phased `|`, false=unphased `/`).
-    /// Length = alleles.len() - 1 for diploid+.
+    /// Length = `alleles.len()` - 1 for diploid+.
     pub phased: SmallVec<bool, 2>,
 }
 
@@ -140,7 +140,7 @@ pub struct VcfRecord {
 }
 
 // r[impl vcf_record.builder]
-/// Builder for VcfRecord.
+/// Builder for `VcfRecord`.
 pub struct VcfRecordBuilder {
     contig: SmolStr,
     pos: Pos<One>,

@@ -7,7 +7,7 @@ use std::io::Read;
 /// Decode an ITF8 value from a byte slice.
 ///
 /// Returns `(value, bytes_consumed)`. The value is unsigned; use `as i32`
-/// for fields that can be negative (ref_seq_id, alignment_start).
+/// for fields that can be negative (`ref_seq_id`, `alignment_start`).
 pub fn decode_itf8(buf: &[u8]) -> Option<(u32, usize)> {
     let &b0 = buf.first()?;
 
@@ -477,7 +477,7 @@ mod tests {
             // Values < 128 should encode identically in ITF8 and LTF8
             let (itf8_val, itf8_len) = decode_itf8(&[val as u8]).unwrap();
             let (ltf8_val, ltf8_len) = decode_ltf8(&[val as u8]).unwrap();
-            prop_assert_eq!(itf8_val as u64, ltf8_val);
+            prop_assert_eq!(u64::from(itf8_val), ltf8_val);
             prop_assert_eq!(itf8_len, ltf8_len);
         }
 
@@ -495,7 +495,7 @@ mod tests {
             // ITF8 and LTF8 share the 1-4 byte prefix scheme; both must give the same value.
             let (itf8_val, _) = decode_itf8(encoded).unwrap();
             let (ltf8_val, ltf8_n) = decode_ltf8(encoded).unwrap();
-            prop_assert_eq!(itf8_val as u64, ltf8_val);
+            prop_assert_eq!(u64::from(itf8_val), ltf8_val);
             prop_assert_eq!(ltf8_n, n);
 
             // decode_ltf8 and read_ltf8 must agree on the same encoded bytes.

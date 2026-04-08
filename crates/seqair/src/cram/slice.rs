@@ -70,7 +70,7 @@ impl SliceHeader {
     }
 }
 
-/// Decode all records from a slice's blocks and push them into a RecordStore.
+/// Decode all records from a slice's blocks and push them into a `RecordStore`.
 ///
 /// `container_data` starts at the first block after the container header.
 /// `slice_offset` is the byte offset from container data start to this slice's header block.
@@ -182,7 +182,7 @@ pub fn decode_slice(
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
 
     // Decode records
-    let mut alignment_pos = sh.alignment_start as i64;
+    let mut alignment_pos = i64::from(sh.alignment_start);
     let mut records_pushed = 0usize;
 
     for _ in 0..sh.num_records {
@@ -268,7 +268,7 @@ fn decode_record(
 
     // r[impl cram.record.position]
     // 5. AP (alignment position)
-    let ap = ds.alignment_pos.decode(ctx)? as i64;
+    let ap = i64::from(ds.alignment_pos.decode(ctx)?);
     let alignment_pos = if ch.preservation.ap_delta {
         *prev_alignment_pos = prev_alignment_pos.wrapping_add(ap);
         *prev_alignment_pos
@@ -316,9 +316,9 @@ fn decode_record(
     aux_buf.clear();
     if let Some(tag_set) = ch.preservation.tag_dictionary.get(tag_line_idx) {
         for entry in tag_set {
-            let tag_key = ((entry.tag[0] as i32) << 16)
-                | ((entry.tag[1] as i32) << 8)
-                | (entry.bam_type as i32);
+            let tag_key = (i32::from(entry.tag[0]) << 16)
+                | (i32::from(entry.tag[1]) << 8)
+                | i32::from(entry.bam_type);
             if let Some(enc) = ch.tag_encodings.get(&tag_key) {
                 let tag_value = enc.decode(ctx)?;
                 // Serialize to BAM binary aux format: tag[0] tag[1] type value_bytes
@@ -384,7 +384,7 @@ fn decode_record(
             qual_buf.resize(read_length, 0xFF);
         }
 
-        let end_pos_raw = pos_0based.as_i64().wrapping_add(result.ref_consumed as i64);
+        let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(result.ref_consumed));
         let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw)
             .ok_or(super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
 
@@ -716,7 +716,7 @@ fn decode_features_and_reconstruct(
     // Pack CIGAR ops into BAM format
     cigar_buf.clear();
     for (len, op) in &cigar_ops {
-        let packed = (len << 4) | (*op as u32);
+        let packed = (len << 4) | u32::from(*op);
         cigar_buf.extend_from_slice(&packed.to_le_bytes());
     }
 

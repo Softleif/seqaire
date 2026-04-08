@@ -86,6 +86,7 @@ impl AuxData {
         if value >= 0 {
             #[allow(clippy::cast_sign_loss, reason = "validated non-negative above")]
             let v = value as u64;
+            #[allow(clippy::cast_possible_truncation, reason = "validated max size")]
             if v <= u64::from(u8::MAX) {
                 self.data.push(b'C');
                 self.data.push(v as u8);
@@ -98,6 +99,8 @@ impl AuxData {
             }
         } else {
             // Negative values — range already validated above
+
+            #[allow(clippy::cast_possible_truncation, reason = "validated max size")]
             if value >= i64::from(i8::MIN) {
                 self.data.push(b'c');
                 self.data.push(value as u8);
@@ -125,9 +128,10 @@ impl AuxData {
     /// Add or replace a B:C (unsigned byte array) tag.
     ///
     /// The BAM B-array element count is u32. In practice, array size is bounded by
-    /// the 2 MiB record size limit, so values longer than u32::MAX cannot occur in
+    /// the 2 MiB record size limit, so values longer than `u32::MAX` cannot occur in
     /// valid BAM data. We validate the cast to be safe on 64-bit platforms.
     pub fn set_array_u8(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        #[allow(clippy::cast_possible_wrap, reason = "len < i64::MAX")]
         let count = u32::try_from(values.len())
             .map_err(|_| AuxDataError::IntegerOutOfRange { value: values.len() as i64 })?;
         self.remove(tag);

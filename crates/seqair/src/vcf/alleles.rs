@@ -217,7 +217,7 @@ impl Alleles {
     }
 
     // r[impl vcf_record.allele_count]
-    /// Number of alleles including REF (n_allele for BCF).
+    /// Number of alleles including REF (`n_allele` for BCF).
     pub fn n_allele(&self) -> usize {
         match self {
             Self::Reference { .. } => 1,

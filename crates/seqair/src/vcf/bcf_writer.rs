@@ -41,7 +41,7 @@ impl<W: Write> BcfWriter<W> {
     }
 
     // r[impl bcf_writer.magic]
-    /// Write the BCF magic and header. Must be called once before write_record.
+    /// Write the BCF magic and header. Must be called once before `write_record`.
     pub fn write_header(&mut self) -> Result<(), VcfError> {
         // Magic: BCF\x02\x02 (BCF version 2.2, the current version expected by htslib)
         self.bgzf.write_all(b"BCF\x02\x02")?;

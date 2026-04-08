@@ -28,7 +28,7 @@ pub struct SlimRecord {
     name_off: u32,
     /// Length of the qname in the name slab.
     name_len: u16,
-    /// Offset into the bases slab (seq_len Base values).
+    /// Offset into the bases slab (`seq_len` Base values).
     bases_off: u32,
     /// Offset into the data slab (start of [cigar|qual|aux]).
     data_off: u32,

@@ -93,7 +93,7 @@ fn container_iteration_finds_all_containers() {
 
         if container.num_records > 0 {
             data_containers += 1;
-            total_records += container.num_records as i64;
+            total_records += i64::from(container.num_records);
         }
 
         pos += container.header_size + container.length as usize;
@@ -241,7 +241,7 @@ fn cram_records_match_bam_records() {
     hts.fetch(FetchDefinition::Region(tid as i32, start as i64, end as i64)).unwrap();
     let mut hts_records = Vec::new();
     let mut record = bam::Record::new();
-    while let Some(Ok(())) = hts.read(&mut record) {
+    while hts.read(&mut record) == Some(Ok(())) {
         if record.flags() & 0x4 != 0 {
             continue;
         }

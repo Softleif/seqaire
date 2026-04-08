@@ -319,7 +319,7 @@ fn arb_base() -> impl Strategy<Value = Base> {
     prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
 }
 
-/// Generate a sorted list of unique positions within [1, max_pos].
+/// Generate a sorted list of unique positions within [1, `max_pos`].
 fn arb_sorted_positions(max_count: usize, max_pos: u32) -> impl Strategy<Value = Vec<u32>> {
     proptest::collection::hash_set(1u32..max_pos, 1..max_count).prop_map(|set| {
         let mut v: Vec<u32> = set.into_iter().collect();

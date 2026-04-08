@@ -215,7 +215,7 @@ impl<W: Write> VcfWriter<W> {
                     value: tid_usize as u64,
                     target_type: "i32",
                 })?;
-                let beg = record.pos.to_zero_based().get() as u64;
+                let beg = u64::from(record.pos.to_zero_based().get());
                 let end = beg.saturating_add(record.alleles.rlen() as u64);
                 index.push(tid, beg, end, bgzf.virtual_offset())?;
             }

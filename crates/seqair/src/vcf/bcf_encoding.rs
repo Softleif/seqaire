@@ -1,5 +1,5 @@
 //! Shared BCF typed value encoding constants and helpers.
-//! Used by both [`super::bcf_writer`] (VcfRecord path) and [`super::encoder`] (direct path).
+//! Used by both [`super::bcf_writer`] (`VcfRecord` path) and [`super::encoder`] (direct path).
 
 // BCF type codes
 pub const BCF_BT_NULL: u8 = 0;

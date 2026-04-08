@@ -373,7 +373,8 @@ impl BamHeader {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on controlled values")]
+#[allow(clippy::arithmetic_side_effects, reason = "tests")]
+#[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
 

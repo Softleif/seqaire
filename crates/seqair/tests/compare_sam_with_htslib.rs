@@ -53,7 +53,7 @@ fn fetch_hts_records(contig: &str, start: u64, end: u64) -> Vec<HtsRecord> {
 
     let mut records = Vec::new();
     let mut record = bam::Record::new();
-    while let Some(Ok(())) = reader.read(&mut record) {
+    while reader.read(&mut record) == Some(Ok(())) {
         if record.flags() & 0x4 != 0 {
             continue;
         }

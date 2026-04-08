@@ -92,8 +92,8 @@ impl BamShared {
 // r[impl bam.reader.open]
 // r[impl bam.reader.header_access]
 pub struct IndexedBamReader<R: Read + Seek = File> {
-    /// Separate reader handle for bulk region reads (unbuffered — RegionBuf does
-    /// large sequential reads that don't benefit from BufReader).
+    /// Separate reader handle for bulk region reads (unbuffered — `RegionBuf` does
+    /// large sequential reads that don't benefit from `BufReader`).
     bulk_reader: R,
     shared: Arc<BamShared>,
 }

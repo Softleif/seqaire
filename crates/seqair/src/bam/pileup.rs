@@ -44,7 +44,7 @@ impl RefSeq {
     }
 }
 
-/// Filter function receiving (flags, aux_bytes) for the candidate record.
+/// Filter function receiving (flags, `aux_bytes`) for the candidate record.
 type RecordFilter = Box<dyn Fn(u16, &[u8]) -> bool>;
 
 // r[impl pileup.active_set]
@@ -60,7 +60,7 @@ pub struct PileupEngine {
     region_end: Pos<Zero>,
     next_entry: usize,
     /// Hot field: checked every column during retain. Stored separately so the
-    /// retain loop strides 4 bytes instead of the full ActiveRecord size (~144 bytes).
+    /// retain loop strides 4 bytes instead of the full `ActiveRecord` size (~144 bytes).
     active_end_pos: Vec<Pos<Zero>>,
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,

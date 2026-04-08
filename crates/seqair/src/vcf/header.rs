@@ -248,7 +248,7 @@ impl VcfHeader {
 }
 
 // r[impl vcf_header.builder]
-/// Builder for VcfHeader with validation at build time.
+/// Builder for `VcfHeader` with validation at build time.
 #[derive(Debug, Clone)]
 pub struct VcfHeaderBuilder {
     file_format: SmolStr,
@@ -401,7 +401,7 @@ impl VcfHeaderBuilder {
     }
 
     // r[impl vcf_header.from_bam_header]
-    /// Build a VcfHeaderBuilder from a BAM header, copying contig names and lengths.
+    /// Build a `VcfHeaderBuilder` from a BAM header, copying contig names and lengths.
     pub fn from_bam_header(header: &BamHeader) -> Result<Self, VcfHeaderError> {
         let mut builder = Self::new();
         for (tid, name) in header.target_names().enumerate() {

@@ -33,7 +33,7 @@ fn fetch_htslib_records() -> Vec<HtsRecord> {
 
     let mut records = Vec::new();
     let mut record = bam::Record::new();
-    while let Some(Ok(())) = reader.read(&mut record) {
+    while reader.read(&mut record) == Some(Ok(())) {
         // Skip unmapped reads to match seqair behavior
         if record.flags() & 0x4 != 0 {
             continue;
