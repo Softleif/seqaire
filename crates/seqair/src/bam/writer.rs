@@ -28,35 +28,35 @@ const MAX_REF_NAME: usize = 256 * 1024; // 256 KiB (same as reader)
 #[non_exhaustive]
 pub enum BamWriteError {
     /// I/O error from the underlying stream.
-    #[error("I/O error: {source}")]
+    #[error("I/O error")]
     Io {
         #[from]
         source: io::Error,
     },
 
     /// BGZF compression error.
-    #[error("BGZF error: {source}")]
+    #[error("BGZF error")]
     Bgzf {
         #[from]
         source: BgzfError,
     },
 
     /// Record serialization error.
-    #[error("record error: {source}")]
+    #[error("record error")]
     Record {
         #[from]
         source: OwnedRecordError,
     },
 
     /// Index building error (e.g. unsorted input).
-    #[error("index error: {source}")]
+    #[error("index error")]
     Index {
         #[from]
         source: IndexError,
     },
 
     /// Header serialization error.
-    #[error("header error: {source}")]
+    #[error("header error")]
     Header {
         #[from]
         source: BamHeaderError,
