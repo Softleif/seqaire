@@ -134,7 +134,7 @@ pub enum SamError {
     )]
     UncompressedSam { path: PathBuf },
 
-    #[error("record decode error: {source}")]
+    #[error("record decode error")]
     RecordDecode {
         #[from]
         source: DecodeError,

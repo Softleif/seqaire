@@ -48,7 +48,7 @@ pub enum OwnedRecordError {
     RecordTooLarge { size: usize },
 
     /// Auxiliary tag error.
-    #[error("aux data error: {source}")]
+    #[error("aux data error")]
     AuxData {
         #[from]
         source: AuxDataError,

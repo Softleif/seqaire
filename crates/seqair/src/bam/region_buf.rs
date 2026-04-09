@@ -118,7 +118,6 @@ impl RegionBuf {
             return Err(BgzfError::RegionTooLarge { total_bytes, max_bytes: MAX_REGION_BYTES });
         }
 
-        let load_start = std::time::Instant::now();
         let mut data = Vec::with_capacity(total_bytes);
         let mut range_map = Vec::with_capacity(merged.len());
         let mut max_range_us: u64 = 0;
@@ -162,28 +161,6 @@ impl RegionBuf {
                 buf_start,
             });
         }
-
-        let first_offset = merged.first().map_or(0, |r| r.file_start);
-        let last_offset = merged.last().map_or(0, |r| r.file_start);
-        let file_span = last_offset.saturating_sub(first_offset);
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "elapsed microseconds cannot reach u64::MAX (~580K years)"
-        )]
-        let elapsed_us = load_start.elapsed().as_micros() as u64;
-
-        tracing::debug!(
-            target: PROFILE_TARGET,
-            input_chunks = chunks.len(),
-            merged_ranges = merged.len(),
-            total_read_bytes = data.len(),
-            file_span,
-            first_offset,
-            last_offset,
-            max_range_us,
-            elapsed_us,
-            "region_buf::load",
-        );
 
         let first_file_start = range_map.first().map(|r| r.file_start).unwrap_or(0);
 
@@ -577,7 +554,15 @@ fn read_all<R: Read>(reader: &mut R, buf: &mut [u8]) -> usize {
 pub(super) fn merged_byte_size(chunks: &[Chunk]) -> usize {
     merge_chunks(chunks)
         .iter()
-        .map(|r| r.file_end.saturating_sub(r.file_start) as usize)
+        .map(|r| {
+            debug_assert!(
+                r.file_end > r.file_start,
+                "merged range has non-positive size: file_start={}, file_end={}",
+                r.file_start,
+                r.file_end
+            );
+            r.file_end.saturating_sub(r.file_start) as usize
+        })
         .fold(0usize, usize::saturating_add)
 }
 

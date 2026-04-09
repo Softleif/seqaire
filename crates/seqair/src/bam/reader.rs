@@ -56,7 +56,7 @@ pub enum BamError {
     #[error("BAI index not found for {bam_path}")]
     IndexNotFound { bam_path: PathBuf },
 
-    #[error("record decode error: {source}")]
+    #[error("record decode error")]
     RecordDecode {
         #[from]
         source: DecodeError,
@@ -254,26 +254,6 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                 }
             }
         }
-
-        tracing::debug!(
-            target: super::region_buf::PROFILE_TARGET,
-            accepted,
-            skipped_tid,
-            skipped_unmapped,
-            skipped_out_of_range,
-            batches = batches.len(),
-            "fetch_into",
-        );
-
-        tracing::debug!(
-            target: super::region_buf::PROFILE_TARGET,
-            records = store.len(),
-            records_cap = store.records_capacity(),
-            names_bytes = store.names_capacity(),
-            bases_bytes = store.bases_capacity(),
-            data_bytes = store.data_capacity(),
-            "record_store",
-        );
 
         Ok(store.len())
     }
