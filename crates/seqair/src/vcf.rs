@@ -28,6 +28,7 @@ pub mod error;
 pub mod header;
 pub mod index_builder;
 pub mod record;
+pub mod record_encoder;
 pub mod writer;
 
 pub use alleles::Alleles;
@@ -38,6 +39,12 @@ pub use header::{
 pub use record::{
     Filters, Genotype, InfoFields, InfoValue, SampleFields, SampleValue, VcfRecord,
     VcfRecordBuilder,
+};
+pub use record_encoder::{
+    Arr, ContigId, EncodeFormat, EncodeInfo, FieldDescription, FieldId, FilterFieldDef, FilterId,
+    Flag, FormatFieldDef, FormatFloat, FormatGt, FormatInt, FormatKey, Gt, InfoFieldDef, InfoFlag,
+    InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr,
+    RecordEncoder, Scalar, Str,
 };
 
 use std::io::Write;
