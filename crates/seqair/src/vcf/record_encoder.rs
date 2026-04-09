@@ -118,9 +118,7 @@ pub struct FilterId {
 
 impl FilterId {
     /// The PASS filter (always BCF dictionary index 0).
-    pub fn pass() -> Self {
-        Self { dict_idx: 0, name: SmolStr::new_static("PASS") }
-    }
+    pub const PASS: FilterId = Self { dict_idx: 0, name: SmolStr::new_inline("PASS") };
 
     /// The filter name.
     pub fn name(&self) -> &str {
@@ -465,7 +463,7 @@ mod tests {
     // r[verify record_encoder.filter_id]
     #[test]
     fn filter_id_pass() {
-        let pass = FilterId::pass();
+        let pass = FilterId::PASS;
         assert_eq!(pass.dict_idx, 0);
         assert_eq!(pass.name(), "PASS");
     }
