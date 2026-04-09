@@ -14,6 +14,7 @@
 )]
 
 use proptest::prelude::*;
+use seqair::vcf::RecordEncoder;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::bcf_writer::BcfWriter;
 use seqair::vcf::encoder::{

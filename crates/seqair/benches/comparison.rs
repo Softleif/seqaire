@@ -486,6 +486,7 @@ fn pileup_e2e(c: &mut Criterion) {
 // Shared VCF writing helpers for benchmarks
 // ---------------------------------------------------------------------------
 
+use seqair::vcf::RecordEncoder;
 use seqair::vcf::alleles::Alleles;
 use seqair::vcf::bcf_writer::BcfWriter;
 use seqair::vcf::encoder::*;

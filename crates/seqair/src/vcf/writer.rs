@@ -578,7 +578,9 @@ impl RecordEncoder for VcfRecordEncoder<'_> {
         // QUAL
         match qual {
             Some(q) => {
-                write_float_g(self.buf, q).expect("writing to Vec<u8> is infallible");
+                write_float_g(self.buf, q).map_err(|source| {
+                    VcfError::FailedToWriteFormattedString { field: SmolStr::from("QUAL"), source }
+                })?;
             }
             None => self.buf.push(b'.'),
         }
