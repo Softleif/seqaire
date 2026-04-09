@@ -11,10 +11,9 @@ mod region_string;
 mod rms;
 mod strand;
 
-pub use smol_str::{self, SmolStr};
-
 pub use smallvec;
 pub use smallvec::SmallVec;
+pub use smol_str::{self, SmolStr};
 
 pub use pos::{Offset, One, Pos, Pos0, Pos1, Zero};
 
