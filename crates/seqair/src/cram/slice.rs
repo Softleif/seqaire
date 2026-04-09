@@ -253,12 +253,9 @@ fn decode_record(
 
     // r[impl cram.record.flags]
     // 1. BF (BAM flags)
-    #[expect(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "BAM flags are 16-bit; CRAM encodes them as ITF8 i32 but only lower 16 bits are valid"
-    )]
-    let raw_flags: u16 = ds.bam_flags.decode(ctx)? as u16;
+    let raw_flags = ds.bam_flags.decode(ctx)?;
+    let raw_flags: u16 = u16::try_from(raw_flags)
+        .map_err(|source| CramError::InvalidBamFlags { value: raw_flags, source })?;
     let bam_flags = BamFlags::from(raw_flags);
 
     // 2. CF (CRAM flags)

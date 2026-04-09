@@ -180,6 +180,9 @@ pub enum CramError {
     #[error("invalid length from ITF8: {value} is negative")]
     InvalidLength { value: i32 },
 
+    #[error("invalid BAM flags value: {value:#06x}")]
+    InvalidBamFlags { value: i32, source: std::num::TryFromIntError },
+
     #[error("BGZF error")]
     Bgzf {
         #[from]
@@ -189,7 +192,7 @@ pub enum CramError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("record decode error: {source}")]
+    #[error("record decode error")]
     RecordDecode {
         #[from]
         source: DecodeError,
