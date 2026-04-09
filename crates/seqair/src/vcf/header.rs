@@ -89,11 +89,13 @@ pub struct ContigDef {
 }
 
 // r[impl vcf_header.string_map]
-/// Bidirectional mapping of header string IDs to BCF dictionary indices.
+/// Ordered mapping of header string IDs to BCF dictionary indices.
+///
+/// The dictionary is small (typically 10–30 entries), so a `Vec` with linear
+/// scan is faster than hashing and uses less memory.
 #[derive(Debug, Clone)]
 pub struct StringMap {
-    /// ID → index (for encoding).
-    to_idx: IndexMap<SmolStr, usize>,
+    entries: Vec<SmolStr>,
 }
 
 impl Default for StringMap {
@@ -104,17 +106,21 @@ impl Default for StringMap {
 
 impl StringMap {
     fn new() -> Self {
-        Self { to_idx: IndexMap::new() }
+        Self { entries: Vec::new() }
     }
 
     fn insert(&mut self, id: SmolStr) -> usize {
-        let next = self.to_idx.len();
-        *self.to_idx.entry(id).or_insert(next)
+        if let Some(idx) = self.get(&id) {
+            return idx;
+        }
+        let idx = self.entries.len();
+        self.entries.push(id);
+        idx
     }
 
     /// Look up the BCF dictionary index for an ID.
     pub fn get(&self, id: &str) -> Option<usize> {
-        self.to_idx.get_index_of(id)
+        self.entries.iter().position(|s| s == id)
     }
 }
 

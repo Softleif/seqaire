@@ -353,24 +353,9 @@ impl<W: Write> BgzfWrite for BgzfWriter<W> {
 }
 
 impl<'a> BcfRecordEncoder<'a> {
-    /// Number of alleles (REF + ALTs).
-    pub fn n_allele(&self) -> usize {
-        self.n_allele as usize
-    }
-
-    /// Number of alt alleles.
-    pub fn n_alt(&self) -> usize {
-        self.n_alt as usize
-    }
-
-    /// Set number of samples for FORMAT encoding.
-    pub fn begin_samples(&mut self, n_sample: u32) {
-        self.n_sample = n_sample;
-    }
-
     // r[impl bcf_encoder.emit]
     /// Patch the header, write the record to BGZF, push to index.
-    pub fn emit(&mut self) -> Result<(), VcfError> {
+    fn emit_inner(&mut self) -> Result<(), VcfError> {
         // Patch n_info|n_allele and n_fmt|n_sample in the 24-byte fixed header
         // These are at offsets 16 and 20 in shared_buf
         let n_info_allele = (u32::from(self.n_allele) << 16) | u32::from(self.n_info);
@@ -509,7 +494,7 @@ impl RecordEncoder for BcfRecordEncoder<'_> {
     }
 
     fn emit(&mut self) -> Result<(), VcfError> {
-        self.emit()
+        self.emit_inner()
     }
 }
 
@@ -713,7 +698,7 @@ impl<'a> BcfRecordEncoder<'a> {
             }
         }
 
-        self.emit()
+        self.emit_inner()
     }
 }
 
