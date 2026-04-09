@@ -47,6 +47,9 @@ pub enum VcfHeaderError {
     // r[impl vcf_record.format_gt_first]
     #[error("GT must be the first FORMAT key, but found at index {index}")]
     GtNotFirst { index: usize },
+
+    #[error("too many contigs (exceeds u32::MAX)")]
+    TooManyContigs,
 }
 
 // r[impl vcf_record.alleles_typed]

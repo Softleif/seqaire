@@ -108,6 +108,7 @@ impl BcfValue for i32 {
 // ── Handle types ────────────────────────────────────────────────────────
 
 // r[impl bcf_encoder.handles]
+// r[impl record_encoder.bcf_backwards_compat]
 
 /// Pre-resolved contig (chromosome) handle. Carries the tid.
 #[derive(Debug, Clone, Copy)]
@@ -407,6 +408,101 @@ impl<'a> BcfRecordEncoder<'a> {
         }
 
         Ok(())
+    }
+}
+
+// ── RecordEncoder impl ──────────────────────────────────────────────────
+
+use super::record_encoder::{ContigId, FieldId, FilterId, RecordEncoder};
+
+// r[impl record_encoder.bcf_impl]
+impl RecordEncoder for BcfRecordEncoder<'_> {
+    fn begin(
+        &mut self,
+        contig: &ContigId,
+        pos: Pos<One>,
+        alleles: &Alleles,
+        qual: Option<f32>,
+    ) -> Result<(), VcfError> {
+        alleles.begin_record(self, ContigHandle(contig.tid), pos, qual)
+    }
+
+    fn filter_pass(&mut self) {
+        FilterHandle::PASS.encode(self);
+    }
+
+    fn filter_fail(&mut self, filters: &[&FilterId]) {
+        let indices: Vec<i32> = filters.iter().map(|f| f.dict_idx as i32).collect();
+        encode_typed_int_vec(self.shared_buf, &indices);
+    }
+
+    fn info_int(&mut self, id: &FieldId, value: i32) {
+        ScalarInfoHandle::<i32> { dict_idx: id.dict_idx, _marker: PhantomData }.encode(self, value);
+    }
+
+    fn info_float(&mut self, id: &FieldId, value: f32) {
+        ScalarInfoHandle::<f32> { dict_idx: id.dict_idx, _marker: PhantomData }.encode(self, value);
+    }
+
+    fn info_ints(&mut self, id: &FieldId, values: &[i32]) {
+        encode_typed_int_key(self.shared_buf, id.dict_idx);
+        encode_array_values(self.shared_buf, values);
+        self.n_info = self.n_info.saturating_add(1);
+    }
+
+    fn info_floats(&mut self, id: &FieldId, values: &[f32]) {
+        encode_typed_int_key(self.shared_buf, id.dict_idx);
+        encode_array_values(self.shared_buf, values);
+        self.n_info = self.n_info.saturating_add(1);
+    }
+
+    fn info_flag(&mut self, id: &FieldId) {
+        FlagInfoHandle { dict_idx: id.dict_idx }.encode(self);
+    }
+
+    fn info_string(&mut self, id: &FieldId, value: &str) {
+        encode_typed_int_key(self.shared_buf, id.dict_idx);
+        encode_typed_string(self.shared_buf, value.as_bytes());
+        self.n_info = self.n_info.saturating_add(1);
+    }
+
+    fn info_int_opts(&mut self, id: &FieldId, values: &[Option<i32>]) {
+        encode_typed_int_key(self.shared_buf, id.dict_idx);
+        encode_info_value(
+            self.shared_buf,
+            &InfoValue::IntegerArray(values.iter().copied().collect()),
+        );
+        self.n_info = self.n_info.saturating_add(1);
+    }
+
+    fn begin_samples(&mut self, n: u32) {
+        self.n_sample = n;
+    }
+
+    fn format_gt(&mut self, id: &FieldId, gt: &Genotype) {
+        GtFormatHandle { dict_idx: id.dict_idx }.encode(self, gt);
+    }
+
+    fn format_int(&mut self, id: &FieldId, value: i32) {
+        ScalarFormatHandle::<i32> { dict_idx: id.dict_idx, _marker: PhantomData }
+            .encode(self, value);
+    }
+
+    fn format_float(&mut self, id: &FieldId, value: f32) {
+        ScalarFormatHandle::<f32> { dict_idx: id.dict_idx, _marker: PhantomData }
+            .encode(self, value);
+    }
+
+    fn n_allele(&self) -> usize {
+        self.n_allele as usize
+    }
+
+    fn n_alt(&self) -> usize {
+        self.n_alt as usize
+    }
+
+    fn emit(&mut self) -> Result<(), VcfError> {
+        self.emit()
     }
 }
 

@@ -96,6 +96,12 @@ pub struct StringMap {
     to_idx: IndexMap<SmolStr, usize>,
 }
 
+impl Default for StringMap {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StringMap {
     fn new() -> Self {
         Self { to_idx: IndexMap::new() }
@@ -271,6 +277,9 @@ pub struct VcfHeaderBuilder {
     contigs: IndexMap<SmolStr, ContigDef>,
     samples: Vec<SmolStr>,
     other_lines: Vec<SmolStr>,
+    /// Incremental string map, populated by `register_*` methods.
+    /// `None` when only `add_*` methods are used (built fresh in `build()`).
+    string_map: Option<StringMap>,
 }
 
 impl VcfHeaderBuilder {
@@ -283,6 +292,7 @@ impl VcfHeaderBuilder {
             contigs: IndexMap::new(),
             samples: Vec::new(),
             other_lines: Vec::new(),
+            string_map: None,
         }
     }
 
@@ -368,6 +378,106 @@ impl VcfHeaderBuilder {
         self
     }
 
+    // ── Registration methods (return typed keys) ───────────────────────
+
+    // r[impl record_encoder.register]
+
+    /// Register an INFO field: adds the header entry and returns a resolved typed key.
+    pub fn register_info<V>(
+        &mut self,
+        def: &super::record_encoder::InfoFieldDef<V>,
+    ) -> Result<super::record_encoder::InfoKey<V>, VcfHeaderError> {
+        let id = SmolStr::from(def.name);
+        if self.infos.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateInfo { id });
+        }
+        if def.value_type == ValueType::Flag && def.number != Number::Count(0) {
+            return Err(VcfHeaderError::FlagNumberMismatch { id });
+        }
+        self.infos.insert(
+            id.clone(),
+            InfoDef {
+                number: def.number,
+                typ: def.value_type,
+                description: SmolStr::from(def.description),
+            },
+        );
+        let dict_idx = self.ensure_string_map_entry(&id);
+        Ok(super::record_encoder::InfoKey(
+            super::record_encoder::FieldId { dict_idx, name: id },
+            std::marker::PhantomData,
+        ))
+    }
+
+    /// Register a FORMAT field: adds the header entry and returns a resolved typed key.
+    pub fn register_format<V>(
+        &mut self,
+        def: &super::record_encoder::FormatFieldDef<V>,
+    ) -> Result<super::record_encoder::FormatKey<V>, VcfHeaderError> {
+        let id = SmolStr::from(def.name);
+        if self.formats.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFormat { id });
+        }
+        if def.value_type == ValueType::Flag {
+            return Err(VcfHeaderError::FormatFlagNotAllowed { id });
+        }
+        self.formats.insert(
+            id.clone(),
+            FormatDef {
+                number: def.number,
+                typ: def.value_type,
+                description: SmolStr::from(def.description),
+            },
+        );
+        let dict_idx = self.ensure_string_map_entry(&id);
+        Ok(super::record_encoder::FormatKey(
+            super::record_encoder::FieldId { dict_idx, name: id },
+            std::marker::PhantomData,
+        ))
+    }
+
+    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`].
+    pub fn register_filter(
+        &mut self,
+        def: &super::record_encoder::FilterFieldDef,
+    ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
+        let id = SmolStr::from(def.name);
+        if self.filters.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFilter { id });
+        }
+        self.filters.insert(id.clone(), FilterDef { description: SmolStr::from(def.description) });
+        let dict_idx = self.ensure_string_map_entry(&id);
+        Ok(super::record_encoder::FilterId { dict_idx, name: id })
+    }
+
+    // r[impl record_encoder.register_contig]
+    /// Register a contig: adds the header entry and returns a resolved [`ContigId`].
+    pub fn register_contig(
+        &mut self,
+        name: impl Into<SmolStr>,
+        def: ContigDef,
+    ) -> Result<super::record_encoder::ContigId, VcfHeaderError> {
+        let name = name.into();
+        if self.contigs.contains_key(&name) {
+            return Err(VcfHeaderError::DuplicateContig { name });
+        }
+        let tid = u32::try_from(self.contigs.len()).map_err(|_| VcfHeaderError::TooManyContigs)?;
+        self.contigs.insert(name.clone(), def);
+        Ok(super::record_encoder::ContigId { tid, name })
+    }
+
+    /// Ensure a string map entry exists, returning the dict index.
+    /// Lazily initializes the string map with PASS at index 0.
+    fn ensure_string_map_entry(&mut self, id: &SmolStr) -> u32 {
+        let map = self.string_map.get_or_insert_with(|| {
+            let mut m = StringMap::new();
+            // PASS must always be at index 0
+            m.insert(SmolStr::from("PASS"));
+            m
+        });
+        map.insert(id.clone()) as u32
+    }
+
     // r[impl vcf_header.builder]
     // r[impl vcf_header.string_map]
     #[must_use = "build() returns the header; ignoring it discards all configuration"]
@@ -390,7 +500,11 @@ impl VcfHeaderBuilder {
         // This ensures dict indices match what noodles/htslib compute from the header text.
         // Order: FILTER (PASS first), then INFO, then FORMAT.
         // r[impl vcf_header.string_map]
-        let mut string_map = StringMap::new();
+        //
+        // If register_* methods were used, the string map was built incrementally
+        // and already has correct entries. We still need to ensure all add_*-only
+        // fields are included.
+        let mut string_map = self.string_map.unwrap_or_default();
         for id in self.filters.keys() {
             string_map.insert(id.clone());
         }
