@@ -14,55 +14,56 @@
 
 use proptest::prelude::*;
 use seqair::vcf::alleles::Alleles;
-use seqair::vcf::bcf_writer::BcfWriter;
-use seqair::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair_types::{Base, One, Pos, SmolStr};
+use seqair::vcf::header::{ContigDef, Number, ValueType};
+use seqair::vcf::record::Genotype;
+use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+use seqair::vcf::{ContigId, FormatGt, FormatInt, InfoInt, OutputFormat, VcfHeader, Writer};
+use seqair_types::{Base, One, Pos};
 use std::sync::Arc;
 
-fn shared_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Total Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "DP",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Read Depth"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct TestSetup {
+    header: Arc<VcfHeader>,
+    contig: ContigId,
+    dp_info: InfoInt,
+    gt_fmt: FormatGt,
+    dp_fmt: FormatInt,
+}
+
+fn shared_setup() -> TestSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Total Depth",
+        ))
+        .unwrap();
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::<Gt>::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    TestSetup { header, contig, dp_info, gt_fmt, dp_fmt }
 }
 
 /// Write a BCF file with seqair to a temp file.
 #[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
 fn write_seqair_bcf(
-    header: &Arc<VcfHeader>,
+    setup: &TestSetup,
     pos: u32,
     ref_base: Base,
     alt_base: Base,
@@ -79,20 +80,20 @@ fn write_seqair_bcf(
     } else {
         Genotype::unphased(gt_a0, gt_a1)
     };
-    let record = VcfRecordBuilder::new("chr1", Pos::<One>::new(pos).unwrap(), alleles)
-        .qual(qual)
-        .filter_pass()
-        .info_integer("DP", depth)
-        .format_keys(&["GT", "DP"])
-        .add_sample(vec![SampleValue::Genotype(gt), SampleValue::Integer(depth)])
-        .build(header)
-        .unwrap();
 
     let mut buf = Vec::new();
     {
-        let mut writer = BcfWriter::new(&mut buf, header.clone(), false);
-        writer.write_header().unwrap();
-        writer.write_vcf_record(&record).unwrap();
+        let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig, Pos::<One>::new(pos).unwrap(), &alleles, Some(qual))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, depth);
+        let mut enc = enc.begin_samples(1);
+        setup.gt_fmt.encode(&mut enc, &gt);
+        setup.dp_fmt.encode(&mut enc, depth);
+        enc.emit().unwrap();
         writer.finish().unwrap();
     }
     std::fs::write(tmp.path(), &buf).unwrap();
@@ -130,8 +131,8 @@ fn bcftools_reads_seqair_simple_snv() {
         return;
     }
 
-    let header = shared_header();
-    let tmp = write_seqair_bcf(&header, 12345, Base::A, Base::T, 30.0, 50, 0, 1, false);
+    let setup = shared_setup();
+    let tmp = write_seqair_bcf(&setup, 12345, Base::A, Base::T, 30.0, 50, 0, 1, false);
 
     let vcf_text = bcftools_view(tmp.path()).unwrap();
     let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
@@ -152,8 +153,8 @@ fn bcftools_reads_seqair_phased_gt() {
         return;
     }
 
-    let header = shared_header();
-    let tmp = write_seqair_bcf(&header, 1000, Base::C, Base::G, 99.0, 100, 0, 1, true);
+    let setup = shared_setup();
+    let tmp = write_seqair_bcf(&setup, 1000, Base::C, Base::G, 99.0, 100, 0, 1, true);
 
     let vcf_text = bcftools_view(tmp.path()).unwrap();
     let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
@@ -169,8 +170,8 @@ fn bcftools_reads_seqair_hom_ref() {
         return;
     }
 
-    let header = shared_header();
-    let tmp = write_seqair_bcf(&header, 500, Base::G, Base::A, 10.0, 5, 0, 0, false);
+    let setup = shared_setup();
+    let tmp = write_seqair_bcf(&setup, 500, Base::G, Base::A, 10.0, 5, 0, 0, false);
 
     let vcf_text = bcftools_view(tmp.path()).unwrap();
     let fields: Vec<&str> = vcf_text.trim().split('\t').collect();
@@ -205,9 +206,9 @@ proptest! {
             return Ok(());
         }
 
-        let header = shared_header();
+        let setup = shared_setup();
         let tmp = write_seqair_bcf(
-            &header, pos, ref_base, alt_base, qual, depth, gt_a0, gt_a1, phased,
+            &setup, pos, ref_base, alt_base, qual, depth, gt_a0, gt_a1, phased,
         );
 
         // bcftools must parse without error and produce correct POS

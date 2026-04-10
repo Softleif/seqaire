@@ -98,57 +98,46 @@
 //! to copy contig names and lengths from the alignment header:
 //!
 //! ```
-//! use seqair::vcf::*;
-//! use seqair::vcf::alleles::Alleles;
-//! use seqair::vcf::writer::VcfWriter;
-//! use seqair::vcf::record::{VcfRecordBuilder, Genotype, SampleValue};
-//! use seqair_types::{Base, Pos1, SmolStr};
+//! use seqair::vcf::{
+//!     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+//!     FormatGt, FormatInt, InfoInt,
+//! };
+//! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+//! use seqair_types::{Base, Pos1};
 //! use std::sync::Arc;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // 1. Build a header — in a real app, use from_bam_header() to copy contigs:
-//! //    let builder = VcfHeaderBuilder::from_bam_header(readers.header())?;
-//! let header = Arc::new(
-//!     VcfHeader::builder()
-//!         .add_contig("chr1", ContigDef { length: Some(248_956_422) })?
-//!         .add_info("DP", InfoDef {
-//!             number: Number::Count(1),
-//!             typ: ValueType::Integer,
-//!             description: SmolStr::from("Total read depth"),
-//!         })?
-//!         .add_format("GT", FormatDef {
-//!             number: Number::Count(1),
-//!             typ: ValueType::String,
-//!             description: SmolStr::from("Genotype"),
-//!         })?
-//!         .add_format("DP", FormatDef {
-//!             number: Number::Count(1),
-//!             typ: ValueType::Integer,
-//!             description: SmolStr::from("Sample read depth"),
-//!         })?
-//!         .add_sample("sample1")?
-//!         .build()?
-//! );
+//! // 1. Build a header with typed field keys resolved at setup time.
+//! //    In a real app, use VcfHeaderBuilder::from_bam_header() to copy contigs.
+//! let mut builder = VcfHeader::builder();
+//! let chr1 = builder.register_contig("chr1", ContigDef { length: Some(248_956_422) })?;
+//! let dp_info: InfoInt = builder.register_info(
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Total read depth")
+//! )?;
+//! let gt_fmt: FormatGt = builder.register_format(
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//! )?;
+//! let dp_fmt: FormatInt = builder.register_format(
+//!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Sample read depth")
+//! )?;
+//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
 //!
 //! // 2. Create a writer (VCF text to buffer, or BCF to file)
 //! let mut output = Vec::new();
-//! let mut writer = VcfWriter::new(&mut output, header.clone());
-//! writer.write_header()?;
+//! let writer = Writer::new(&mut output, OutputFormat::Vcf);
+//! let mut writer = writer.write_header(&header)?;
 //!
-//! // 3. Build records with type-safe alleles
+//! // 3. Encode records with type-safe alleles and pre-resolved field keys
 //! let alleles = Alleles::snv(Base::A, Base::T)?;
-//! let record = VcfRecordBuilder::new("chr1", Pos1::new(12345).unwrap(), alleles)
-//!     .qual(30.0)
-//!     .filter_pass()
-//!     .info_integer("DP", 50)
-//!     .format_keys(&["GT", "DP"])
-//!     .add_sample(vec![
-//!         SampleValue::Genotype(Genotype::unphased(0, 1)),
-//!         SampleValue::Integer(45),
-//!     ])
-//!     .build(&header)?;
+//! let pos = Pos1::new(12345).unwrap();
+//! let enc = writer.begin_record(&chr1, pos, &alleles, Some(30.0))?;
+//! let mut enc = enc.filter_pass();
+//! dp_info.encode(&mut enc, 50);
+//! let mut enc = enc.begin_samples(1);
+//! gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+//! dp_fmt.encode(&mut enc, 45);
+//! enc.emit()?;
 //!
-//! writer.write_record(&record)?;
 //! writer.finish()?;
 //!
 //! let vcf_text = String::from_utf8(output)?;
@@ -188,56 +177,42 @@
 //!
 //! # High-performance BCF encoding
 //!
-//! For hot paths (millions of records), the [`encoder`](vcf::encoder) module
-//! provides zero-allocation direct BCF encoding with pre-resolved typed handles:
+//! For hot paths (millions of records), use [`Writer`](vcf::Writer) with
+//! pre-resolved typed keys from [`register_info`](vcf::VcfHeaderBuilder::register_info)
+//! and [`register_format`](vcf::VcfHeaderBuilder::register_format) for zero-allocation
+//! direct BCF encoding:
 //!
 //! ```
-//! use seqair::vcf::RecordEncoder;
-//! use seqair::vcf::bcf_writer::BcfWriter;
-//! use seqair::vcf::encoder::*;
-//! use seqair::vcf::header::*;
-//! use seqair::vcf::record::Genotype;
-//! use seqair::vcf::alleles::Alleles;
-//! use seqair_types::{Base, Pos1, SmolStr};
+//! use seqair::vcf::{
+//!     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+//!     FormatGt, InfoInt,
+//! };
+//! use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+//! use seqair_types::{Base, Pos1};
 //! use std::sync::Arc;
-//! use std::marker::PhantomData;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let header = Arc::new(VcfHeader::builder()
-//!     .add_contig("chr1", ContigDef { length: Some(1000) })?
-//!     .add_info("DP", InfoDef {
-//!         number: Number::Count(1), typ: ValueType::Integer,
-//!         description: SmolStr::from("Depth"),
-//!     })?
-//!     .add_format("GT", FormatDef {
-//!         number: Number::Count(1), typ: ValueType::String,
-//!         description: SmolStr::from("Genotype"),
-//!     })?
-//!     .add_sample("sample1")?
-//!     .build()?
-//! );
-//!
-//! // Resolve handles once at setup — no string lookups per record
-//! let contig = ContigHandle(0);
-//! let dp = ScalarInfoHandle::<i32> {
-//!     dict_idx: u32::try_from(header.string_map().get("DP").unwrap()).unwrap(),
-//!     _marker: PhantomData,
-//! };
-//! let gt = GtFormatHandle {
-//!     dict_idx: u32::try_from(header.string_map().get("GT").unwrap()).unwrap(),
-//! };
+//! // Resolve keys once at setup — no string lookups per record
+//! let mut builder = VcfHeader::builder();
+//! let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+//! let dp: InfoInt = builder.register_info(
+//!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
+//! )?;
+//! let gt: FormatGt = builder.register_format(
+//!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
+//! )?;
+//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
 //!
 //! let mut buf = Vec::new();
-//! let mut writer = BcfWriter::new(&mut buf, header, false);
-//! writer.write_header()?;
+//! let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+//! let mut writer = writer.write_header(&header)?;
 //!
 //! // Hot loop: zero allocations, pre-resolved dict indices
 //! let alleles = Alleles::snv(Base::A, Base::T)?;
-//! let mut enc = writer.record_encoder();
-//! alleles.begin_record(&mut enc, contig, Pos1::new(100).unwrap(), Some(30.0))?;
-//! FilterHandle::PASS.encode(&mut enc);
-//! dp.encode(&mut enc, 50);          // handle.encode(enc, value)
-//! enc.begin_samples(1);
+//! let enc = writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))?;
+//! let mut enc = enc.filter_pass();
+//! dp.encode(&mut enc, 50);
+//! let mut enc = enc.begin_samples(1);
 //! gt.encode(&mut enc, &Genotype::unphased(0, 1));
 //! enc.emit()?;
 //!

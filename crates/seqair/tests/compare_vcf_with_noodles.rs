@@ -14,120 +14,111 @@
 )]
 
 use proptest::prelude::*;
-use seqair::vcf::RecordEncoder;
 use seqair::vcf::alleles::Alleles;
-use seqair::vcf::bcf_writer::BcfWriter;
-use seqair::vcf::encoder::{
-    ContigHandle, FilterHandle, GtFormatHandle, ScalarFormatHandle, ScalarInfoHandle,
+use seqair::vcf::header::{ContigDef, Number, ValueType};
+use seqair::vcf::record::Genotype;
+use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
+use seqair::vcf::{
+    ContigId, FormatGt, FormatInt, InfoFlag, InfoFloat, InfoInt, InfoInts, OutputFormat, VcfHeader,
+    Writer,
 };
-use seqair::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair::vcf::writer::VcfWriter;
-use seqair_types::{Base, One, Pos, SmolStr};
+use seqair_types::{Base, One, Pos};
 use std::io::Cursor;
-use std::marker::PhantomData;
 use std::sync::Arc;
 
-fn rich_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            .add_contig("chr2", ContigDef { length: Some(243_000_000) })
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Total Depth"),
-                },
-            )
-            .unwrap()
-            .add_info(
-                "AF",
-                InfoDef {
-                    number: Number::AlternateBases,
-                    typ: ValueType::Float,
-                    description: SmolStr::from("Allele Frequency"),
-                },
-            )
-            .unwrap()
-            .add_info(
-                "AD",
-                InfoDef {
-                    number: Number::ReferenceAlternateBases,
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Allele Depth"),
-                },
-            )
-            .unwrap()
-            .add_info(
-                "DB",
-                InfoDef {
-                    number: Number::Count(0),
-                    typ: ValueType::Flag,
-                    description: SmolStr::from("dbSNP membership"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "DP",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Read Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GQ",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Genotype Quality"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct RichSetup {
+    header: Arc<VcfHeader>,
+    contig_chr1: ContigId,
+    dp_info: InfoInt,
+    gt_fmt: FormatGt,
+    dp_fmt: FormatInt,
+}
+
+fn rich_setup() -> RichSetup {
+    let mut builder = VcfHeader::builder();
+    let contig_chr1 =
+        builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Total Depth",
+        ))
+        .unwrap();
+    let _af_info: InfoFloat = builder
+        .register_info(&InfoFieldDef::new(
+            "AF",
+            Number::AlternateBases,
+            ValueType::Float,
+            "Allele Frequency",
+        ))
+        .unwrap();
+    let _ad_info: InfoInts = builder
+        .register_info(&InfoFieldDef::new(
+            "AD",
+            Number::ReferenceAlternateBases,
+            ValueType::Integer,
+            "Allele Depth",
+        ))
+        .unwrap();
+    let _db_flag: InfoFlag = builder
+        .register_info(&InfoFieldDef::new(
+            "DB",
+            Number::Count(0),
+            ValueType::Flag,
+            "dbSNP membership",
+        ))
+        .unwrap();
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::<Gt>::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let _gq_fmt: FormatInt = builder
+        .register_format(&FormatFieldDef::<Scalar<i32>>::new(
+            "GQ",
+            Number::Count(1),
+            ValueType::Integer,
+            "Genotype Quality",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    RichSetup { header, contig_chr1, dp_info, gt_fmt, dp_fmt }
 }
 
 // ── VCF text round-trip via noodles ────────────────────────────────────
 
 #[test]
 fn vcf_text_readable_by_noodles() {
-    let header = rich_header();
-    let record = VcfRecordBuilder::new(
-        "chr1",
-        Pos::<One>::new(12345).unwrap(),
-        Alleles::snv(Base::A, Base::T).unwrap(),
-    )
-    .qual(30.0)
-    .filter_pass()
-    .info_integer("DP", 50)
-    .format_keys(&["GT", "DP"])
-    .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 1)), SampleValue::Integer(30)])
-    .build(&header)
-    .unwrap();
+    let setup = rich_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
 
     let mut output = Vec::new();
     {
-        let mut writer = VcfWriter::new(&mut output, header);
-        writer.write_header().unwrap();
-        writer.write_record(&record).unwrap();
+        let writer = Writer::new(&mut output, OutputFormat::Vcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig_chr1, Pos::<One>::new(12345).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 50);
+        let mut enc = enc.begin_samples(1);
+        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+        setup.dp_fmt.encode(&mut enc, 30);
+        enc.emit().unwrap();
         writer.finish().unwrap();
     }
 
@@ -151,25 +142,22 @@ fn vcf_text_readable_by_noodles() {
 
 #[test]
 fn bcf_write_record_readable_by_noodles() {
-    let header = rich_header();
-    let record = VcfRecordBuilder::new(
-        "chr1",
-        Pos::<One>::new(100).unwrap(),
-        Alleles::snv(Base::A, Base::T).unwrap(),
-    )
-    .qual(29.5)
-    .filter_pass()
-    .info_integer("DP", 42)
-    .format_keys(&["GT", "DP"])
-    .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 1)), SampleValue::Integer(25)])
-    .build(&header)
-    .unwrap();
+    let setup = rich_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
 
     let mut bcf_output = Vec::new();
     {
-        let mut writer = BcfWriter::new(&mut bcf_output, header, false);
-        writer.write_header().unwrap();
-        writer.write_vcf_record(&record).unwrap();
+        let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig_chr1, Pos::<One>::new(100).unwrap(), &alleles, Some(29.5))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 42);
+        let mut enc = enc.begin_samples(1);
+        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+        setup.dp_fmt.encode(&mut enc, 25);
+        enc.emit().unwrap();
         writer.finish().unwrap();
     }
 
@@ -189,34 +177,22 @@ fn bcf_write_record_readable_by_noodles() {
 
 #[test]
 fn bcf_encoder_readable_by_noodles() {
-    let header = rich_header();
+    let setup = rich_setup();
+    let alleles = Alleles::snv(Base::C, Base::G).unwrap();
+
     let mut bcf_output = Vec::new();
     {
-        let mut writer = BcfWriter::new(&mut bcf_output, header.clone(), false);
-        writer.write_header().unwrap();
-
-        // Use the encoder API directly
-        let contig = ContigHandle(0); // chr1
-        let dp_info = ScalarInfoHandle::<i32> {
-            dict_idx: header.string_map().get("DP").unwrap() as u32,
-            _marker: PhantomData,
-        };
-        let gt_fmt = GtFormatHandle { dict_idx: header.string_map().get("GT").unwrap() as u32 };
-        let dp_fmt = ScalarFormatHandle::<i32> {
-            dict_idx: header.string_map().get("DP").unwrap() as u32,
-            _marker: PhantomData,
-        };
-
-        let alleles = Alleles::snv(Base::C, Base::G).unwrap();
-        let mut enc = writer.record_encoder();
-        alleles.begin_record(&mut enc, contig, Pos::<One>::new(500).unwrap(), Some(45.0)).unwrap();
-        FilterHandle::PASS.encode(&mut enc);
-        dp_info.encode(&mut enc, 100);
-        enc.begin_samples(1);
-        gt_fmt.encode(&mut enc, &Genotype::phased_diploid(0, 1));
-        dp_fmt.encode(&mut enc, 80);
+        let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
+        let mut writer = writer.write_header(&setup.header).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.contig_chr1, Pos::<One>::new(500).unwrap(), &alleles, Some(45.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, 100);
+        let mut enc = enc.begin_samples(1);
+        setup.gt_fmt.encode(&mut enc, &Genotype::phased_diploid(0, 1));
+        setup.dp_fmt.encode(&mut enc, 80);
         enc.emit().unwrap();
-
         writer.finish().unwrap();
     }
 
@@ -261,7 +237,7 @@ fn arb_genotype() -> impl Strategy<Value = Genotype> {
     ]
 }
 
-// ── Proptest: BCF via write_record round-trips through noodles ─────────
+// ── Proptest: BCF via writer round-trips through noodles ───────────────
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(50))]
@@ -273,20 +249,19 @@ proptest! {
         qual in proptest::option::of(0.1f32..1000.0),
         dp in 0i32..10000,
     ) {
-        let header = rich_header();
+        let setup = rich_setup();
         let pos = Pos::<One>::new(pos).unwrap();
-        let record = VcfRecordBuilder::new("chr1", pos, alleles)
-            .qual(qual.unwrap_or(0.0))
-            .filter_pass()
-            .info_integer("DP", dp)
-            .build(&header)
-            .unwrap();
 
         let mut bcf_output = Vec::new();
         {
-            let mut writer = BcfWriter::new(&mut bcf_output, header, false);
-            writer.write_header().unwrap();
-            writer.write_vcf_record(&record).unwrap();
+            let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
+            let mut writer = writer.write_header(&setup.header).unwrap();
+            let mut enc = writer
+                .begin_record(&setup.contig_chr1, pos, &alleles, qual)
+                .unwrap()
+                .filter_pass();
+            setup.dp_info.encode(&mut enc, dp);
+            enc.emit().unwrap();
             writer.finish().unwrap();
         }
 
@@ -307,27 +282,31 @@ proptest! {
         dp in 0i32..10000,
     ) {
         // Sites-only header (no samples) to avoid FORMAT column requirement
-        let header = Arc::new(
-            VcfHeader::builder()
-                .add_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap()
-                .add_info("DP", InfoDef {
-                    number: Number::Count(1), typ: ValueType::Integer,
-                    description: SmolStr::from("Depth"),
-                }).unwrap()
-                .build().unwrap(),
-        );
-        let pos = Pos::<One>::new(pos).unwrap();
-        let record = VcfRecordBuilder::new("chr1", pos, alleles)
-            .filter_pass()
-            .info_integer("DP", dp)
-            .build(&header)
+        let mut builder = VcfHeader::builder();
+        let contig =
+            builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+        let dp_info: InfoInt = builder
+            .register_info(&InfoFieldDef::new(
+                "DP",
+                Number::Count(1),
+                ValueType::Integer,
+                "Depth",
+            ))
             .unwrap();
+        let header = Arc::new(builder.build().unwrap());
+
+        let pos = Pos::<One>::new(pos).unwrap();
 
         let mut output = Vec::new();
         {
-            let mut writer = VcfWriter::new(&mut output, header);
-            writer.write_header().unwrap();
-            writer.write_record(&record).unwrap();
+            let writer = Writer::new(&mut output, OutputFormat::Vcf);
+            let mut writer = writer.write_header(&header).unwrap();
+            let mut enc = writer
+                .begin_record(&contig, pos, &alleles, None)
+                .unwrap()
+                .filter_pass();
+            dp_info.encode(&mut enc, dp);
+            enc.emit().unwrap();
             writer.finish().unwrap();
         }
 

@@ -1,7 +1,7 @@
 //! Compare seqair's TBI index output with what bcftools index generates.
 //!
-//! Writes a VCF.gz with seqair (co-producing a TBI index), then runs
-//! `bcftools index` on the same file and compares the two TBI files byte-by-byte.
+//! Writes a VCF.gz with seqair unified Writer (co-producing a TBI index), then
+//! runs `bcftools index` on the same file and compares the two TBI files.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,91 +16,88 @@
     reason = "test code with known small values"
 )]
 
-use seqair::vcf::alleles::Alleles;
-use seqair::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair::vcf::writer::VcfWriter;
-use seqair_types::{Base, Pos1, SmolStr};
+use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, Gt, InfoFieldDef, InfoInt, Scalar};
+use seqair::vcf::{
+    Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
+};
+use seqair_types::{Base, One, Pos};
 use std::sync::Arc;
 
 fn has_bcftools() -> bool {
     std::process::Command::new("bcftools").arg("--version").output().is_ok()
 }
 
-fn test_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            .add_contig("chr2", ContigDef { length: Some(243_000_000) })
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct IndexSetup {
+    header: Arc<VcfHeader>,
+    chr1: seqair::vcf::ContigId,
+    chr2: seqair::vcf::ContigId,
+    dp_info: InfoInt,
+    gt_fmt: FormatGt,
+}
+
+fn make_index_setup() -> IndexSetup {
+    let mut builder = VcfHeader::builder();
+    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let chr2 = builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let dp_info: InfoInt = builder
+        .register_info(&InfoFieldDef::<Scalar<i32>>::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Depth",
+        ))
+        .unwrap();
+    let gt_fmt: FormatGt = builder
+        .register_format(&FormatFieldDef::<Gt>::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    IndexSetup { header, chr1, chr2, dp_info, gt_fmt }
 }
 
 /// Write a .vcf.gz file with multiple sorted records and return the co-produced TBI index.
 fn write_vcf_gz_with_index(
     dir: &std::path::Path,
 ) -> (std::path::PathBuf, seqair::vcf::index_builder::IndexBuilder) {
-    let header = test_header();
+    let setup = make_index_setup();
     let vcf_path = dir.join("test.vcf.gz");
     let file = std::fs::File::create(&vcf_path).unwrap();
 
-    let mut writer = VcfWriter::bgzf(file, header.clone());
-    writer.write_header().unwrap();
+    let writer = Writer::new(file, OutputFormat::VcfGz);
+    let mut writer = writer.write_header(&setup.header).unwrap();
 
-    // Write sorted records across chr1
-    let positions = [100, 500, 1000, 5000, 20000, 50000, 100000];
+    let positions = [100u32, 500, 1000, 5000, 20000, 50000, 100000];
     let bases = [(Base::A, Base::T), (Base::C, Base::G), (Base::G, Base::A)];
 
     for (i, &pos) in positions.iter().enumerate() {
         let (ref_base, alt_base) = bases[i % bases.len()];
         let alleles = Alleles::snv(ref_base, alt_base).unwrap();
-        let record = VcfRecordBuilder::new("chr1", Pos1::new(pos).unwrap(), alleles)
-            .qual(30.0)
-            .filter_pass()
-            .info_integer("DP", (i as i32 + 1) * 10)
-            .format_keys(&["GT"])
-            .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 1))])
-            .build(&header)
-            .unwrap();
-        writer.write_record(&record).unwrap();
+        let mut enc = writer
+            .begin_record(&setup.chr1, Pos::<One>::new(pos).unwrap(), &alleles, Some(30.0))
+            .unwrap()
+            .filter_pass();
+        setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10);
+        let mut enc = enc.begin_samples(1);
+        setup.gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+        enc.emit().unwrap();
     }
 
     // Add a record on chr2
     let alleles = Alleles::snv(Base::T, Base::C).unwrap();
-    let record = VcfRecordBuilder::new("chr2", Pos1::new(10000).unwrap(), alleles)
-        .qual(50.0)
-        .filter_pass()
-        .info_integer("DP", 80)
-        .format_keys(&["GT"])
-        .add_sample(vec![SampleValue::Genotype(Genotype::unphased(1, 1))])
-        .build(&header)
-        .unwrap();
-    writer.write_record(&record).unwrap();
+    let mut enc = writer
+        .begin_record(&setup.chr2, Pos::<One>::new(10000).unwrap(), &alleles, Some(50.0))
+        .unwrap()
+        .filter_pass();
+    setup.dp_info.encode(&mut enc, 80);
+    let mut enc = enc.begin_samples(1);
+    setup.gt_fmt.encode(&mut enc, &Genotype::unphased(1, 1));
+    enc.emit().unwrap();
 
-    let index = writer.finish().unwrap().expect("BGZF writer should produce TBI index");
+    let index = writer.finish().unwrap().expect("VcfGz writer should produce TBI index");
     (vcf_path, index)
 }
 
@@ -110,6 +107,7 @@ fn write_seqair_tbi(
     tbi_path: &std::path::Path,
     header: &VcfHeader,
 ) {
+    use seqair_types::SmolStr;
     let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
     let file = std::fs::File::create(tbi_path).unwrap();
     index.write_tbi(file, &names).unwrap();
@@ -119,7 +117,7 @@ fn write_seqair_tbi(
 fn bcftools_index(vcf_gz_path: &std::path::Path) -> std::path::PathBuf {
     let tbi_path = vcf_gz_path.with_extension("gz.tbi");
     let output = std::process::Command::new("bcftools")
-        .args(["index", "-t"]) // -t = TBI format
+        .args(["index", "-t"])
         .arg(vcf_gz_path)
         .arg("-o")
         .arg(&tbi_path)
@@ -149,33 +147,27 @@ fn decompress_tbi(tbi_path: &std::path::Path) -> Vec<u8> {
 fn seqair_tbi_has_correct_magic_and_structure() {
     let dir = tempfile::tempdir().unwrap();
     let (_vcf_path, index) = write_vcf_gz_with_index(dir.path());
-    let header = test_header();
+    let setup = make_index_setup();
 
     let seqair_tbi_path = dir.path().join("seqair.tbi");
-    write_seqair_tbi(&index, &seqair_tbi_path, &header);
+    write_seqair_tbi(&index, &seqair_tbi_path, &setup.header);
 
     let data = decompress_tbi(&seqair_tbi_path);
 
-    // TBI magic: TBI\1
     assert_eq!(&data[..4], b"TBI\x01", "TBI magic mismatch");
 
-    // n_ref
     let n_ref = i32::from_le_bytes([data[4], data[5], data[6], data[7]]);
     assert_eq!(n_ref, 2, "should have 2 references (chr1, chr2)");
 
-    // format = 2 (VCF)
     let format = i32::from_le_bytes([data[8], data[9], data[10], data[11]]);
     assert_eq!(format, 2, "format should be 2 (VCF)");
 
-    // col_seq = 1
     let col_seq = i32::from_le_bytes([data[12], data[13], data[14], data[15]]);
     assert_eq!(col_seq, 1, "col_seq should be 1");
 
-    // col_beg = 2
     let col_beg = i32::from_le_bytes([data[16], data[17], data[18], data[19]]);
     assert_eq!(col_beg, 2, "col_beg should be 2");
 
-    // meta = '#' = 35
     let meta = i32::from_le_bytes([data[24], data[25], data[26], data[27]]);
     assert_eq!(meta, 35, "meta should be '#' (35)");
 }
@@ -189,13 +181,11 @@ fn bcftools_can_query_seqair_vcf_gz_with_seqair_tbi() {
 
     let dir = tempfile::tempdir().unwrap();
     let (vcf_path, index) = write_vcf_gz_with_index(dir.path());
-    let header = test_header();
+    let setup = make_index_setup();
 
-    // Write seqair's TBI
     let tbi_path = vcf_path.with_extension("gz.tbi");
-    write_seqair_tbi(&index, &tbi_path, &header);
+    write_seqair_tbi(&index, &tbi_path, &setup.header);
 
-    // bcftools should be able to query with seqair's index
     let output = std::process::Command::new("bcftools")
         .args(["view", "-H", "-r", "chr1:1-1000"])
         .arg(&vcf_path)
@@ -211,7 +201,6 @@ fn bcftools_can_query_seqair_vcf_gz_with_seqair_tbi() {
     let text = String::from_utf8(output.stdout).unwrap();
     let lines: Vec<&str> = text.lines().collect();
 
-    // Should find records at pos 100 and 500 (within chr1:1-1000)
     assert!(
         lines.len() >= 2,
         "expected at least 2 records in chr1:1-1000, got {}:\n{}",
@@ -219,7 +208,6 @@ fn bcftools_can_query_seqair_vcf_gz_with_seqair_tbi() {
         text,
     );
 
-    // Verify positions are in range
     for line in &lines {
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields[0], "chr1");
@@ -237,12 +225,11 @@ fn bcftools_can_query_chr2_with_seqair_tbi() {
 
     let dir = tempfile::tempdir().unwrap();
     let (vcf_path, index) = write_vcf_gz_with_index(dir.path());
-    let header = test_header();
+    let setup = make_index_setup();
 
     let tbi_path = vcf_path.with_extension("gz.tbi");
-    write_seqair_tbi(&index, &tbi_path, &header);
+    write_seqair_tbi(&index, &tbi_path, &setup.header);
 
-    // Query chr2
     let output = std::process::Command::new("bcftools")
         .args(["view", "-H", "-r", "chr2"])
         .arg(&vcf_path)
@@ -268,23 +255,18 @@ fn seqair_tbi_matches_bcftools_tbi_structure() {
 
     let dir = tempfile::tempdir().unwrap();
     let (vcf_path, index) = write_vcf_gz_with_index(dir.path());
-    let header = test_header();
+    let setup = make_index_setup();
 
-    // Write seqair's TBI
     let seqair_tbi_path = dir.path().join("seqair.tbi");
-    write_seqair_tbi(&index, &seqair_tbi_path, &header);
+    write_seqair_tbi(&index, &seqair_tbi_path, &setup.header);
 
-    // Generate bcftools TBI
     let bcftools_tbi_path = bcftools_index(&vcf_path);
 
-    // Decompress both and compare structure
     let seqair_data = decompress_tbi(&seqair_tbi_path);
     let bcftools_data = decompress_tbi(&bcftools_tbi_path);
 
-    // Both should have same magic
     assert_eq!(&seqair_data[..4], &bcftools_data[..4], "magic mismatch");
 
-    // Same n_ref
     let seqair_nref =
         i32::from_le_bytes([seqair_data[4], seqair_data[5], seqair_data[6], seqair_data[7]]);
     let bcftools_nref = i32::from_le_bytes([
@@ -295,10 +277,8 @@ fn seqair_tbi_matches_bcftools_tbi_structure() {
     ]);
     assert_eq!(seqair_nref, bcftools_nref, "n_ref mismatch");
 
-    // Same format, col_seq, col_beg, col_end
     assert_eq!(&seqair_data[8..28], &bcftools_data[8..28], "TBI header fields mismatch");
 
-    // Same sequence names section (length + names)
     let seqair_l_nm =
         i32::from_le_bytes([seqair_data[28], seqair_data[29], seqair_data[30], seqair_data[31]]);
     let bcftools_l_nm = i32::from_le_bytes([
@@ -341,27 +321,42 @@ fn write_proptest_vcf(
     ref_base: Base,
     alt_base: Base,
 ) -> (std::path::PathBuf, std::path::PathBuf) {
-    let header = test_header();
+    let mut builder = VcfHeader::builder();
+    let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
+    let dp_info: InfoInt = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let gt_fmt: FormatGt = builder
+        .register_format(&FormatFieldDef::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("s1").unwrap().build().unwrap());
+
     let vcf_path = dir.join("test.vcf.gz");
     let file = std::fs::File::create(&vcf_path).unwrap();
 
-    let mut writer = VcfWriter::bgzf(file, header.clone());
-    writer.write_header().unwrap();
+    let writer = Writer::new(file, OutputFormat::VcfGz);
+    let mut writer = writer.write_header(&header).unwrap();
 
     for &pos in positions {
         let alleles = Alleles::snv(ref_base, alt_base).unwrap();
-        let record = VcfRecordBuilder::new("chr1", Pos1::new(pos).unwrap(), alleles)
-            .filter_pass()
-            .info_integer("DP", 30)
-            .format_keys(&["GT"])
-            .add_sample(vec![SampleValue::Genotype(Genotype::unphased(0, 1))])
-            .build(&header)
-            .unwrap();
-        writer.write_record(&record).unwrap();
+        let mut enc = writer
+            .begin_record(&chr1, Pos::<One>::new(pos).unwrap(), &alleles, None)
+            .unwrap()
+            .filter_pass();
+        dp_info.encode(&mut enc, 30);
+        let mut enc = enc.begin_samples(1);
+        gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+        enc.emit().unwrap();
     }
 
     let index = writer.finish().unwrap().expect("should produce index");
     let tbi_path = vcf_path.with_extension("gz.tbi");
+    use seqair_types::SmolStr;
     let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
     let file = std::fs::File::create(&tbi_path).unwrap();
     index.write_tbi(file, &names).unwrap();
@@ -379,7 +374,6 @@ proptest! {
         positions in arb_sorted_positions(50, 1_000_000),
         ref_base in arb_base(),
         alt_base in arb_base(),
-        // Query a random sub-range
         query_start in 1u32..500_000,
         query_span in 1u32..500_000,
     ) {
@@ -393,7 +387,6 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let (vcf_path, _tbi_path) = write_proptest_vcf(dir.path(), &positions, ref_base, alt_base);
 
-        // Query with bcftools using seqair's TBI
         let output = std::process::Command::new("bcftools")
             .args(["view", "-H", "-r", &format!("chr1:{query_start}-{query_end}")])
             .arg(&vcf_path)
@@ -409,7 +402,6 @@ proptest! {
             .map(|l| l.split('\t').nth(1).unwrap().parse::<u32>().unwrap())
             .collect();
 
-        // Expected: positions that fall within [query_start, query_end]
         let expected: Vec<u32> = positions.iter()
             .copied()
             .filter(|&p| p >= query_start && p <= query_end)
@@ -433,7 +425,6 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let (vcf_path, seqair_tbi_path) = write_proptest_vcf(dir.path(), &positions, ref_base, alt_base);
 
-        // Generate bcftools TBI
         let bcftools_tbi_path = dir.path().join("bcftools.tbi");
         let output = std::process::Command::new("bcftools")
             .args(["index", "-t"])
@@ -447,14 +438,11 @@ proptest! {
         let seqair_data = decompress_tbi(&seqair_tbi_path);
         let bcftools_data = decompress_tbi(&bcftools_tbi_path);
 
-        // Both must be valid TBI files. Now that seqair also omits empty refs,
-        // the entire header (magic + n_ref + format fields) should match.
         prop_assert!(seqair_data.len() >= 32, "seqair TBI too short");
         prop_assert!(bcftools_data.len() >= 32, "bcftools TBI too short");
         prop_assert_eq!(&seqair_data[..32], &bcftools_data[..32],
             "TBI header mismatch (magic + n_ref + format + columns + meta + skip)");
 
-        // Sequence names must match exactly
         let seqair_l_nm = i32::from_le_bytes(
             [seqair_data[28], seqair_data[29], seqair_data[30], seqair_data[31]]
         ) as usize;

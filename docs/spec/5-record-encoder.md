@@ -1,10 +1,23 @@
 # Record Encoder
 
-> **Sources:** The `RecordEncoder` trait unifies the [BCF Direct Encoder](./5-bcf-encoder.md) and the [VCF Text Writer](./5-vcf-writer.md) behind a single format-agnostic API. Field definitions provide a single source of truth for header construction, key resolution, and documentation generation. See also [VCF Header](./5-vcf-header.md) for string dictionary assignment.
+> **Sources:** The record encoder provides a unified, format-agnostic API for writing VCF/BCF records with compile-time state enforcement. A single `Writer` type handles all output formats (VCF, VCF.gz, BCF). Field definitions provide a single source of truth for header construction, key resolution, and documentation generation. See also [VCF Header](./5-vcf-header.md) for string dictionary assignment.
 
-## Motivation
+## Unified Writer
 
-The `VcfRecord` intermediate allocates per-record (string keys, SmallVec values, enum boxing). For high-throughput callers (millions of records), a direct encoder avoids this entirely. The existing `BcfRecordEncoder` does this for BCF but not for VCF text. The `RecordEncoder` trait provides format-agnostic encoding so the same calling code works for VCF, VCF.gz, and BCF output without allocating per-record.
+r[record_encoder.writer]
+A single `Writer<W, S>` type MUST support all output formats (VCF text, BGZF-compressed VCF, BCF binary). The output format MUST be selected at construction time via `OutputFormat`. There MUST NOT be separate `BcfWriter` / `VcfWriter` types in the public API.
+
+r[record_encoder.writer_new]
+`Writer::new(inner: W, format: OutputFormat)` MUST create a writer in the `Unstarted` state. No header is required at construction time. Index co-production MUST be automatic for compressed formats (`VcfGz` → TBI, `Bcf` → CSI).
+
+r[record_encoder.writer_typestate]
+The writer MUST use a typestate pattern: `Writer<W, Unstarted>` only exposes `write_header()`, which consumes the writer and returns `Writer<W, Ready>`. `Writer<W, Ready>` exposes `begin_record()` and `finish()`.
+
+r[record_encoder.write_header]
+`write_header(self, header: &VcfHeader)` MUST consume the `Unstarted` writer, write the header to the output, set up the index builder, and return a `Ready` writer. The header MUST NOT be stored — all field keys are pre-resolved at registration time.
+
+r[record_encoder.finish]
+`finish(self)` on `Writer<W, Ready>` MUST flush all buffered data, write the BGZF EOF marker (for compressed formats), finalize the index builder, and return `Result<Option<IndexBuilder>>`.
 
 ## Field Definitions
 
@@ -63,86 +76,93 @@ Typed keys MUST encode the VCF value type at the Rust type level via uninhabited
 > - `FormatKey<Scalar<f32>>` — single float FORMAT value
 
 r[record_encoder.key_encode]
-Each typed key MUST provide an `encode` method that accepts `&mut impl RecordEncoder` and the appropriate value type, delegating to the corresponding `RecordEncoder` trait method. The method signature MUST vary by key kind:
+Each typed key MUST provide an `encode` method that delegates to the corresponding encoder trait method. INFO keys MUST accept `&mut impl InfoEncoder`, FORMAT keys MUST accept `&mut impl FormatEncoder`.
 
-- `InfoKey<Scalar<i32>>::encode(&self, enc, value: i32)`
-- `InfoKey<Scalar<f32>>::encode(&self, enc, value: f32)`
-- `InfoKey<Arr<T>>::encode(&self, enc, values: &[T])`
-- `InfoKey<Flag>::encode(&self, enc)` — no value argument
-- `InfoKey<Str>::encode(&self, enc, value: &str)`
-- `InfoKey<OptArr<i32>>::encode(&self, enc, values: &[Option<i32>])`
-- `FormatKey<Gt>::encode(&self, enc, gt: &Genotype)`
-- `FormatKey<Scalar<T>>::encode(&self, enc, value: T)`
+## Typestate Record Encoder
 
-## RecordEncoder Trait
+r[record_encoder.typestate]
+The record encoder MUST use a typestate pattern to enforce the correct calling sequence at compile time. A single `RecordEncoder<'a, S>` type MUST handle both BCF and VCF encoding via internal enum dispatch. The encoder MUST be parameterized by a state type that restricts which methods are available.
 
-r[record_encoder.trait]
-The `RecordEncoder` trait MUST be object-safe (all methods use `&mut self` and concrete parameter types, no generics) to enable both monomorphized and dynamic dispatch.
+> r[record_encoder.typestate_states]
+> Three record states MUST be provided:
+>
+> - `Begun` — record has been started (fixed fields written). Only filter methods are available.
+> - `Filtered` — filters have been written. INFO methods and state transition methods are available.
+> - `WithSamples` — sample count has been declared. FORMAT methods and `emit()` are available.
 
-r[record_encoder.begin]
-`begin()` MUST accept a `ContigId`, 1-based position, `Alleles`, and optional quality. It MUST clear all per-record state and write/buffer the fixed fields (CHROM, POS, ID, REF, ALT, QUAL). Overflow checks on position and allele counts MUST use checked conversions and return typed errors.
+r[record_encoder.typestate_transitions]
+State transitions MUST consume the encoder by value and return the encoder in the new state, preventing use of the old state:
+
+- `writer.begin_record(contig, pos, alleles, qual)` → `RecordEncoder<Begun>`
+- `filter_pass(self)` / `filter_fail(self)` / `no_filter(self)` on `Begun` → `Filtered`
+- `begin_samples(self, n)` on `Filtered` → `WithSamples`
+- `emit(self)` on `Filtered` (no samples) or `WithSamples` → consumed (borrow released)
+
+r[record_encoder.typestate_must_use]
+The encoder types MUST be marked `#[must_use]` to warn at compile time if a record is silently discarded without calling `emit()`.
+
+r[record_encoder.typestate_w_erased]
+The `RecordEncoder` type MUST NOT expose the writer's `W: Write` type parameter. The VCF text path MUST use `&mut dyn Write` internally so that the encoder type is `RecordEncoder<'a, S>` with no extra generic parameters.
+
+r[record_encoder.begin_record]
+`begin_record()` MUST be a method on `Writer<W, Ready>`. It MUST accept a `ContigId`, 1-based position, `Alleles`, and optional quality. It MUST clear all per-record state and write/buffer the fixed fields. Overflow checks on position and allele counts MUST use checked conversions and return typed errors.
 
 r[record_encoder.filters]
-Exactly one filter method MUST be called per record: `filter_pass()` for PASS, or `filter_fail(&[&FilterId])` for one or more failed filters.
+Exactly one filter method MUST be called per record: `filter_pass()` for PASS, `filter_fail(&[&FilterId])` for one or more failed filters, or `no_filter()` for not-applied. All three MUST consume the `Begun` state and return `Filtered`.
+
+## InfoEncoder Trait
+
+r[record_encoder.info_encoder]
+An `InfoEncoder` trait MUST be provided for encoding INFO fields. It MUST be object-safe (all methods use `&mut self` and concrete parameter types). It MUST be implemented by `RecordEncoder<'_, Filtered>`.
 
 r[record_encoder.info_methods]
 INFO methods (`info_int`, `info_float`, `info_ints`, `info_floats`, `info_flag`, `info_string`, `info_int_opts`) MUST accept a `&FieldId` and the appropriate value. These methods MUST be infallible — they write to in-memory buffers which cannot fail.
 
+r[record_encoder.info_state_queries]
+`InfoEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
+
+## FormatEncoder Trait
+
+r[record_encoder.format_encoder]
+A `FormatEncoder` trait MUST be provided for encoding FORMAT fields. It MUST be object-safe. It MUST be implemented by `RecordEncoder<'_, WithSamples>`.
+
 r[record_encoder.format_methods]
-`begin_samples(n)` MUST be called before any FORMAT method. FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&FieldId` and the appropriate value. These methods MUST be infallible.
+FORMAT methods (`format_gt`, `format_int`, `format_float`) MUST accept a `&FieldId` and the appropriate value. These methods MUST be infallible.
+
+r[record_encoder.format_state_queries]
+`FormatEncoder` MUST provide `n_allele()` and `n_alt()` methods returning the number of alleles and alternate alleles for the current record.
+
+## Emit
 
 r[record_encoder.emit]
-`emit()` MUST finalize the record and write it to the output. For BCF, this patches the fixed header and flushes to BGZF. For VCF text, this writes accumulated FORMAT fields and flushes the line buffer. `emit()` is the only encoding method that performs I/O and MAY return an error.
+`emit()` MUST finalize the record and write it to the output. For BCF, this patches the fixed header and flushes to BGZF. For VCF text, this writes accumulated FORMAT fields and flushes the line buffer. `emit()` MUST consume the encoder by value, releasing the writer borrow. `emit()` is the only encoding method that performs I/O and MAY return an error.
 
-r[record_encoder.state_queries]
-`n_allele()` and `n_alt()` MUST return the number of alleles and alternate alleles for the current record, set during `begin()`.
+r[record_encoder.emit_no_samples]
+`emit()` MUST be available on both `Filtered` (for records without samples) and `WithSamples` (for records with samples).
 
 ## Custom Type Encoding
 
 r[record_encoder.encode_info_trait]
-An `EncodeInfo` trait MUST be provided with an associated `Key` type and an `encode_info(&self, enc: &mut dyn RecordEncoder, key: &Self::Key)` method. This allows domain types to encapsulate their VCF encoding logic, including multi-field expansion (e.g., a strand-specific type producing separate OT and OB fields).
+An `EncodeInfo` trait MUST be provided with an associated `Key` type and an `encode_info(&self, enc: &mut dyn InfoEncoder, key: &Self::Key)` method. This allows domain types to encapsulate their VCF encoding logic, including multi-field expansion (e.g., a strand-specific type producing separate OT and OB fields).
 
 r[record_encoder.encode_format_trait]
-An `EncodeFormat` trait MUST be provided with the same pattern as `EncodeInfo`. Implementations that produce no output for certain values (e.g., unknown methylation status) simply do not call any encoder methods, and the FORMAT key does not appear.
+An `EncodeFormat` trait MUST be provided with the same pattern as `EncodeInfo`, using `&mut dyn FormatEncoder`. Implementations that produce no output for certain values (e.g., unknown methylation status) simply do not call any encoder methods, and the FORMAT key does not appear.
 
 r[record_encoder.encode_dyn]
-`EncodeInfo` and `EncodeFormat` MUST use `&mut dyn RecordEncoder` (not `&mut impl RecordEncoder`) so that implementations do not need to be generic over the encoder type.
+`EncodeInfo` and `EncodeFormat` MUST use `&mut dyn InfoEncoder` and `&mut dyn FormatEncoder` respectively (not `&mut impl`) so that implementations do not need to be generic over the encoder type.
 
-## VCF Text Record Encoder
+## Format-Specific Encoding
 
-r[record_encoder.vcf_text_encoder]
-`VcfRecordEncoder` MUST implement `RecordEncoder` for VCF text output. It MUST borrow reusable buffers from the `VcfWriter` to avoid per-record allocation.
+r[record_encoder.bcf_encoding]
+The BCF arm of the encoder MUST write INFO fields to `shared_buf` and FORMAT fields to `indiv_buf` following all rules from the [BCF Writer](./5-bcf-writer.md) spec: typed value encoding, smallest int type selection, missing sentinels, field-major FORMAT layout, GT binary encoding.
 
-r[record_encoder.vcf_text_begin]
-`begin()` MUST clear the line buffer and FORMAT accumulators, then write the fixed columns (CHROM through QUAL) as tab-separated text per `r[vcf_writer.tab_delimited]`.
+r[record_encoder.vcf_encoding]
+The VCF arm of the encoder MUST write tab-delimited text following all rules from the [VCF Text Format](./5-vcf-writer.md) spec: semicolon-separated INFO, colon-separated FORMAT keys and values, percent-encoding, float precision.
 
-r[record_encoder.vcf_text_info]
-INFO methods MUST append to the line buffer using semicolon separators per `r[vcf_writer.info_serialization]`. The first INFO field has no leading semicolon. If no INFO fields are written, `emit()` MUST write `.`.
-
-r[record_encoder.vcf_text_format_accumulation]
-FORMAT methods MUST accumulate key names and formatted values into separate reusable buffers. Keys accumulate in order of first `format_*` call. Values are formatted into a per-sample buffer with `:` separators.
-
-r[record_encoder.vcf_text_emit]
-`emit()` MUST write the FILTER and INFO columns already in the line buffer, then the FORMAT key column and sample value column(s) from the accumulators, then a newline. The complete line MUST be flushed to the output (plain write or BGZF with index co-production).
-
-r[record_encoder.vcf_text_output]
-A `VcfOutput` trait MUST abstract over plain and BGZF output modes, providing `write_line()` and `push_index()` methods. This mirrors the `BgzfWrite` trait used by the BCF encoder.
-
-r[record_encoder.vcf_text_buffer_reuse]
-All buffers (line buffer, FORMAT key accumulator, FORMAT value buffer) MUST be reused across records per `r[vcf_writer.buffer_reuse]`. After warmup, encoding MUST NOT allocate.
-
-## BCF Record Encoder
-
-r[record_encoder.bcf_impl]
-`BcfRecordEncoder` MUST implement `RecordEncoder` by delegating to its existing buffer operations. INFO methods write to `shared_buf`, FORMAT methods write to `indiv_buf`, following all rules from the [BCF Direct Encoder](./5-bcf-encoder.md) spec.
-
-r[record_encoder.bcf_backwards_compat]
-The existing handle-based API (`ScalarInfoHandle<T>::encode`, etc.) MUST remain available alongside the `RecordEncoder` trait implementation for backward compatibility.
+r[record_encoder.buffer_reuse]
+All internal buffers MUST be reused across records. After warmup, encoding MUST NOT allocate.
 
 ## Equivalence
 
 r[record_encoder.vcf_bcf_equivalence]
-For the same logical record, encoding via `BcfRecordEncoder` and `VcfRecordEncoder` MUST produce output that, when read back, yields identical field values (within floating-point formatting precision).
-
-r[record_encoder.record_path_equivalence]
-Encoding via `RecordEncoder` trait methods MUST produce output identical to encoding via the `VcfRecord` path (`VcfRecordBuilder` → `VcfWriter::write_record` / `BcfWriter::write_vcf_record`) for the same logical record.
+For the same logical record, encoding as BCF and as VCF text MUST produce output that, when read back, yields identical field values (within floating-point formatting precision).
