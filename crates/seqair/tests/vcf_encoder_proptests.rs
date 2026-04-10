@@ -1,4 +1,10 @@
-//! Encoder equivalence proptests: verify that `BcfRecordEncoder` produces
+//! Proptest round-trips for the unified Writer in BCF mode.
+//!
+//! Generates random records, writes them with seqair's unified `Writer`, and
+//! verifies that noodles can parse the resulting BCF to identical site-level
+//! fields.  This replaced the old two-path equivalence test (BcfWriter vs
+//! BcfRecordEncoder) — both old paths have been removed; the unified Writer is
+//! the only path now.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -12,223 +18,78 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-//! identical BCF output to `BcfWriter::write_record(&VcfRecord)`.
-//!
-//! This is the strongest internal consistency check: both encoding paths
-//! must produce byte-identical BCF records.
 
 use proptest::prelude::*;
-use seqair::vcf::RecordEncoder;
-use seqair::vcf::alleles::Alleles;
-use seqair::vcf::bcf_writer::BcfWriter;
-use seqair::vcf::encoder::{
-    ContigHandle, FilterHandle, GtFormatHandle, PerAlleleInfoHandle, ScalarFormatHandle,
-    ScalarInfoHandle,
+use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoInt};
+use seqair::vcf::{
+    Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
 };
-use seqair::vcf::header::{ContigDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair_types::{Base, One, Pos, SmolStr};
-use std::marker::PhantomData;
+use seqair_types::{Base, One, Pos};
 use std::sync::Arc;
 
-fn test_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Total Depth"),
-                },
-            )
-            .unwrap()
-            .add_info(
-                "AD",
-                InfoDef {
-                    number: Number::ReferenceAlternateBases,
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Allele Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "DP",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Read Depth"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct TestSetup {
+    header: Arc<VcfHeader>,
+    contig: seqair::vcf::ContigId,
+    dp_info: InfoInt,
+    gt_fmt: FormatGt,
+    dp_fmt: FormatInt,
 }
 
-/// Write a record using `BcfWriter::write_record()` (the `VcfRecord` path).
-/// Returns the raw BGZF-compressed output.
-#[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
-fn write_via_record(
-    header: &Arc<VcfHeader>,
-    pos: u32,
-    alleles: &Alleles,
-    qual: f32,
-    depth: i32,
-    ref_ad: i32,
-    alt_ad: i32,
-    gt: &Genotype,
-) -> Vec<u8> {
-    let record = VcfRecordBuilder::new("chr1", Pos::<One>::new(pos).unwrap(), alleles.clone())
-        .qual(qual)
-        .filter_pass()
-        .info_integer("DP", depth)
-        .info_integer_array("AD", vec![Some(ref_ad), Some(alt_ad)])
-        .format_keys(&["GT", "DP"])
-        .add_sample(vec![SampleValue::Genotype(gt.clone()), SampleValue::Integer(depth)])
-        .build(header)
+fn make_setup() -> TestSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Total Depth",
+        ))
         .unwrap();
-
-    let mut output = Vec::new();
-    let mut writer = BcfWriter::new(&mut output, header.clone(), false);
-    writer.write_header().unwrap();
-    writer.write_vcf_record(&record).unwrap();
-    writer.finish().unwrap();
-    output
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    TestSetup { header, contig, dp_info, gt_fmt, dp_fmt }
 }
 
-/// Write the same record using `BcfRecordEncoder` (the direct-encode path).
-/// Returns the raw BGZF-compressed output.
-#[allow(clippy::too_many_arguments, reason = "test helper with many configurable fields")]
-fn write_via_encoder(
-    header: &Arc<VcfHeader>,
+fn write_bcf(
+    setup: &TestSetup,
     pos: u32,
     alleles: &Alleles,
     qual: f32,
     depth: i32,
-    ref_ad: i32,
-    alt_ad: i32,
     gt: &Genotype,
 ) -> Vec<u8> {
-    let contig = ContigHandle(0);
-    let dp_info = ScalarInfoHandle::<i32> {
-        dict_idx: header.string_map().get("DP").unwrap() as u32,
-        _marker: PhantomData,
-    };
-    let ad_info = PerAlleleInfoHandle::<i32> {
-        dict_idx: header.string_map().get("AD").unwrap() as u32,
-        _marker: PhantomData,
-    };
-    let gt_fmt = GtFormatHandle { dict_idx: header.string_map().get("GT").unwrap() as u32 };
-    let dp_fmt = ScalarFormatHandle::<i32> {
-        dict_idx: header.string_map().get("DP").unwrap() as u32,
-        _marker: PhantomData,
-    };
-
     let mut output = Vec::new();
-    let mut writer = BcfWriter::new(&mut output, header.clone(), false);
-    writer.write_header().unwrap();
+    let writer = Writer::new(&mut output, OutputFormat::Bcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
 
-    let mut enc = writer.record_encoder();
-    alleles.begin_record(&mut enc, contig, Pos::<One>::new(pos).unwrap(), Some(qual)).unwrap();
-    FilterHandle::PASS.encode(&mut enc);
-    dp_info.encode(&mut enc, depth);
-    ad_info.encode(&mut enc, &[ref_ad, alt_ad]);
-    enc.begin_samples(1);
-    gt_fmt.encode(&mut enc, gt);
-    dp_fmt.encode(&mut enc, depth);
+    let mut enc = writer
+        .begin_record(&setup.contig, Pos::<One>::new(pos).unwrap(), alleles, Some(qual))
+        .unwrap()
+        .filter_pass();
+    setup.dp_info.encode(&mut enc, depth);
+    let mut enc = enc.begin_samples(1);
+    setup.gt_fmt.encode(&mut enc, gt);
+    setup.dp_fmt.encode(&mut enc, depth);
     enc.emit().unwrap();
 
     writer.finish().unwrap();
     output
-}
-
-// ── Deterministic equivalence test ─────────────────────────────────────
-
-#[test]
-fn encoder_matches_write_record_simple_snv() {
-    let header = test_header();
-    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-    let gt = Genotype::unphased(0, 1);
-
-    let via_record = write_via_record(&header, 100, &alleles, 30.0, 50, 30, 20, &gt);
-    let via_encoder = write_via_encoder(&header, 100, &alleles, 30.0, 50, 30, 20, &gt);
-
-    // Both should produce parseable BCF — verify with noodles
-    let records_a = parse_bcf_with_noodles(&via_record);
-    let records_b = parse_bcf_with_noodles(&via_encoder);
-
-    assert_eq!(records_a.len(), 1);
-    assert_eq!(records_b.len(), 1);
-
-    // Fields should match
-    assert_eq!(records_a[0].pos, records_b[0].pos, "POS mismatch");
-    assert_eq!(records_a[0].ref_allele, records_b[0].ref_allele, "REF mismatch");
-    assert_eq!(records_a[0].alt_alleles, records_b[0].alt_alleles, "ALT mismatch");
-    assert_eq!(records_a[0].qual_bits, records_b[0].qual_bits, "QUAL mismatch");
-}
-
-// ── Proptest equivalence ───────────────────────────────────────────────
-
-fn arb_base() -> impl Strategy<Value = Base> {
-    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
-}
-
-proptest! {
-    #![proptest_config(ProptestConfig::with_cases(30))]
-
-    /// Both encoding paths must produce BCF that noodles parses to identical fields.
-    #[test]
-    fn encoder_matches_write_record(
-        pos in 1u32..10_000_000,
-        ref_base in arb_base(),
-        alt_base in arb_base(),
-        qual in 1.0f32..1000.0,
-        depth in 1i32..1000,
-        ref_ad in 0i32..500,
-        alt_ad in 0i32..500,
-        gt_a0 in 0u16..2,
-        gt_a1 in 0u16..2,
-        phased in proptest::bool::ANY,
-    ) {
-        prop_assume!(ref_base != alt_base);
-
-        let header = test_header();
-        let alleles = Alleles::snv(ref_base, alt_base).unwrap();
-        let gt = if phased {
-            Genotype::phased_diploid(gt_a0, gt_a1)
-        } else {
-            Genotype::unphased(gt_a0, gt_a1)
-        };
-
-        let via_record = write_via_record(&header, pos, &alleles, qual, depth, ref_ad, alt_ad, &gt);
-        let via_encoder = write_via_encoder(&header, pos, &alleles, qual, depth, ref_ad, alt_ad, &gt);
-
-        // Both must be parseable by noodles
-        let records_a = parse_bcf_with_noodles(&via_record);
-        let records_b = parse_bcf_with_noodles(&via_encoder);
-
-        prop_assert_eq!(records_a.len(), 1, "write_record path should produce 1 record");
-        prop_assert_eq!(records_b.len(), 1, "encoder path should produce 1 record");
-
-        prop_assert_eq!(records_a[0].pos, records_b[0].pos, "POS");
-        prop_assert_eq!(&records_a[0].ref_allele, &records_b[0].ref_allele, "REF");
-        prop_assert_eq!(&records_a[0].alt_alleles, &records_b[0].alt_alleles, "ALT");
-        prop_assert_eq!(records_a[0].qual_bits, records_b[0].qual_bits, "QUAL");
-    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -257,4 +118,74 @@ fn parse_bcf_with_noodles(bcf_bytes: &[u8]) -> Vec<ParsedRecord> {
         records.push(ParsedRecord { pos, ref_allele, alt_alleles, qual_bits: qual });
     }
     records
+}
+
+fn arb_base() -> impl Strategy<Value = Base> {
+    prop_oneof![Just(Base::A), Just(Base::C), Just(Base::G), Just(Base::T)]
+}
+
+// ── Deterministic test ─────────────────────────────────────────────────
+
+#[test]
+fn bcf_snv_parseable_by_noodles() {
+    let setup = make_setup();
+    let alleles = Alleles::snv(Base::A, Base::T).unwrap();
+    let gt = Genotype::unphased(0, 1);
+
+    let bcf_bytes = write_bcf(&setup, 100, &alleles, 30.0, 50, &gt);
+
+    let records = parse_bcf_with_noodles(&bcf_bytes);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].pos, 99, "POS should be 0-based 99");
+    assert_eq!(records[0].ref_allele, "A");
+    assert_eq!(records[0].alt_alleles, vec!["T"]);
+    assert_eq!(records[0].qual_bits, Some(30.0f32.to_bits()));
+}
+
+// ── Proptest ───────────────────────────────────────────────────────────
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(30))]
+
+    /// Unified Writer BCF output must be parseable by noodles with correct site fields.
+    #[test]
+    fn bcf_writer_noodles_roundtrip(
+        pos in 1u32..10_000_000,
+        ref_base in arb_base(),
+        alt_base in arb_base(),
+        qual in 1.0f32..1000.0,
+        depth in 1i32..1000,
+        gt_a0 in 0u16..2,
+        gt_a1 in 0u16..2,
+        phased in proptest::bool::ANY,
+    ) {
+        prop_assume!(ref_base != alt_base);
+
+        let setup = make_setup();
+        let alleles = Alleles::snv(ref_base, alt_base).unwrap();
+        let gt = if phased {
+            Genotype::phased_diploid(gt_a0, gt_a1)
+        } else {
+            Genotype::unphased(gt_a0, gt_a1)
+        };
+
+        let bcf_bytes = write_bcf(&setup, pos, &alleles, qual, depth, &gt);
+        let records = parse_bcf_with_noodles(&bcf_bytes);
+
+        prop_assert_eq!(records.len(), 1, "should produce exactly 1 record");
+
+        let expected_pos = pos as i32 - 1;
+        prop_assert_eq!(records[0].pos, expected_pos, "POS (0-based)");
+        prop_assert_eq!(
+            &records[0].ref_allele,
+            ref_base.as_str(),
+            "REF"
+        );
+        prop_assert_eq!(
+            &records[0].alt_alleles,
+            &vec![alt_base.as_str().to_string()],
+            "ALT"
+        );
+        prop_assert_eq!(records[0].qual_bits, Some(qual.to_bits()), "QUAL");
+    }
 }

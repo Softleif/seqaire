@@ -1,107 +1,40 @@
 //! VCF/BCF writing with type-safe alleles and zero-allocation encoding.
 //!
-//! # Two encoding paths
-//!
-//! 1. **[`VcfRecord`] path** — construct records via [`VcfRecordBuilder`], pass to
-//!    [`VcfWriter`](writer::VcfWriter) or [`BcfWriter`](bcf_writer::BcfWriter).
-//!    Simple and correct; suitable for most use cases.
-//!
-//! 2. **[`encoder`] path** — pre-resolve [`ScalarInfoHandle`](encoder::ScalarInfoHandle),
-//!    [`GtFormatHandle`](encoder::GtFormatHandle), etc. at setup time, then encode
-//!    directly into BCF buffers with zero allocations per record. Use this when
-//!    writing millions of records in a hot loop (e.g., per-base variant calling).
-//!
-//! Both paths produce identical BCF output (verified by proptest equivalence tests).
-//!
-//! # Output formats
-//!
-//! Use [`open_writer`] with [`OutputFormat`] to create a writer for any format:
+//! Use [`Writer`] with [`OutputFormat`] for all VCF/BCF output:
 //! - `.vcf` → plain text VCF
 //! - `.vcf.gz` → BGZF-compressed VCF with automatic TBI index co-production
 //! - `.bcf` → BCF binary with automatic CSI index co-production
+//!
+//! Records are encoded through a typestate [`RecordEncoder`] that enforces
+//! the correct field ordering at compile time.
 
 pub mod alleles;
 pub(crate) mod bcf_encoding;
-pub mod bcf_writer;
-pub mod encoder;
+pub(crate) mod bcf_writer;
+pub(crate) mod encoder;
 pub mod error;
 pub mod header;
 pub mod index_builder;
 pub mod record;
 pub mod record_encoder;
-pub mod writer;
+pub mod unified;
+pub(crate) mod writer;
 
 pub use alleles::Alleles;
 pub use error::{AllelesError, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
     ContigDef, FilterDef, FormatDef, InfoDef, Number, ValueType, VcfHeader, VcfHeaderBuilder,
 };
-pub use record::{
-    Filters, Genotype, InfoFields, InfoValue, SampleFields, SampleValue, VcfRecord,
-    VcfRecordBuilder,
-};
+pub use record::Genotype;
 pub use record_encoder::{
     Arr, ContigId, EncodeFormat, EncodeInfo, FieldDescription, FieldId, FilterFieldDef, FilterId,
-    Flag, FormatFieldDef, FormatFloat, FormatGt, FormatInt, FormatKey, Gt, InfoFieldDef, InfoFlag,
-    InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts, InfoKey, InfoString, OptArr,
-    RecordEncoder, Scalar, Str,
+    Flag, FormatEncoder, FormatFieldDef, FormatFloat, FormatGt, FormatInt, FormatKey, Gt,
+    InfoEncoder, InfoFieldDef, InfoFlag, InfoFloat, InfoFloats, InfoInt, InfoIntOpts, InfoInts,
+    InfoKey, InfoString, OptArr, Scalar, Str,
 };
+pub use unified::{Begun, Filtered, Ready, RecordEncoder, Unstarted, WithSamples, Writer};
 
-use std::io::Write;
-use std::sync::Arc;
-
-/// Trait for VCF/BCF writers.
-pub trait VcfWrite {
-    /// Write the file header. Must be called exactly once before any record.
-    fn write_header(&mut self) -> Result<(), VcfError>;
-    /// Write a single record.
-    fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError>;
-    /// Finalize the writer. Returns the index builder if one was co-produced.
-    fn finish(self: Box<Self>) -> Result<Option<index_builder::IndexBuilder>, VcfError>;
-}
-
-impl<W: Write> VcfWrite for writer::VcfWriter<W> {
-    fn write_header(&mut self) -> Result<(), VcfError> {
-        self.write_header()
-    }
-    fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
-        self.write_record(record)
-    }
-    fn finish(self: Box<Self>) -> Result<Option<index_builder::IndexBuilder>, VcfError> {
-        (*self).finish()
-    }
-}
-
-impl<W: Write> VcfWrite for bcf_writer::BcfWriter<W> {
-    fn write_header(&mut self) -> Result<(), VcfError> {
-        self.write_header()
-    }
-    fn write_record(&mut self, record: &VcfRecord) -> Result<(), VcfError> {
-        self.write_vcf_record(record)
-    }
-    fn finish(self: Box<Self>) -> Result<Option<index_builder::IndexBuilder>, VcfError> {
-        (*self).finish()
-    }
-}
-
-/// Open a VCF/BCF writer based on file extension.
-///
-/// - `.vcf` → plain text VCF
-/// - `.vcf.gz` → BGZF-compressed VCF with TBI index
-/// - `.bcf` → BCF binary with CSI index
-pub fn open_writer<W: Write + 'static>(
-    inner: W,
-    header: Arc<VcfHeader>,
-    format: OutputFormat,
-) -> Box<dyn VcfWrite> {
-    match format {
-        OutputFormat::Vcf => Box::new(writer::VcfWriter::new(inner, header)),
-        OutputFormat::VcfGz => Box::new(writer::VcfWriter::bgzf(inner, header)),
-        OutputFormat::Bcf => Box::new(bcf_writer::BcfWriter::new(inner, header, true)),
-    }
-}
-
-/// Output format for [`open_writer`].
+/// Output format for [`Writer`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     /// Plain text VCF.

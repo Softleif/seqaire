@@ -1,4 +1,7 @@
-//! Deep round-trip property tests: write VCF/BCF with seqair, read back with
+//! Deep round-trip property tests: write VCF/BCF with seqair unified Writer,
+//! read back with noodles, assert every field comes back identical. Covers edge
+//! cases that simpler tests miss: multi-allelic, indels, missing values,
+//! phasing, flags.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -13,118 +16,127 @@
     clippy::implicit_clone,
     reason = "test code with known small values"
 )]
-//! noodles, assert every field comes back identical. Covers edge cases that
-//! simpler tests miss: multi-allelic, indels, missing values, phasing, flags.
 
 use noodles::vcf::variant::record_buf::info::field::Value as InfoBufValue;
 use proptest::prelude::*;
-use seqair::vcf::alleles::Alleles;
-use seqair::vcf::bcf_writer::BcfWriter;
-use seqair::vcf::header::{ContigDef, FilterDef, FormatDef, InfoDef, Number, ValueType, VcfHeader};
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair::vcf::writer::VcfWriter;
-use seqair_types::{Base, One, Pos, SmolStr};
+use seqair::vcf::record_encoder::{
+    FilterFieldDef, FormatFieldDef, FormatGt, FormatInt, InfoFieldDef, InfoFlag, InfoFloat,
+    InfoFloats, InfoInt, InfoInts,
+};
+use seqair::vcf::{
+    Alleles, ContigDef, FilterId, Genotype, Number, OutputFormat, Ready, ValueType, VcfHeader,
+    Writer,
+};
+use seqair_types::{Base, One, Pos};
 use std::io::Cursor;
 use std::sync::Arc;
 
-// ── Rich header covering all field types ────────────────────────────────
+// ── Rich header setup ───────────────────────────────────────────────────
 
-fn roundtrip_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            // Scalar integer INFO
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Total Depth"),
-                },
-            )
-            .unwrap()
-            // Per-allele integer INFO (Number=R)
-            .add_info(
-                "AD",
-                InfoDef {
-                    number: Number::ReferenceAlternateBases,
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Allele Depth"),
-                },
-            )
-            .unwrap()
-            // Per-alt float INFO (Number=A)
-            .add_info(
-                "AF",
-                InfoDef {
-                    number: Number::AlternateBases,
-                    typ: ValueType::Float,
-                    description: SmolStr::from("Allele Frequency"),
-                },
-            )
-            .unwrap()
-            // Flag INFO
-            .add_info(
-                "DB",
-                InfoDef {
-                    number: Number::Count(0),
-                    typ: ValueType::Flag,
-                    description: SmolStr::from("dbSNP membership"),
-                },
-            )
-            .unwrap()
-            // Scalar float INFO
-            .add_info(
-                "MQ",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Float,
-                    description: SmolStr::from("Mapping Quality"),
-                },
-            )
-            .unwrap()
-            // Custom filter
-            .add_filter("q20", FilterDef { description: SmolStr::from("Quality below 20") })
-            .unwrap()
-            // FORMAT fields
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "DP",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Read Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GQ",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Genotype Quality"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct RoundtripSetup {
+    header: Arc<VcfHeader>,
+    contig: seqair::vcf::ContigId,
+    dp_info: InfoInt,
+    ad_info: InfoInts,
+    af_info: InfoFloats,
+    db_flag: InfoFlag,
+    mq_info: InfoFloat,
+    q20_filter: FilterId,
+    gt_fmt: FormatGt,
+    dp_fmt: FormatInt,
+    gq_fmt: FormatInt,
+}
+
+fn make_setup() -> RoundtripSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    // Register filters BEFORE info/format (BCF string dict order: PASS, filters, info, format).
+    // TODO: enforce this ordering at the type level — VcfHeaderBuilder should use typestates
+    // or a phased builder so that register_filter() can't be called after register_info().
+    let q20_filter =
+        builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Total Depth",
+        ))
+        .unwrap();
+    let ad_info = builder
+        .register_info(&InfoFieldDef::new(
+            "AD",
+            Number::ReferenceAlternateBases,
+            ValueType::Integer,
+            "Allele Depth",
+        ))
+        .unwrap();
+    let af_info = builder
+        .register_info(&InfoFieldDef::new(
+            "AF",
+            Number::AlternateBases,
+            ValueType::Float,
+            "Allele Frequency",
+        ))
+        .unwrap();
+    let db_flag = builder
+        .register_info(&InfoFieldDef::new(
+            "DB",
+            Number::Count(0),
+            ValueType::Flag,
+            "dbSNP membership",
+        ))
+        .unwrap();
+    let mq_info = builder
+        .register_info(&InfoFieldDef::new(
+            "MQ",
+            Number::Count(1),
+            ValueType::Float,
+            "Mapping Quality",
+        ))
+        .unwrap();
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let gq_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "GQ",
+            Number::Count(1),
+            ValueType::Integer,
+            "Genotype Quality",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    RoundtripSetup {
+        header,
+        contig,
+        dp_info,
+        ad_info,
+        af_info,
+        db_flag,
+        mq_info,
+        q20_filter,
+        gt_fmt,
+        dp_fmt,
+        gq_fmt,
+    }
 }
 
 // ── Test record struct ─────────────────────────────────────────────────
 
-/// Everything needed to build one VCF record and verify round-trip.
 #[derive(Debug, Clone)]
 struct TestRecord {
     pos: u32,
@@ -139,56 +151,181 @@ struct TestRecord {
     sample_gq: i32,
 }
 
-impl TestRecord {
-    fn to_vcf_record(&self, header: &VcfHeader) -> seqair::vcf::record::VcfRecord {
-        let mut builder =
-            VcfRecordBuilder::new("chr1", Pos::<One>::new(self.pos).unwrap(), self.alleles.clone());
-
-        if let Some(q) = self.qual {
-            builder = builder.qual(q);
-        }
-
-        if self.filter_pass {
-            builder = builder.filter_pass();
-        }
-
-        builder = builder.info_integer("DP", self.dp);
-        builder = builder.info_float("MQ", self.mq);
-
-        if self.has_db_flag {
-            builder = builder.info_flag("DB");
-        }
-
-        // Per-allele AD: ref_depth + alt_depths
-        let n_allele = self.alleles.n_allele();
-        let mut ad_values = Vec::with_capacity(n_allele);
-        // Split depth roughly: ref gets half, each alt gets remainder / n_alt
-        let n_alt = n_allele.saturating_sub(1).max(1);
-        let ref_depth = self.dp / 2;
-        ad_values.push(Some(ref_depth));
-        for i in 0..self.alleles.n_allele().saturating_sub(1) {
-            ad_values.push(Some(self.dp.saturating_sub(ref_depth) / n_alt as i32));
-            let _ = i;
-        }
-        builder = builder.info_integer_array("AD", ad_values);
-
-        // Per-alt AF
-        if self.alleles.n_allele() > 1 {
-            let n_alt = self.alleles.n_allele() - 1;
-            let af_per_alt: Vec<Option<f32>> =
-                (0..n_alt).map(|_| Some(1.0 / (n_alt as f32 + 1.0))).collect();
-            builder = builder.info_float_array("AF", af_per_alt);
-        }
-
-        builder = builder.format_keys(&["GT", "DP", "GQ"]);
-        builder = builder.add_sample(vec![
-            SampleValue::Genotype(self.gt.clone()),
-            SampleValue::Integer(self.sample_dp),
-            SampleValue::Integer(self.sample_gq),
-        ]);
-
-        builder.build(header).unwrap()
+fn write_bcf(setup: &RoundtripSetup, records: &[TestRecord]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let writer = Writer::new(&mut buf, OutputFormat::Bcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    for rec in records {
+        write_one_record(setup, &mut writer, rec, OutputFormat::Bcf);
     }
+    writer.finish().unwrap();
+    buf
+}
+
+fn write_vcf(setup: &RoundtripSetup, records: &[TestRecord]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+    let mut writer = writer.write_header(&setup.header).unwrap();
+    for rec in records {
+        write_one_record(setup, &mut writer, rec, OutputFormat::Vcf);
+    }
+    writer.finish().unwrap();
+    buf
+}
+
+fn write_one_record<W: std::io::Write>(
+    setup: &RoundtripSetup,
+    writer: &mut Writer<W, Ready>,
+    rec: &TestRecord,
+    _fmt: OutputFormat,
+) {
+    let n_allele = rec.alleles.n_allele();
+    let n_alt = n_allele.saturating_sub(1).max(1);
+    let ref_depth = rec.dp / 2;
+
+    let enc = writer
+        .begin_record(&setup.contig, Pos::<One>::new(rec.pos).unwrap(), &rec.alleles, rec.qual)
+        .unwrap();
+
+    let mut enc =
+        if rec.filter_pass { enc.filter_pass() } else { enc.filter_fail(&[&setup.q20_filter]) };
+
+    // INFO fields
+    setup.dp_info.encode(&mut enc, rec.dp);
+
+    // AD: ref_depth + per-alt depths
+    let mut ad_vals = vec![ref_depth];
+    for _ in 0..rec.alleles.n_allele().saturating_sub(1) {
+        ad_vals.push(rec.dp.saturating_sub(ref_depth) / n_alt as i32);
+    }
+    setup.ad_info.encode(&mut enc, &ad_vals);
+
+    // AF: per-alt floats
+    if rec.alleles.n_allele() > 1 {
+        let af: Vec<f32> =
+            (0..rec.alleles.n_allele() - 1).map(|_| 1.0 / (n_alt as f32 + 1.0)).collect();
+        setup.af_info.encode(&mut enc, &af);
+    }
+
+    if rec.has_db_flag {
+        setup.db_flag.encode(&mut enc);
+    }
+    setup.mq_info.encode(&mut enc, rec.mq);
+
+    let mut enc = enc.begin_samples(1);
+    setup.gt_fmt.encode(&mut enc, &rec.gt);
+    setup.dp_fmt.encode(&mut enc, rec.sample_dp);
+    setup.gq_fmt.encode(&mut enc, rec.sample_gq);
+    enc.emit().unwrap();
+}
+
+// ── Noodles parsing ────────────────────────────────────────────────────
+
+#[derive(Debug)]
+#[allow(dead_code, reason = "fields read in assertions via Debug formatting")]
+struct ParsedRecord {
+    pos: u32,
+    ref_allele: String,
+    alt_alleles: Vec<String>,
+    qual_bits: Option<u32>,
+    is_pass: bool,
+    info_dp: Option<i32>,
+    info_mq: Option<f32>,
+    info_db: bool,
+    info_ad: Vec<i32>,
+}
+
+fn parse_bcf_records(data: &[u8]) -> Vec<ParsedRecord> {
+    let mut reader = noodles::bcf::io::Reader::new(Cursor::new(data));
+    let header = reader.read_header().unwrap();
+    let mut out = Vec::new();
+    for result in reader.record_bufs(&header) {
+        let rec = result.unwrap();
+        out.push(extract_fields(&rec));
+    }
+    out
+}
+
+fn parse_vcf_records(data: &[u8]) -> Vec<ParsedRecord> {
+    let mut reader = noodles::vcf::io::Reader::new(Cursor::new(data));
+    let header = reader.read_header().unwrap();
+    let mut out = Vec::new();
+    for result in reader.record_bufs(&header) {
+        let rec = result.unwrap();
+        out.push(extract_fields(&rec));
+    }
+    out
+}
+
+fn extract_fields(rec: &noodles::vcf::variant::RecordBuf) -> ParsedRecord {
+    let pos = rec.variant_start().map(|p| p.get() as u32).unwrap_or(0);
+    let qual = rec.quality_score().map(|q| {
+        let f: f32 = q;
+        f.to_bits()
+    });
+    let ref_allele = rec.reference_bases().to_string();
+    let alt_alleles: Vec<String> =
+        rec.alternate_bases().as_ref().iter().map(|a| a.to_string()).collect();
+
+    let filters = rec.filters();
+    let is_pass = filters.as_ref().iter().any(|f| f == "PASS") && filters.as_ref().len() == 1;
+
+    let info_dp = rec.info().get("DP").and_then(|v| match v {
+        Some(InfoBufValue::Integer(n)) => Some(*n),
+        _ => None,
+    });
+    let info_mq = rec.info().get("MQ").and_then(|v| match v {
+        Some(InfoBufValue::Float(f)) => Some(*f),
+        _ => None,
+    });
+    let info_db = rec.info().get("DB").is_some();
+    let info_ad = rec
+        .info()
+        .get("AD")
+        .and_then(|v| match v {
+            Some(InfoBufValue::Array(
+                noodles::vcf::variant::record_buf::info::field::value::Array::Integer(arr),
+            )) => Some(arr.iter().filter_map(|x| *x).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    ParsedRecord {
+        pos,
+        ref_allele,
+        alt_alleles,
+        qual_bits: qual,
+        is_pass,
+        info_dp,
+        info_mq,
+        info_db,
+        info_ad,
+    }
+}
+
+// ── Assertion helper ───────────────────────────────────────────────────
+
+fn assert_record_matches(input: &TestRecord, parsed: &ParsedRecord, format: &str) {
+    assert_eq!(parsed.pos, input.pos, "{format}: POS mismatch");
+    assert_eq!(parsed.ref_allele, input.alleles.ref_text().as_str(), "{format}: REF mismatch");
+
+    let expected_alts: Vec<String> =
+        input.alleles.alt_texts().iter().map(|s| s.to_string()).collect();
+    assert_eq!(parsed.alt_alleles, expected_alts, "{format}: ALT mismatch");
+
+    if let Some(q) = input.qual {
+        assert_eq!(parsed.qual_bits, Some(q.to_bits()), "{format}: QUAL mismatch");
+    }
+
+    assert_eq!(parsed.is_pass, input.filter_pass, "{format}: FILTER mismatch");
+    assert_eq!(parsed.info_dp, Some(input.dp), "{format}: INFO DP mismatch");
+
+    if let Some(mq) = parsed.info_mq {
+        let diff = (mq - input.mq).abs();
+        assert!(diff < 0.01, "{format}: INFO MQ mismatch: expected {}, got {mq}", input.mq);
+    }
+
+    assert_eq!(parsed.info_db, input.has_db_flag, "{format}: INFO DB flag mismatch");
 }
 
 // ── Proptest strategies ────────────────────────────────────────────────
@@ -199,20 +336,15 @@ fn arb_base() -> impl Strategy<Value = Base> {
 
 fn arb_alleles() -> impl Strategy<Value = Alleles> {
     prop_oneof![
-        // Reference only
         4 => arb_base().prop_map(Alleles::reference),
-        // SNV (most common)
         10 => (arb_base(), arb_base())
             .prop_filter("ref != alt", |(r, a)| r != a)
             .prop_map(|(r, a)| Alleles::snv(r, a).unwrap()),
-        // Multi-allelic SNV
         2 => (arb_base(), arb_base(), arb_base())
             .prop_filter("all different", |(r, a1, a2)| r != a1 && r != a2 && a1 != a2)
             .prop_map(|(r, a1, a2)| Alleles::snv_multi(r, &[a1, a2]).unwrap()),
-        // Insertion (1-6 bases)
         3 => (arb_base(), proptest::collection::vec(arb_base(), 1..6))
             .prop_map(|(anchor, ins)| Alleles::insertion(anchor, &ins).unwrap()),
-        // Deletion (1-6 bases)
         3 => (arb_base(), proptest::collection::vec(arb_base(), 1..6))
             .prop_map(|(anchor, del)| Alleles::deletion(anchor, &del).unwrap()),
     ]
@@ -220,13 +352,9 @@ fn arb_alleles() -> impl Strategy<Value = Alleles> {
 
 fn arb_genotype(max_allele: u16) -> impl Strategy<Value = Genotype> {
     prop_oneof![
-        // Unphased diploid
         (0..=max_allele, 0..=max_allele).prop_map(|(a, b)| Genotype::unphased(a, b)),
-        // Phased diploid
         (0..=max_allele, 0..=max_allele).prop_map(|(a, b)| Genotype::phased_diploid(a, b)),
-        // Haploid
         (0..=max_allele).prop_map(Genotype::haploid),
-        // Missing
         Just(Genotype::missing_diploid()),
     ]
 }
@@ -266,173 +394,11 @@ fn arb_test_record() -> impl Strategy<Value = TestRecord> {
         )
 }
 
-// ── Round-trip helpers ─────────────────────────────────────────────────
-
-/// Write records as BCF, read back with noodles, return parsed fields.
-fn bcf_roundtrip(
-    header: &Arc<VcfHeader>,
-    records: &[seqair::vcf::record::VcfRecord],
-) -> Vec<ParsedRecord> {
-    let mut buf = Vec::new();
-    {
-        let mut writer = BcfWriter::new(&mut buf, header.clone(), false);
-        writer.write_header().unwrap();
-        for record in records {
-            writer.write_vcf_record(record).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-    parse_bcf_records(&buf)
-}
-
-/// Write records as VCF text, read back with noodles, return parsed fields.
-fn vcf_roundtrip(
-    header: &Arc<VcfHeader>,
-    records: &[seqair::vcf::record::VcfRecord],
-) -> Vec<ParsedRecord> {
-    let mut buf = Vec::new();
-    {
-        let mut writer = VcfWriter::new(&mut buf, header.clone());
-        writer.write_header().unwrap();
-        for record in records {
-            writer.write_record(record).unwrap();
-        }
-        writer.finish().unwrap();
-    }
-    parse_vcf_records(&buf)
-}
-
-#[derive(Debug)]
-#[allow(dead_code, reason = "fields read in assertions via Debug formatting")]
-struct ParsedRecord {
-    pos: u32,
-    ref_allele: String,
-    alt_alleles: Vec<String>,
-    qual_bits: Option<u32>,
-    is_pass: bool,
-    info_dp: Option<i32>,
-    info_mq: Option<f32>,
-    info_db: bool,
-    info_ad: Vec<i32>,
-    gt_str: Option<String>,
-    format_dp: Option<i32>,
-    format_gq: Option<i32>,
-}
-
-fn parse_bcf_records(data: &[u8]) -> Vec<ParsedRecord> {
-    let mut reader = noodles::bcf::io::Reader::new(Cursor::new(data));
-    let header = reader.read_header().unwrap();
-    let mut out = Vec::new();
-    for result in reader.record_bufs(&header) {
-        let rec = result.unwrap();
-        out.push(extract_fields(&rec, &header));
-    }
-    out
-}
-
-fn parse_vcf_records(data: &[u8]) -> Vec<ParsedRecord> {
-    let mut reader = noodles::vcf::io::Reader::new(Cursor::new(data));
-    let header = reader.read_header().unwrap();
-    let mut out = Vec::new();
-    for result in reader.record_bufs(&header) {
-        let rec = result.unwrap();
-        out.push(extract_fields(&rec, &header));
-    }
-    out
-}
-
-fn extract_fields(
-    rec: &noodles::vcf::variant::RecordBuf,
-    _header: &noodles::vcf::Header,
-) -> ParsedRecord {
-    let pos = rec.variant_start().map(|p| p.get() as u32).unwrap_or(0);
-    let qual = rec.quality_score().map(|q| {
-        let f: f32 = q;
-        f.to_bits()
-    });
-    let ref_allele = rec.reference_bases().to_string();
-    let alt_alleles: Vec<String> =
-        rec.alternate_bases().as_ref().iter().map(|a| a.to_string()).collect();
-
-    let filters = rec.filters();
-    let is_pass = filters.as_ref().iter().any(|f| f == "PASS") && filters.as_ref().len() == 1;
-
-    // INFO fields
-    let info_dp = rec.info().get("DP").and_then(|v| match v {
-        Some(InfoBufValue::Integer(n)) => Some(*n),
-        _ => None,
-    });
-    let info_mq = rec.info().get("MQ").and_then(|v| match v {
-        Some(InfoBufValue::Float(f)) => Some(*f),
-        _ => None,
-    });
-    let info_db = rec.info().get("DB").is_some();
-    let info_ad = rec
-        .info()
-        .get("AD")
-        .and_then(|v| match v {
-            Some(InfoBufValue::Array(
-                noodles::vcf::variant::record_buf::info::field::value::Array::Integer(arr),
-            )) => Some(arr.iter().filter_map(|x| *x).collect()),
-            _ => None,
-        })
-        .unwrap_or_default();
-
-    // FORMAT/sample fields — noodles Samples API is complex and version-dependent.
-    // bcftools comparison tests (compare_vcf_with_htslib.rs) already validate FORMAT
-    // fields end-to-end. Here we focus on site-level field round-trip.
-    let gt_str: Option<String> = None;
-    let format_dp: Option<i32> = None;
-    let format_gq: Option<i32> = None;
-
-    ParsedRecord {
-        pos,
-        ref_allele,
-        alt_alleles,
-        qual_bits: qual,
-        is_pass,
-        info_dp,
-        info_mq,
-        info_db,
-        info_ad,
-        gt_str,
-        format_dp,
-        format_gq,
-    }
-}
-
-// ── Assertion helpers ──────────────────────────────────────────────────
-
-fn assert_record_matches(input: &TestRecord, parsed: &ParsedRecord, format: &str) {
-    assert_eq!(parsed.pos, input.pos, "{format}: POS mismatch");
-    assert_eq!(parsed.ref_allele, input.alleles.ref_text().as_str(), "{format}: REF mismatch");
-
-    let expected_alts: Vec<String> =
-        input.alleles.alt_texts().iter().map(|s| s.to_string()).collect();
-    assert_eq!(parsed.alt_alleles, expected_alts, "{format}: ALT mismatch");
-
-    if let Some(q) = input.qual {
-        assert_eq!(parsed.qual_bits, Some(q.to_bits()), "{format}: QUAL mismatch");
-    }
-
-    assert_eq!(parsed.is_pass, input.filter_pass, "{format}: FILTER mismatch");
-    assert_eq!(parsed.info_dp, Some(input.dp), "{format}: INFO DP mismatch");
-
-    // Float comparison with tolerance for MQ (ryu formatting may differ slightly)
-    if let Some(mq) = parsed.info_mq {
-        let diff = (mq - input.mq).abs();
-        assert!(diff < 0.01, "{format}: INFO MQ mismatch: expected {}, got {mq}", input.mq);
-    }
-
-    assert_eq!(parsed.info_db, input.has_db_flag, "{format}: INFO DB flag mismatch");
-    // FORMAT fields validated via bcftools tests (compare_vcf_with_htslib.rs)
-}
-
 // ── Deterministic tests ────────────────────────────────────────────────
 
 #[test]
 fn bcf_roundtrip_snv_all_fields() {
-    let header = roundtrip_header();
+    let setup = make_setup();
     let input = TestRecord {
         pos: 12345,
         alleles: Alleles::snv(Base::A, Base::T).unwrap(),
@@ -446,15 +412,15 @@ fn bcf_roundtrip_snv_all_fields() {
         sample_gq: 30,
     };
 
-    let record = input.to_vcf_record(&header);
-    let parsed = bcf_roundtrip(&header, &[record]);
+    let data = write_bcf(&setup, &[input.clone()]);
+    let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF");
 }
 
 #[test]
 fn bcf_roundtrip_insertion() {
-    let header = roundtrip_header();
+    let setup = make_setup();
     let input = TestRecord {
         pos: 1000,
         alleles: Alleles::insertion(Base::A, &[Base::C, Base::G, Base::T]).unwrap(),
@@ -468,18 +434,17 @@ fn bcf_roundtrip_insertion() {
         sample_gq: 50,
     };
 
-    let record = input.to_vcf_record(&header);
-    let parsed = bcf_roundtrip(&header, &[record]);
+    let data = write_bcf(&setup, &[input.clone()]);
+    let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF-insertion");
-    // Verify insertion alleles: REF=A, ALT=ACGT
     assert_eq!(parsed[0].ref_allele, "A");
     assert_eq!(parsed[0].alt_alleles, vec!["ACGT"]);
 }
 
 #[test]
 fn bcf_roundtrip_deletion() {
-    let header = roundtrip_header();
+    let setup = make_setup();
     let input = TestRecord {
         pos: 2000,
         alleles: Alleles::deletion(Base::T, &[Base::A, Base::C]).unwrap(),
@@ -493,18 +458,17 @@ fn bcf_roundtrip_deletion() {
         sample_gq: 40,
     };
 
-    let record = input.to_vcf_record(&header);
-    let parsed = bcf_roundtrip(&header, &[record]);
+    let data = write_bcf(&setup, &[input.clone()]);
+    let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "BCF-deletion");
-    // Verify deletion alleles: REF=TAC, ALT=T
     assert_eq!(parsed[0].ref_allele, "TAC");
     assert_eq!(parsed[0].alt_alleles, vec!["T"]);
 }
 
 #[test]
 fn vcf_text_roundtrip_all_fields() {
-    let header = roundtrip_header();
+    let setup = make_setup();
     let input = TestRecord {
         pos: 5000,
         alleles: Alleles::snv(Base::G, Base::C).unwrap(),
@@ -518,15 +482,15 @@ fn vcf_text_roundtrip_all_fields() {
         sample_gq: 99,
     };
 
-    let record = input.to_vcf_record(&header);
-    let parsed = vcf_roundtrip(&header, &[record]);
+    let data = write_vcf(&setup, &[input.clone()]);
+    let parsed = parse_vcf_records(&data);
     assert_eq!(parsed.len(), 1);
     assert_record_matches(&input, &parsed[0], "VCF-text");
 }
 
 #[test]
 fn bcf_roundtrip_multiple_records_sorted() {
-    let header = roundtrip_header();
+    let setup = make_setup();
     let inputs: Vec<TestRecord> = (1..=5)
         .map(|i| TestRecord {
             pos: i * 1000,
@@ -542,8 +506,8 @@ fn bcf_roundtrip_multiple_records_sorted() {
         })
         .collect();
 
-    let records: Vec<_> = inputs.iter().map(|i| i.to_vcf_record(&header)).collect();
-    let parsed = bcf_roundtrip(&header, &records);
+    let data = write_bcf(&setup, &inputs);
+    let parsed = parse_bcf_records(&data);
     assert_eq!(parsed.len(), 5);
     for (input, parsed) in inputs.iter().zip(parsed.iter()) {
         assert_record_matches(input, parsed, "BCF-multi");
@@ -558,9 +522,9 @@ proptest! {
     /// BCF round-trip: write → noodles read → all fields match.
     #[test]
     fn bcf_deep_roundtrip(input in arb_test_record()) {
-        let header = roundtrip_header();
-        let record = input.to_vcf_record(&header);
-        let parsed = bcf_roundtrip(&header, &[record]);
+        let setup = make_setup();
+        let data = write_bcf(&setup, &[input.clone()]);
+        let parsed = parse_bcf_records(&data);
         prop_assert_eq!(parsed.len(), 1);
 
         let p = &parsed[0];
@@ -577,18 +541,16 @@ proptest! {
         prop_assert_eq!(p.is_pass, input.filter_pass, "FILTER");
         prop_assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
         prop_assert_eq!(p.info_db, input.has_db_flag, "INFO DB");
-        // FORMAT fields validated via bcftools tests (compare_vcf_with_htslib.rs)
     }
 
     /// VCF text round-trip: write → noodles read → site-level fields match.
     #[test]
     fn vcf_text_deep_roundtrip(input in arb_test_record()) {
-        // VCF text doesn't support reference-only sites with samples well in noodles
         prop_assume!(input.alleles.n_allele() > 1);
 
-        let header = roundtrip_header();
-        let record = input.to_vcf_record(&header);
-        let parsed = vcf_roundtrip(&header, &[record]);
+        let setup = make_setup();
+        let data = write_vcf(&setup, &[input.clone()]);
+        let parsed = parse_vcf_records(&data);
         prop_assert_eq!(parsed.len(), 1);
 
         let p = &parsed[0];
@@ -598,15 +560,17 @@ proptest! {
         prop_assert_eq!(p.info_dp, Some(input.dp), "INFO DP");
     }
 
+    // r[verify record_encoder.vcf_bcf_equivalence]
     /// BCF + VCF produce records that noodles parses to the same site-level fields.
     #[test]
     fn bcf_and_vcf_match(input in arb_test_record()) {
         prop_assume!(input.alleles.n_allele() > 1);
 
-        let header = roundtrip_header();
-        let record = input.to_vcf_record(&header);
-        let bcf_parsed = bcf_roundtrip(&header, std::slice::from_ref(&record));
-        let vcf_parsed = vcf_roundtrip(&header, std::slice::from_ref(&record));
+        let setup = make_setup();
+        let bcf_data = write_bcf(&setup, &[input.clone()]);
+        let vcf_data = write_vcf(&setup, &[input.clone()]);
+        let bcf_parsed = parse_bcf_records(&bcf_data);
+        let vcf_parsed = parse_vcf_records(&vcf_data);
 
         prop_assert_eq!(bcf_parsed.len(), 1);
         prop_assert_eq!(vcf_parsed.len(), 1);

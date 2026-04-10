@@ -486,56 +486,48 @@ fn pileup_e2e(c: &mut Criterion) {
 // Shared VCF writing helpers for benchmarks
 // ---------------------------------------------------------------------------
 
-use seqair::vcf::RecordEncoder;
-use seqair::vcf::alleles::Alleles;
-use seqair::vcf::bcf_writer::BcfWriter;
-use seqair::vcf::encoder::*;
-use seqair::vcf::header::*;
-use seqair::vcf::record::{Genotype, SampleValue, VcfRecordBuilder};
-use seqair::vcf::writer::VcfWriter;
-use seqair_types::{Base, SmolStr};
-use std::marker::PhantomData;
+use seqair::vcf::record_encoder::{FormatFieldDef, InfoFieldDef};
+use seqair::vcf::{
+    Alleles, ContigDef, ContigId, FormatGt, FormatInt, Genotype, InfoInt, Number, OutputFormat,
+    ValueType, VcfHeader, Writer,
+};
+use seqair_types::Base;
 use std::sync::Arc;
 
 const N_RECORDS: u32 = 10_000;
 
-fn vcf_header() -> Arc<VcfHeader> {
-    Arc::new(
-        VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(250_000_000) })
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Depth"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "GT",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::String,
-                    description: SmolStr::from("Genotype"),
-                },
-            )
-            .unwrap()
-            .add_format(
-                "DP",
-                FormatDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("Read Depth"),
-                },
-            )
-            .unwrap()
-            .add_sample("sample1")
-            .unwrap()
-            .build()
-            .unwrap(),
-    )
+struct VcfSetup {
+    header: Arc<VcfHeader>,
+    contig: ContigId,
+    dp_info: InfoInt,
+    gt_fmt: FormatGt,
+    dp_fmt: FormatInt,
+}
+
+fn vcf_setup() -> VcfSetup {
+    let mut builder = VcfHeader::builder();
+    let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let dp_info = builder
+        .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
+        .unwrap();
+    let gt_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "GT",
+            Number::Count(1),
+            ValueType::String,
+            "Genotype",
+        ))
+        .unwrap();
+    let dp_fmt = builder
+        .register_format(&FormatFieldDef::new(
+            "DP",
+            Number::Count(1),
+            ValueType::Integer,
+            "Read Depth",
+        ))
+        .unwrap();
+    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    VcfSetup { header, contig, dp_info, gt_fmt, dp_fmt }
 }
 
 fn htslib_header() -> rust_htslib::bcf::Header {
@@ -588,32 +580,25 @@ fn write_vcf_text(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_vcf_text");
     group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
-    let header = vcf_header();
+    let setup = vcf_setup();
 
     // seqair
     group.bench_function("seqair", |b| {
+        let VcfSetup { header, contig, dp_info, gt_fmt, dp_fmt } = &setup;
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
-            let mut writer = VcfWriter::new(&mut output, header.clone());
-            writer.write_header().unwrap();
+            let writer = Writer::new(&mut output, OutputFormat::Vcf);
+            let mut writer = writer.write_header(header).unwrap();
+            let alleles = Alleles::snv(Base::A, Base::T).unwrap();
             for i in 1..=N_RECORDS {
-                let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-                let record =
-                    VcfRecordBuilder::new("chr1", seqair_types::Pos1::new(i).unwrap(), alleles)
-                        .qual(30.0)
-                        .filter_pass()
-                        .info_integer("DP", 50)
-                        .format_keys(&["GT", "DP"])
-                        .add_sample({
-                            use seqair_types::smallvec::smallvec;
-                            smallvec![
-                                SampleValue::Genotype(Genotype::unphased(0, 1)),
-                                SampleValue::Integer(30),
-                            ]
-                        })
-                        .build(&header)
-                        .unwrap();
-                writer.write_record(&record).unwrap();
+                let pos = seqair_types::Pos1::new(i).unwrap();
+                let mut enc =
+                    writer.begin_record(contig, pos, &alleles, Some(30.0)).unwrap().filter_pass();
+                dp_info.encode(&mut enc, 50);
+                let mut enc = enc.begin_samples(1);
+                gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+                dp_fmt.encode(&mut enc, 30);
+                enc.emit().unwrap();
             }
             writer.finish().unwrap();
             black_box(output.len())
@@ -635,7 +620,7 @@ fn write_vcf_text(c: &mut Criterion) {
         use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
         use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 
-        let noodles_header: vcf::Header = header.to_vcf_text().parse().unwrap();
+        let noodles_header: vcf::Header = setup.header.to_vcf_text().parse().unwrap();
 
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
@@ -688,32 +673,25 @@ fn write_vcf_gz(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_vcf_gz");
     group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
-    let header = vcf_header();
+    let setup = vcf_setup();
 
     // seqair (BGZF-compressed VCF to memory buffer)
     group.bench_function("seqair", |b| {
+        let VcfSetup { header, contig, dp_info, gt_fmt, dp_fmt } = &setup;
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
-            let mut writer = VcfWriter::bgzf(&mut output, header.clone());
-            writer.write_header().unwrap();
+            let writer = Writer::new(&mut output, OutputFormat::VcfGz);
+            let mut writer = writer.write_header(header).unwrap();
+            let alleles = Alleles::snv(Base::A, Base::T).unwrap();
             for i in 1..=N_RECORDS {
-                let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-                let record =
-                    VcfRecordBuilder::new("chr1", seqair_types::Pos1::new(i).unwrap(), alleles)
-                        .qual(30.0)
-                        .filter_pass()
-                        .info_integer("DP", 50)
-                        .format_keys(&["GT", "DP"])
-                        .add_sample({
-                            use seqair_types::smallvec::smallvec;
-                            smallvec![
-                                SampleValue::Genotype(Genotype::unphased(0, 1)),
-                                SampleValue::Integer(30),
-                            ]
-                        })
-                        .build(&header)
-                        .unwrap();
-                writer.write_record(&record).unwrap();
+                let pos = seqair_types::Pos1::new(i).unwrap();
+                let mut enc =
+                    writer.begin_record(contig, pos, &alleles, Some(30.0)).unwrap().filter_pass();
+                dp_info.encode(&mut enc, 50);
+                let mut enc = enc.begin_samples(1);
+                gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
+                dp_fmt.encode(&mut enc, 30);
+                enc.emit().unwrap();
             }
             writer.finish().unwrap();
             black_box(output.len())
@@ -762,71 +740,29 @@ fn write_vcf_gz(c: &mut Criterion) {
 
 // ---------------------------------------------------------------------------
 // Group 7: Write .bcf (binary)
-// seqair (VcfRecord path, encoder path) vs htslib
+// seqair (typestate encoder path) vs htslib
 // ---------------------------------------------------------------------------
 
 fn write_bcf(c: &mut Criterion) {
     let mut group = c.benchmark_group("write_bcf");
     group.throughput(Throughput::Elements(u64::from(N_RECORDS)));
 
-    let header = vcf_header();
+    let setup = vcf_setup();
 
-    // seqair: VcfRecord path
+    // seqair: typestate encoder path (zero-alloc, pre-resolved keys)
     group.bench_function("seqair", |b| {
+        let VcfSetup { header, contig, dp_info, gt_fmt, dp_fmt } = &setup;
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
-            let mut writer = BcfWriter::new(&mut output, header.clone(), false);
-            writer.write_header().unwrap();
-            for i in 1..=N_RECORDS {
-                let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-                let record =
-                    VcfRecordBuilder::new("chr1", seqair_types::Pos1::new(i).unwrap(), alleles)
-                        .qual(30.0)
-                        .filter_pass()
-                        .info_integer("DP", 50)
-                        .format_keys(&["GT", "DP"])
-                        .add_sample({
-                            use seqair_types::smallvec::smallvec;
-                            smallvec![
-                                SampleValue::Genotype(Genotype::unphased(0, 1)),
-                                SampleValue::Integer(30),
-                            ]
-                        })
-                        .build(&header)
-                        .unwrap();
-                writer.write_vcf_record(&record).unwrap();
-            }
-            writer.finish().unwrap();
-            black_box(output.len())
-        });
-    });
-
-    // seqair: direct encoder path (zero-alloc, pre-resolved handles)
-    group.bench_function("seqair_encoder", |b| {
-        let contig = ContigHandle(0);
-        let dp_info = ScalarInfoHandle::<i32> {
-            dict_idx: header.string_map().get("DP").unwrap() as u32,
-            _marker: PhantomData,
-        };
-        let gt_fmt = GtFormatHandle { dict_idx: header.string_map().get("GT").unwrap() as u32 };
-        let dp_fmt = ScalarFormatHandle::<i32> {
-            dict_idx: header.string_map().get("DP").unwrap() as u32,
-            _marker: PhantomData,
-        };
-
-        b.iter(|| {
-            let mut output = Vec::with_capacity(1_000_000);
-            let mut writer = BcfWriter::new(&mut output, header.clone(), false);
-            writer.write_header().unwrap();
-
+            let writer = Writer::new(&mut output, OutputFormat::Bcf);
+            let mut writer = writer.write_header(header).unwrap();
             let alleles = Alleles::snv(Base::A, Base::T).unwrap();
             for i in 1..=N_RECORDS {
                 let pos = seqair_types::Pos1::new(i).unwrap();
-                let mut enc = writer.record_encoder();
-                alleles.begin_record(&mut enc, contig, pos, Some(30.0)).unwrap();
-                FilterHandle::PASS.encode(&mut enc);
+                let mut enc =
+                    writer.begin_record(contig, pos, &alleles, Some(30.0)).unwrap().filter_pass();
                 dp_info.encode(&mut enc, 50);
-                enc.begin_samples(1);
+                let mut enc = enc.begin_samples(1);
                 gt_fmt.encode(&mut enc, &Genotype::unphased(0, 1));
                 dp_fmt.encode(&mut enc, 30);
                 enc.emit().unwrap();
@@ -852,7 +788,7 @@ fn write_bcf(c: &mut Criterion) {
         use noodles::vcf::variant::record_buf::info::field::Value as InfoValue;
         use noodles::vcf::variant::record_buf::samples::sample::Value as SampleValue;
 
-        let noodles_header: vcf::Header = header.to_vcf_text().parse().unwrap();
+        let noodles_header: vcf::Header = setup.header.to_vcf_text().parse().unwrap();
 
         b.iter(|| {
             let mut output = Vec::with_capacity(1_000_000);
