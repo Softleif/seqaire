@@ -342,10 +342,8 @@ fn begin_vcf_record<'a>(
     match qual {
         Some(q) => {
             // r[impl vcf_writer.float_precision]
-            write_float_g(buf, q).map_err(|source| VcfError::FailedToWriteFormattedString {
-                field: SmolStr::from("QUAL"),
-                source,
-            })?;
+            write_float_g(buf, q)
+                .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
         }
         // r[impl vcf_writer.missing_dot]
         None => buf.push(b'.'),
@@ -762,12 +760,8 @@ impl FormatEncoder for RecordEncoder<'_, WithSamples> {
                 vcf_begin_format_field(vcf, id);
                 // r[impl vcf_writer.float_precision]
                 for (i, &v) in values.iter().enumerate() {
-                    write_float_g(&mut vcf.sample_bufs[i], v).map_err(|source| {
-                        VcfError::FailedToWriteFormattedString {
-                            field: SmolStr::from("FORMAT/float"),
-                            source,
-                        }
-                    })?;
+                    write_float_g(&mut vcf.sample_bufs[i], v)
+                        .map_err(|source| VcfError::FailedToWriteFormattedString { source })?;
                 }
             }
         }
