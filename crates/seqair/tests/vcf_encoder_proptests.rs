@@ -38,6 +38,7 @@ struct TestSetup {
 fn make_setup() -> TestSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info = builder
         .register_info(&InfoFieldDef::new(
             "DP",
@@ -46,6 +47,7 @@ fn make_setup() -> TestSetup {
             "Total Depth",
         ))
         .unwrap();
+    let mut builder = builder.formats();
     let gt_fmt = builder
         .register_format(&FormatFieldDef::new(
             "GT",
@@ -62,7 +64,9 @@ fn make_setup() -> TestSetup {
             "Read Depth",
         ))
         .unwrap();
-    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    let mut builder = builder.samples();
+    builder.add_sample("sample1").unwrap();
+    let header = Arc::new(builder.build().unwrap());
     TestSetup { header, contig, dp_info, gt_fmt, dp_fmt }
 }
 

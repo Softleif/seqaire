@@ -8,7 +8,7 @@ r[vcf_header.file_format]
 The header MUST begin with a `##fileformat=VCFvX.Y` line. The default version is VCFv4.3.
 
 r[vcf_header.builder]
-Headers MUST be constructed via a builder pattern. The builder validates all constraints at `build()` time and returns a typed error on violation.
+Headers MUST be constructed via a typestate builder that enforces field registration order at compile time. The builder progresses through phases — Contigs → Filters → Infos → Formats → Samples — and each phase only exposes methods appropriate for that stage. Phase transitions consume the builder and return the next phase; phases may be skipped. `build()` is available from any phase. Duplicate-ID and type-constraint errors are returned as typed errors.
 
 > _[VCF43] §1.1.7 "Contig field format" — `##contig=<ID=name,length=N>`. [BCF2] — contig lines required for BCF, define integer mapping_
 
@@ -37,7 +37,7 @@ r[vcf_header.no_duplicates]
 Duplicate IDs within the same field category (INFO, FORMAT, FILTER, contig) MUST be rejected with a typed error at build time.
 
 r[vcf_header.string_map]
-For BCF output, the header MUST provide a string-to-index dictionary mapping all FILTER, INFO, and FORMAT IDs to integer indices. Contig names use a separate index namespace matching insertion order.
+For BCF output, the header MUST provide a string-to-index dictionary mapping all FILTER, INFO, and FORMAT IDs to integer indices. The dictionary is built incrementally during builder construction; the typestate phase ordering guarantees entries appear in canonical order (PASS at index 0, then remaining FILTERs, then INFO, then FORMAT) without a runtime verification pass. Contig names use a separate index namespace matching insertion order.
 
 r[vcf_header.serialization]
 `to_vcf_text()` MUST emit all meta-information lines (`##`) followed by the `#CHROM` header line. Lines MUST be ordered: fileformat first, then other lines (metadata), then FILTER (PASS first), INFO, FORMAT, contig, then the #CHROM line. This ordering ensures the BCF string dictionary (built by scanning header lines in order) assigns PASS to index 0 and matches the dictionary indices used during encoding.

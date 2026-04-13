@@ -27,16 +27,20 @@
 //! // In production use VcfHeaderBuilder::from_bam_header() to copy contig info.
 //! let mut builder = VcfHeader::builder();
 //! let chr1 = builder.register_contig("chr1", ContigDef { length: Some(248_956_422) })?;
+//! let mut builder = builder.infos();
 //! let dp_info: InfoInt = builder.register_info(
 //!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Total read depth")
 //! )?;
+//! let mut builder = builder.formats();
 //! let gt_fmt: FormatGt = builder.register_format(
 //!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
 //! )?;
 //! let dp_fmt: FormatInt = builder.register_format(
 //!     &FormatFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Sample depth")
 //! )?;
-//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
+//! let mut builder = builder.samples();
+//! builder.add_sample("sample1")?;
+//! let header = Arc::new(builder.build()?);
 //!
 //! // 2. Write to an in-memory buffer (or any `impl Write`)
 //! let mut output = Vec::new();
@@ -77,13 +81,17 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = VcfHeader::builder();
 //! let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) })?;
+//! let mut builder = builder.infos();
 //! let dp: InfoInt = builder.register_info(
 //!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
 //! )?;
+//! let mut builder = builder.formats();
 //! let gt: FormatGt = builder.register_format(
 //!     &FormatFieldDef::<Gt>::new("GT", Number::Count(1), ValueType::String, "Genotype")
 //! )?;
-//! let header = Arc::new(builder.add_sample("sample1")?.build()?);
+//! let mut builder = builder.samples();
+//! builder.add_sample("sample1")?;
+//! let header = Arc::new(builder.build()?);
 //!
 //! let mut buf = Vec::new();
 //! let writer = Writer::new(&mut buf, OutputFormat::Bcf);

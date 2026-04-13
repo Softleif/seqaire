@@ -4,6 +4,7 @@ use super::error::VcfHeaderError;
 use crate::bam::header::BamHeader;
 use indexmap::IndexMap;
 use seqair_types::SmolStr;
+use std::marker::PhantomData;
 
 // r[impl vcf_header.info_def]
 /// Number of values for an INFO or FORMAT field.
@@ -121,11 +122,6 @@ impl StringMap {
     /// Look up the BCF dictionary index for an ID.
     pub fn get(&self, id: &str) -> Option<usize> {
         self.entries.iter().position(|s| s == id)
-    }
-
-    /// Iterate over `(index, id)` pairs.
-    fn iter(&self) -> impl Iterator<Item = (usize, &SmolStr)> {
-        self.entries.iter().enumerate()
     }
 }
 
@@ -277,10 +273,43 @@ impl VcfHeader {
     }
 }
 
+// ── Builder typestate phases ──────────────────────────────────────────
+//
+// The builder progresses through phases: Contigs → Filters → Infos →
+// Formats → Samples.  Each phase only exposes methods for that stage.
+// The BCF string dictionary is built incrementally in the guaranteed-
+// correct order (FILTER → INFO → FORMAT) — no runtime order check needed.
+
+/// Initial phase: set file format, contigs, and metadata.
+#[derive(Debug, Clone, Copy)]
+pub struct Contigs;
+/// Register FILTER definitions (after contigs, before INFO).
+#[derive(Debug, Clone, Copy)]
+pub struct Filters;
+/// Register INFO field definitions (after filters, before FORMAT).
+#[derive(Debug, Clone, Copy)]
+pub struct Infos;
+/// Register FORMAT field definitions (after INFO, before samples).
+#[derive(Debug, Clone, Copy)]
+pub struct Formats;
+/// Add sample names (final phase before build).
+#[derive(Debug, Clone, Copy)]
+pub struct Samples;
+
 // r[impl vcf_header.builder]
-/// Builder for `VcfHeader` with validation at build time.
-#[derive(Debug, Clone)]
-pub struct VcfHeaderBuilder {
+/// Typestate builder for [`VcfHeader`].
+///
+/// Fields must be registered in BCF string dictionary order:
+/// contigs → filters → INFO → FORMAT → samples.  The `Phase` type
+/// parameter tracks the current stage and prevents out-of-order
+/// registration at compile time.
+///
+/// Transition methods ([`filters`](VcfHeaderBuilder::filters),
+/// [`infos`](VcfHeaderBuilder::infos), etc.) consume `self` and return
+/// the next phase.  Phases can be skipped (e.g. go from `Contigs`
+/// straight to `Infos`).  [`build`](VcfHeaderBuilder::build) is
+/// available from every phase.
+pub struct VcfHeaderBuilder<Phase = Contigs> {
     file_format: SmolStr,
     infos: IndexMap<SmolStr, InfoDef>,
     formats: IndexMap<SmolStr, FormatDef>,
@@ -288,50 +317,240 @@ pub struct VcfHeaderBuilder {
     contigs: IndexMap<SmolStr, ContigDef>,
     samples: Vec<SmolStr>,
     other_lines: Vec<SmolStr>,
-    /// Incremental string map, populated by `register_*` methods.
-    /// `None` when only `add_*` methods are used (built fresh in `build()`).
-    string_map: Option<StringMap>,
+    string_map: StringMap,
+    _phase: PhantomData<Phase>,
 }
 
-impl VcfHeaderBuilder {
+// Manual impls to avoid Phase: Debug/Clone bounds from derive macros.
+impl<P> std::fmt::Debug for VcfHeaderBuilder<P> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VcfHeaderBuilder")
+            .field("file_format", &self.file_format)
+            .field("infos", &self.infos)
+            .field("formats", &self.formats)
+            .field("filters", &self.filters)
+            .field("contigs", &self.contigs)
+            .field("samples", &self.samples)
+            .field("other_lines", &self.other_lines)
+            .finish()
+    }
+}
+
+impl<P> Clone for VcfHeaderBuilder<P> {
+    fn clone(&self) -> Self {
+        Self {
+            file_format: self.file_format.clone(),
+            infos: self.infos.clone(),
+            formats: self.formats.clone(),
+            filters: self.filters.clone(),
+            contigs: self.contigs.clone(),
+            samples: self.samples.clone(),
+            other_lines: self.other_lines.clone(),
+            string_map: self.string_map.clone(),
+            _phase: PhantomData,
+        }
+    }
+}
+
+// ── Methods available on every phase ─────────────────────────────────
+
+impl<P> VcfHeaderBuilder<P> {
+    /// Transition to a different phase (private — callers use named methods).
+    fn into_phase<Q>(self) -> VcfHeaderBuilder<Q> {
+        VcfHeaderBuilder {
+            file_format: self.file_format,
+            infos: self.infos,
+            formats: self.formats,
+            filters: self.filters,
+            contigs: self.contigs,
+            samples: self.samples,
+            other_lines: self.other_lines,
+            string_map: self.string_map,
+            _phase: PhantomData,
+        }
+    }
+
+    /// Insert an ID into the string map, returning the dict index.
+    fn insert_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
+        u32::try_from(self.string_map.insert(id.clone())).map_err(|_| VcfHeaderError::TooManyFields)
+    }
+
+    // r[impl vcf_header.builder]
+    // r[impl vcf_header.string_map]
+    /// Finalize the builder and produce a [`VcfHeader`].
+    ///
+    /// Available from any phase — all fields after contigs are optional.
+    #[must_use = "build() returns the header; ignoring it discards all configuration"]
+    pub fn build(self) -> Result<VcfHeader, VcfHeaderError> {
+        Ok(VcfHeader {
+            file_format: self.file_format,
+            infos: self.infos,
+            formats: self.formats,
+            filters: self.filters,
+            contigs: self.contigs,
+            samples: self.samples,
+            other_lines: self.other_lines,
+            string_map: self.string_map,
+        })
+    }
+}
+
+// ── Contigs phase ────────────────────────────────────────────────────
+
+impl VcfHeaderBuilder<Contigs> {
     fn new() -> Self {
+        // PASS is always the first filter and dict index 0.
+        let mut filters = IndexMap::new();
+        filters.insert(
+            SmolStr::from("PASS"),
+            FilterDef { description: SmolStr::from("All filters passed") },
+        );
+        let mut string_map = StringMap::new();
+        string_map.insert(SmolStr::from("PASS"));
+
         Self {
             file_format: SmolStr::from("VCFv4.3"),
             infos: IndexMap::new(),
             formats: IndexMap::new(),
-            filters: IndexMap::new(),
+            filters,
             contigs: IndexMap::new(),
             samples: Vec::new(),
             other_lines: Vec::new(),
-            string_map: None,
+            string_map,
+            _phase: PhantomData,
         }
     }
 
-    pub fn file_format(mut self, version: impl Into<SmolStr>) -> Self {
+    // r[impl vcf_header.file_format]
+    pub fn file_format(&mut self, version: impl Into<SmolStr>) {
         self.file_format = version.into();
-        self
+    }
+
+    pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
+        self.other_lines.push(line.into());
     }
 
     // r[impl vcf_header.contig_required]
     pub fn add_contig(
-        mut self,
+        &mut self,
         name: impl Into<SmolStr>,
         def: ContigDef,
-    ) -> Result<Self, VcfHeaderError> {
+    ) -> Result<(), VcfHeaderError> {
         let name = name.into();
         if self.contigs.contains_key(&name) {
             return Err(VcfHeaderError::DuplicateContig { name });
         }
         self.contigs.insert(name, def);
-        Ok(self)
+        Ok(())
     }
 
-    // r[impl vcf_header.info_def]
-    pub fn add_info(
-        mut self,
+    // r[impl record_encoder.register_contig]
+    /// Register a contig: adds the header entry and returns a resolved [`ContigId`](super::record_encoder::ContigId).
+    pub fn register_contig(
+        &mut self,
+        name: impl Into<SmolStr>,
+        def: ContigDef,
+    ) -> Result<super::record_encoder::ContigId, VcfHeaderError> {
+        let name = name.into();
+        if self.contigs.contains_key(&name) {
+            return Err(VcfHeaderError::DuplicateContig { name });
+        }
+        let tid = u32::try_from(self.contigs.len()).map_err(|_| VcfHeaderError::TooManyContigs)?;
+        self.contigs.insert(name.clone(), def);
+        Ok(super::record_encoder::ContigId { tid, name })
+    }
+
+    // r[impl vcf_header.from_bam_header]
+    /// Build a `VcfHeaderBuilder` from a BAM header, copying contig names and lengths.
+    pub fn from_bam_header(header: &BamHeader) -> Result<Self, VcfHeaderError> {
+        let mut builder = Self::new();
+        for (tid, name) in header.target_names().enumerate() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "BAM header n_ref ≤ 1M (enforced at parse), so tid fits in u32"
+            )]
+            let length = header.target_len(tid as u32);
+            let def = ContigDef { length };
+            builder.add_contig(name, def)?;
+        }
+        Ok(builder)
+    }
+
+    /// Advance to the [`Filters`] phase.
+    pub fn filters(self) -> VcfHeaderBuilder<Filters> {
+        self.into_phase()
+    }
+
+    /// Skip filters, advance to the [`Infos`] phase.
+    pub fn infos(self) -> VcfHeaderBuilder<Infos> {
+        self.into_phase()
+    }
+
+    /// Skip filters and infos, advance to the [`Formats`] phase.
+    pub fn formats(self) -> VcfHeaderBuilder<Formats> {
+        self.into_phase()
+    }
+
+    /// Skip filters, infos, and formats, advance to the [`Samples`] phase.
+    pub fn samples(self) -> VcfHeaderBuilder<Samples> {
+        self.into_phase()
+    }
+}
+
+// ── Filters phase ────────────────────────────────────────────────────
+
+impl VcfHeaderBuilder<Filters> {
+    // r[impl vcf_header.filter_def]
+    pub fn add_filter(
+        &mut self,
         id: impl Into<SmolStr>,
-        def: InfoDef,
-    ) -> Result<Self, VcfHeaderError> {
+        def: FilterDef,
+    ) -> Result<(), VcfHeaderError> {
+        let id = id.into();
+        if self.filters.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFilter { id });
+        }
+        self.filters.insert(id.clone(), def);
+        self.insert_string_map_entry(&id)?;
+        Ok(())
+    }
+
+    // r[impl record_encoder.register]
+    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`](super::record_encoder::FilterId).
+    pub fn register_filter(
+        &mut self,
+        def: &super::record_encoder::FilterFieldDef,
+    ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
+        let id = SmolStr::from(def.name);
+        if self.filters.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFilter { id });
+        }
+        self.filters.insert(id.clone(), FilterDef { description: SmolStr::from(def.description) });
+        let dict_idx = self.insert_string_map_entry(&id)?;
+        Ok(super::record_encoder::FilterId { dict_idx, name: id })
+    }
+
+    /// Advance to the [`Infos`] phase.
+    pub fn infos(self) -> VcfHeaderBuilder<Infos> {
+        self.into_phase()
+    }
+
+    /// Skip infos, advance to the [`Formats`] phase.
+    pub fn formats(self) -> VcfHeaderBuilder<Formats> {
+        self.into_phase()
+    }
+
+    /// Skip infos and formats, advance to the [`Samples`] phase.
+    pub fn samples(self) -> VcfHeaderBuilder<Samples> {
+        self.into_phase()
+    }
+}
+
+// ── Infos phase ──────────────────────────────────────────────────────
+
+impl VcfHeaderBuilder<Infos> {
+    // r[impl vcf_header.info_def]
+    pub fn add_info(&mut self, id: impl Into<SmolStr>, def: InfoDef) -> Result<(), VcfHeaderError> {
         let id = id.into();
         if self.infos.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateInfo { id });
@@ -339,60 +558,12 @@ impl VcfHeaderBuilder {
         if def.typ == ValueType::Flag && def.number != Number::Count(0) {
             return Err(VcfHeaderError::FlagNumberMismatch { id });
         }
-        self.infos.insert(id, def);
-        Ok(self)
+        self.infos.insert(id.clone(), def);
+        self.insert_string_map_entry(&id)?;
+        Ok(())
     }
-
-    // r[impl vcf_header.format_def]
-    pub fn add_format(
-        mut self,
-        id: impl Into<SmolStr>,
-        def: FormatDef,
-    ) -> Result<Self, VcfHeaderError> {
-        let id = id.into();
-        if self.formats.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFormat { id });
-        }
-        if def.typ == ValueType::Flag {
-            return Err(VcfHeaderError::FormatFlagNotAllowed { id });
-        }
-        self.formats.insert(id, def);
-        Ok(self)
-    }
-
-    // r[impl vcf_header.filter_def]
-    pub fn add_filter(
-        mut self,
-        id: impl Into<SmolStr>,
-        def: FilterDef,
-    ) -> Result<Self, VcfHeaderError> {
-        let id = id.into();
-        if self.filters.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFilter { id });
-        }
-        self.filters.insert(id, def);
-        Ok(self)
-    }
-
-    // r[impl vcf_header.sample_names]
-    pub fn add_sample(mut self, name: impl Into<SmolStr>) -> Result<Self, VcfHeaderError> {
-        let name = name.into();
-        if self.samples.contains(&name) {
-            return Err(VcfHeaderError::DuplicateSample { name });
-        }
-        self.samples.push(name);
-        Ok(self)
-    }
-
-    pub fn add_other_line(mut self, line: impl Into<SmolStr>) -> Self {
-        self.other_lines.push(line.into());
-        self
-    }
-
-    // ── Registration methods (return typed keys) ───────────────────────
 
     // r[impl record_encoder.register]
-
     /// Register an INFO field: adds the header entry and returns a resolved typed key.
     pub fn register_info<V>(
         &mut self,
@@ -413,13 +584,46 @@ impl VcfHeaderBuilder {
                 description: SmolStr::from(def.description),
             },
         );
-        let dict_idx = self.ensure_string_map_entry(&id)?;
+        let dict_idx = self.insert_string_map_entry(&id)?;
         Ok(super::record_encoder::InfoKey(
             super::record_encoder::FieldId { dict_idx, name: id },
-            std::marker::PhantomData,
+            PhantomData,
         ))
     }
 
+    /// Advance to the [`Formats`] phase.
+    pub fn formats(self) -> VcfHeaderBuilder<Formats> {
+        self.into_phase()
+    }
+
+    /// Skip formats, advance to the [`Samples`] phase.
+    pub fn samples(self) -> VcfHeaderBuilder<Samples> {
+        self.into_phase()
+    }
+}
+
+// ── Formats phase ────────────────────────────────────────────────────
+
+impl VcfHeaderBuilder<Formats> {
+    // r[impl vcf_header.format_def]
+    pub fn add_format(
+        &mut self,
+        id: impl Into<SmolStr>,
+        def: FormatDef,
+    ) -> Result<(), VcfHeaderError> {
+        let id = id.into();
+        if self.formats.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFormat { id });
+        }
+        if def.typ == ValueType::Flag {
+            return Err(VcfHeaderError::FormatFlagNotAllowed { id });
+        }
+        self.formats.insert(id.clone(), def);
+        self.insert_string_map_entry(&id)?;
+        Ok(())
+    }
+
+    // r[impl record_encoder.register]
     /// Register a FORMAT field: adds the header entry and returns a resolved typed key.
     pub fn register_format<V>(
         &mut self,
@@ -440,138 +644,30 @@ impl VcfHeaderBuilder {
                 description: SmolStr::from(def.description),
             },
         );
-        let dict_idx = self.ensure_string_map_entry(&id)?;
+        let dict_idx = self.insert_string_map_entry(&id)?;
         Ok(super::record_encoder::FormatKey(
             super::record_encoder::FieldId { dict_idx, name: id },
-            std::marker::PhantomData,
+            PhantomData,
         ))
     }
 
-    /// Register a FILTER: adds the header entry and returns a resolved [`FilterId`](super::record_encoder::FilterId).
-    pub fn register_filter(
-        &mut self,
-        def: &super::record_encoder::FilterFieldDef,
-    ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
-        let id = SmolStr::from(def.name);
-        if self.filters.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFilter { id });
-        }
-        self.filters.insert(id.clone(), FilterDef { description: SmolStr::from(def.description) });
-        let dict_idx = self.ensure_string_map_entry(&id)?;
-        Ok(super::record_encoder::FilterId { dict_idx, name: id })
+    /// Advance to the [`Samples`] phase.
+    pub fn samples(self) -> VcfHeaderBuilder<Samples> {
+        self.into_phase()
     }
+}
 
-    // r[impl record_encoder.register_contig]
-    /// Register a contig: adds the header entry and returns a resolved [`ContigId`](super::record_encoder::ContigId).
-    pub fn register_contig(
-        &mut self,
-        name: impl Into<SmolStr>,
-        def: ContigDef,
-    ) -> Result<super::record_encoder::ContigId, VcfHeaderError> {
+// ── Samples phase ────────────────────────────────────────────────────
+
+impl VcfHeaderBuilder<Samples> {
+    // r[impl vcf_header.sample_names]
+    pub fn add_sample(&mut self, name: impl Into<SmolStr>) -> Result<(), VcfHeaderError> {
         let name = name.into();
-        if self.contigs.contains_key(&name) {
-            return Err(VcfHeaderError::DuplicateContig { name });
+        if self.samples.contains(&name) {
+            return Err(VcfHeaderError::DuplicateSample { name });
         }
-        let tid = u32::try_from(self.contigs.len()).map_err(|_| VcfHeaderError::TooManyContigs)?;
-        self.contigs.insert(name.clone(), def);
-        Ok(super::record_encoder::ContigId { tid, name })
-    }
-
-    /// Ensure a string map entry exists, returning the dict index.
-    /// Lazily initializes the string map with PASS at index 0.
-    fn ensure_string_map_entry(&mut self, id: &SmolStr) -> Result<u32, VcfHeaderError> {
-        let map = self.string_map.get_or_insert_with(|| {
-            let mut m = StringMap::new();
-            // PASS must always be at index 0
-            m.insert(SmolStr::from("PASS"));
-            m
-        });
-        u32::try_from(map.insert(id.clone())).map_err(|_| VcfHeaderError::TooManyFields)
-    }
-
-    // r[impl vcf_header.builder]
-    // r[impl vcf_header.string_map]
-    #[must_use = "build() returns the header; ignoring it discards all configuration"]
-    pub fn build(mut self) -> Result<VcfHeader, VcfHeaderError> {
-        // Ensure PASS filter is present and first
-        if !self.filters.contains_key("PASS") {
-            // Insert PASS at position 0
-            let mut new_filters = IndexMap::new();
-            new_filters.insert(
-                SmolStr::from("PASS"),
-                FilterDef { description: SmolStr::from("All filters passed") },
-            );
-            for (id, def) in self.filters {
-                new_filters.insert(id, def);
-            }
-            self.filters = new_filters;
-        }
-
-        // Build BCF string map from scratch in the same order as to_vcf_text()
-        // emits header lines. This ensures dict indices match what noodles/htslib
-        // compute from the header text.
-        // Order: FILTER (PASS first), then INFO, then FORMAT.
-        // r[impl vcf_header.string_map]
-        //
-        // We always rebuild from scratch here, even if register_* methods were
-        // used during construction. The register_* methods return dict indices
-        // eagerly, but those indices are only valid if fields were registered in
-        // canonical order (FILTER→INFO→FORMAT). Rebuilding ensures correctness
-        // regardless of call order, and we verify below that any pre-assigned
-        // indices still match.
-        let mut string_map = StringMap::new();
-        for id in self.filters.keys() {
-            string_map.insert(id.clone());
-        }
-        for id in self.infos.keys() {
-            string_map.insert(id.clone());
-        }
-        for id in self.formats.keys() {
-            string_map.insert(id.clone());
-        }
-
-        // If register_* methods assigned dict indices, verify they match the
-        // canonical order. Mismatches mean fields were registered out of order.
-        if let Some(ref old_map) = self.string_map {
-            for (old_idx, id) in old_map.iter() {
-                if let Some(new_idx) = string_map.get(id)
-                    && old_idx != new_idx
-                {
-                    return Err(VcfHeaderError::DictIndexMismatch {
-                        id: id.clone(),
-                        registered: old_idx,
-                        canonical: new_idx,
-                    });
-                }
-            }
-        }
-
-        Ok(VcfHeader {
-            file_format: self.file_format,
-            infos: self.infos,
-            formats: self.formats,
-            filters: self.filters,
-            contigs: self.contigs,
-            samples: self.samples,
-            other_lines: self.other_lines,
-            string_map,
-        })
-    }
-
-    // r[impl vcf_header.from_bam_header]
-    /// Build a `VcfHeaderBuilder` from a BAM header, copying contig names and lengths.
-    pub fn from_bam_header(header: &BamHeader) -> Result<Self, VcfHeaderError> {
-        let mut builder = Self::new();
-        for (tid, name) in header.target_names().enumerate() {
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "BAM header n_ref ≤ 1M (enforced at parse), so tid fits in u32"
-            )]
-            let length = header.target_len(tid as u32);
-            let def = ContigDef { length };
-            builder = builder.add_contig(name, def)?;
-        }
-        Ok(builder)
+        self.samples.push(name);
+        Ok(())
     }
 }
 
@@ -583,9 +679,10 @@ mod tests {
     // r[verify vcf_header.file_format]
     #[test]
     fn basic_header_build() {
-        let header = VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(248_956_422) })
-            .unwrap()
+        let mut builder = VcfHeader::builder();
+        builder.add_contig("chr1", ContigDef { length: Some(248_956_422) }).unwrap();
+        let mut builder = builder.infos();
+        builder
             .add_info(
                 "DP",
                 InfoDef {
@@ -594,7 +691,9 @@ mod tests {
                     description: SmolStr::from("Total Depth"),
                 },
             )
-            .unwrap()
+            .unwrap();
+        let mut builder = builder.formats();
+        builder
             .add_format(
                 "GT",
                 FormatDef {
@@ -603,11 +702,10 @@ mod tests {
                     description: SmolStr::from("Genotype"),
                 },
             )
-            .unwrap()
-            .add_sample("sample0")
-            .unwrap()
-            .build()
             .unwrap();
+        let mut builder = builder.samples();
+        builder.add_sample("sample0").unwrap();
+        let header = builder.build().unwrap();
 
         assert_eq!(header.file_format(), "VCFv4.3");
         assert!(header.contigs().contains_key("chr1"));
@@ -619,17 +717,17 @@ mod tests {
     // r[verify vcf_header.no_duplicates]
     #[test]
     fn rejects_duplicate_contig() {
-        let result = VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: None })
-            .unwrap()
-            .add_contig("chr1", ContigDef { length: None });
+        let mut builder = VcfHeader::builder();
+        builder.add_contig("chr1", ContigDef { length: None }).unwrap();
+        let result = builder.add_contig("chr1", ContigDef { length: None });
         assert!(result.is_err());
     }
 
     // r[verify vcf_header.no_duplicates]
     #[test]
     fn rejects_duplicate_info() {
-        let result = VcfHeader::builder()
+        let mut builder = VcfHeader::builder().infos();
+        builder
             .add_info(
                 "DP",
                 InfoDef {
@@ -638,22 +736,24 @@ mod tests {
                     description: SmolStr::from("x"),
                 },
             )
-            .unwrap()
-            .add_info(
-                "DP",
-                InfoDef {
-                    number: Number::Count(1),
-                    typ: ValueType::Integer,
-                    description: SmolStr::from("y"),
-                },
-            );
+            .unwrap();
+        let result = builder.add_info(
+            "DP",
+            InfoDef {
+                number: Number::Count(1),
+                typ: ValueType::Integer,
+                description: SmolStr::from("y"),
+            },
+        );
         assert!(result.is_err());
     }
 
     // r[verify vcf_header.no_duplicates]
     #[test]
     fn rejects_duplicate_sample() {
-        let result = VcfHeader::builder().add_sample("s1").unwrap().add_sample("s1");
+        let mut builder = VcfHeader::builder().samples();
+        builder.add_sample("s1").unwrap();
+        let result = builder.add_sample("s1");
         assert!(result.is_err());
     }
 
@@ -670,7 +770,8 @@ mod tests {
     // r[verify vcf_header.string_map]
     #[test]
     fn string_map_pass_is_zero() {
-        let header = VcfHeader::builder()
+        let mut builder = VcfHeader::builder().infos();
+        builder
             .add_info(
                 "DP",
                 InfoDef {
@@ -679,9 +780,8 @@ mod tests {
                     description: SmolStr::from("Depth"),
                 },
             )
-            .unwrap()
-            .build()
             .unwrap();
+        let header = builder.build().unwrap();
 
         assert_eq!(header.string_map().get("PASS"), Some(0));
         assert_eq!(header.string_map().get("DP"), Some(1));
@@ -690,7 +790,8 @@ mod tests {
     // r[verify vcf_header.info_def]
     #[test]
     fn flag_requires_number_zero() {
-        let result = VcfHeader::builder().add_info(
+        let mut builder = VcfHeader::builder().infos();
+        let result = builder.add_info(
             "DB",
             InfoDef {
                 number: Number::Count(1),
@@ -701,7 +802,7 @@ mod tests {
         assert!(result.is_err());
 
         // Number=0 + Flag should work
-        let result = VcfHeader::builder().add_info(
+        let result = builder.add_info(
             "DB",
             InfoDef {
                 number: Number::Count(0),
@@ -715,7 +816,8 @@ mod tests {
     // r[verify vcf_header.format_def]
     #[test]
     fn format_rejects_flag() {
-        let result = VcfHeader::builder().add_format(
+        let mut builder = VcfHeader::builder().formats();
+        let result = builder.add_format(
             "X",
             FormatDef {
                 number: Number::Count(0),
@@ -729,9 +831,10 @@ mod tests {
     // r[verify vcf_header.serialization]
     #[test]
     fn serialization_format() {
-        let header = VcfHeader::builder()
-            .add_contig("chr1", ContigDef { length: Some(1000) })
-            .unwrap()
+        let mut builder = VcfHeader::builder();
+        builder.add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut builder = builder.infos();
+        builder
             .add_info(
                 "DP",
                 InfoDef {
@@ -740,11 +843,10 @@ mod tests {
                     description: SmolStr::from("Depth"),
                 },
             )
-            .unwrap()
-            .add_sample("S1")
-            .unwrap()
-            .build()
             .unwrap();
+        let mut builder = builder.samples();
+        builder.add_sample("S1").unwrap();
+        let header = builder.build().unwrap();
 
         let text = header.to_vcf_text();
         assert!(text.starts_with("##fileformat=VCFv4.3\n"));
@@ -764,50 +866,22 @@ mod tests {
     }
 
     // r[verify vcf_header.string_map]
-    #[test]
-    fn register_out_of_order_detected() {
-        use crate::vcf::record_encoder::{
-            FilterFieldDef, FormatFieldDef, Gt, InfoFieldDef, Scalar,
-        };
-
-        let mut builder =
-            VcfHeader::builder().add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
-
-        // Register INFO before FILTER — wrong order
-        builder
-            .register_info(&InfoFieldDef::<Scalar<i32>>::new(
-                "DP",
-                Number::Count(1),
-                ValueType::Integer,
-                "Depth",
-            ))
-            .unwrap();
-        builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
-        builder
-            .register_format(&FormatFieldDef::<Gt>::new(
-                "GT",
-                Number::Count(1),
-                ValueType::String,
-                "Genotype",
-            ))
-            .unwrap();
-
-        let err = builder.add_sample("S1").unwrap().build();
-        assert!(err.is_err(), "build() should reject out-of-order register calls");
-    }
-
-    // r[verify vcf_header.string_map]
+    // Typestate now prevents out-of-order registration at compile time —
+    // the old `register_out_of_order_detected` runtime test is replaced
+    // by this compile-time guarantee test.
     #[test]
     fn register_canonical_order_accepted() {
         use crate::vcf::record_encoder::{
             FilterFieldDef, FormatFieldDef, Gt, InfoFieldDef, Scalar,
         };
 
-        let mut builder =
-            VcfHeader::builder().add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut builder = VcfHeader::builder();
+        builder.add_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
 
-        // Register in canonical order: FILTER → INFO → FORMAT
+        // Typestate enforces: Contigs → Filters → Infos → Formats → Samples
+        let mut builder = builder.filters();
         builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
+        let mut builder = builder.infos();
         builder
             .register_info(&InfoFieldDef::<Scalar<i32>>::new(
                 "DP",
@@ -816,6 +890,7 @@ mod tests {
                 "Depth",
             ))
             .unwrap();
+        let mut builder = builder.formats();
         builder
             .register_format(&FormatFieldDef::<Gt>::new(
                 "GT",
@@ -824,8 +899,10 @@ mod tests {
                 "Genotype",
             ))
             .unwrap();
+        let mut builder = builder.samples();
+        builder.add_sample("S1").unwrap();
 
-        let header = builder.add_sample("S1").unwrap().build();
+        let header = builder.build();
         assert!(header.is_ok(), "canonical order should succeed");
     }
 }

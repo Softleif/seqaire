@@ -40,10 +40,10 @@ A `FieldDescription` trait MUST provide read access to name, number, value type,
 ## Field Registration
 
 r[record_encoder.register]
-`VcfHeaderBuilder` MUST provide `register_info`, `register_format`, and `register_filter` methods that accept a field definition, add the corresponding header entry, and return a resolved typed key. This combines header construction and key resolution in a single step, eliminating the possibility of declaring a header field without resolving its key or vice versa.
+`VcfHeaderBuilder` MUST provide `register_info`, `register_format`, and `register_filter` methods that accept a field definition, add the corresponding header entry, and return a resolved typed key. Each method is only available in its corresponding typestate phase (`register_filter` in the Filters phase, `register_info` in the Infos phase, `register_format` in the Formats phase). This combines header construction and key resolution in a single step, eliminating the possibility of declaring a header field without resolving its key or vice versa, and enforces BCF string dictionary ordering at compile time.
 
 r[record_encoder.register_contig]
-`VcfHeaderBuilder` MUST provide a `register_contig` method that adds a contig to the header and returns a `ContigId` carrying both the integer tid and the contig name.
+`VcfHeaderBuilder` MUST provide a `register_contig` method (available in the Contigs phase) that adds a contig to the header and returns a `ContigId` carrying both the integer tid and the contig name.
 
 ## Field Identifiers and Keys
 
