@@ -411,7 +411,7 @@ mod tests {
         reader.read_exact_into(&mut rec_data).unwrap();
         let rec = super::super::record::BamRecord::decode(&rec_data).unwrap();
         assert_eq!(&*rec.qname, b"read1");
-        assert_eq!(rec.pos.get(), 100);
+        assert_eq!(*rec.pos, 100);
         assert_eq!(rec.mapq, 30);
 
         // Read second record
@@ -420,7 +420,7 @@ mod tests {
         reader.read_exact_into(&mut rec_data).unwrap();
         let rec = super::super::record::BamRecord::decode(&rec_data).unwrap();
         assert_eq!(&*rec.qname, b"read2");
-        assert_eq!(rec.pos.get(), 200);
+        assert_eq!(*rec.pos, 200);
     }
 
     // r[verify bam_writer.error_poisoning]

@@ -57,7 +57,7 @@ proptest! {
         for col in engine {
             let pos = col.pos().as_usize();
             let exp = expected_depth.get(pos).copied().unwrap_or(0);
-            prop_assert_eq!(col.depth(), exp, "depth wrong at pos {}", col.pos().get());
+            prop_assert_eq!(col.depth(), exp, "depth wrong at pos {}", col.pos());
         }
     }
 }
@@ -105,7 +105,7 @@ fn single_arena_get_per_record_entry_still_correct() {
     // Only the mapq=60 read should pass the filter
     for col in &columns {
         if col.pos() < Pos0::new(10).unwrap() {
-            assert_eq!(col.depth(), 1, "only high-mapq read at pos {}", col.pos().get());
+            assert_eq!(col.depth(), 1, "only high-mapq read at pos {}", col.pos());
         }
     }
     // At pos 10+, still only 1 because second read is filtered

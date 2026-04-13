@@ -192,7 +192,7 @@ impl std::fmt::Debug for CigarMapping {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => f
                 .debug_struct("Linear")
-                .field("rec_pos", &rec_pos.get())
+                .field("rec_pos", &rec_pos)
                 .field("query_offset", query_offset)
                 .field("match_len", match_len)
                 .finish(),

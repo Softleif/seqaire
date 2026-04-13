@@ -159,7 +159,7 @@ fn pileup_positions_match() {
     let columns: Vec<_> = engine.collect();
 
     let hts_positions: Vec<u32> = hts_columns.iter().map(|c| c.pos).collect();
-    let positions: Vec<u32> = columns.iter().map(|c| c.pos().get()).collect();
+    let positions: Vec<u32> = columns.iter().map(|c| *c.pos()).collect();
 
     assert_eq!(
         positions.len(),
@@ -291,7 +291,7 @@ fn total_depth_with_deletions_matches_htslib() {
 
     assert_eq!(hts_cols.len(), seq_cols.len(), "column count mismatch");
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
-        assert_eq!(hts.pos, seq.pos().get(), "pos mismatch at column {i}");
+        assert_eq!(hts.pos, *seq.pos(), "pos mismatch at column {i}");
         assert_eq!(
             hts.depth as usize,
             seq.depth(),
@@ -315,7 +315,7 @@ fn deletion_ops_match_htslib() {
 
     // Build position lookup for seqair columns to enable anchor→deletion cross-validation.
     let seq_by_pos: std::collections::HashMap<u32, &seqair::bam::PileupColumn> =
-        seq_cols.iter().map(|c| (c.pos().get(), c)).collect();
+        seq_cols.iter().map(|c| (*c.pos(), c)).collect();
 
     for (i, (hts, seq)) in hts_cols.iter().zip(seq_cols.iter()).enumerate() {
         let hts_del = hts.alignments.iter().filter(|a| a.is_del).count();

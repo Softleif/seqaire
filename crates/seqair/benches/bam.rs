@@ -239,7 +239,7 @@ fn bam_roundtrip(c: &mut Criterion) {
 
                 let rec = OwnedBamRecord {
                     ref_id: tid as i32,
-                    pos: i64::from(slim.pos.get()),
+                    pos: slim.pos.as_i64(),
                     mapq: slim.mapq,
                     flags: slim.flags,
                     next_ref_id: -1,

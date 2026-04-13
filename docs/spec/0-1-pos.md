@@ -68,8 +68,8 @@ Coordinate system conversion MUST only occur through `to_one_based()` and `to_ze
 
 ## Accessors
 
-r[pos.get]
-`pos.get() -> u32` MUST return the raw value in the position's native coordinate system.
+r[pos.as_i32]
+`pos.as_i32() -> i32` MUST return the raw value as `i32`.
 
 r[pos.as_usize]
 `pos.as_usize() -> usize` MUST return the raw value as `usize` for array indexing.
@@ -105,4 +105,4 @@ All accessor methods and conversion methods MUST be `#[must_use]`.
 ## Niche optimization
 
 r[pos.niche]
-`Pos<S>` SHOULD use a niche-optimized inner type (e.g., via the `nonmax` crate's `NonMaxU32`) so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). The value `u32::MAX` is reserved as the niche and MUST NOT be a valid position. This is acceptable because the SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3, §4.2], well below `u32::MAX` (~4.3B).
+`Pos<S>` SHOULD use a niche-optimized inner type so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). This is acceptable because the SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3, §4.2], well below `u32::MAX` (~4.3B).
