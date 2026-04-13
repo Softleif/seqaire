@@ -36,10 +36,10 @@ impl fmt::Display for RegionString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.chromosome)?;
         if let Some(start) = self.start {
-            write!(f, ":{}", start.get())?;
+            write!(f, ":{}", start)?;
         }
         if let Some(end) = self.end {
-            write!(f, "-{}", end.get())?;
+            write!(f, "-{}", end)?;
         }
         Ok(())
     }
@@ -134,14 +134,12 @@ mod hts {
             match (region.start, region.end) {
                 (Some(start), Some(end)) => FetchDefinition::from((
                     chromosome,
-                    i64::from(start.to_zero_based().get()),
-                    i64::from(end.get()),
+                    start.to_zero_based().as_i64(),
+                    end.as_i64(),
                 )),
-                (Some(start), None) => FetchDefinition::from((
-                    chromosome,
-                    i64::from(start.to_zero_based().get()),
-                    i64::MAX,
-                )),
+                (Some(start), None) => {
+                    FetchDefinition::from((chromosome, start.to_zero_based().as_i64(), i64::MAX))
+                }
                 (None, None) => FetchDefinition::from(chromosome),
                 (None, Some(_)) => {
                     unreachable!("End position cannot be specified without a start position")
@@ -316,13 +314,13 @@ mod tests {
                 let after_colon = display.split(':').nth(1).unwrap_or("");
                 let start_str = after_colon.split('-').next().unwrap_or("");
                 let parsed_start: u32 = start_str.parse().expect("start in display must be numeric");
-                proptest::prop_assert_eq!(parsed_start, start.get());
+                proptest::prop_assert_eq!(parsed_start, *start);
             }
             if let Some(end) = parsed.end {
                 proptest::prop_assert!(display.contains('-'), "display missing '-': {display}");
                 let after_dash = display.split('-').nth(1).unwrap_or("");
                 let parsed_end: u32 = after_dash.parse().expect("end in display must be numeric");
-                proptest::prop_assert_eq!(parsed_end, end.get());
+                proptest::prop_assert_eq!(parsed_end, *end);
             }
             // can be used as a FetchDefinition for bam
             #[cfg(feature = "hts-compat")]

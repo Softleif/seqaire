@@ -604,7 +604,7 @@ fn realignment_workflow_with_real_bam() {
     let orig_qual: Vec<u8> = store.qual(0).to_vec();
     let orig_pos = store.record(0).pos;
 
-    let new_pos = Pos0::new(orig_pos.get().saturating_sub(10)).unwrap();
+    let new_pos = Pos0::new(orig_pos.saturating_sub(10)).unwrap();
     store.set_alignment(0, new_pos, &orig_cigar).unwrap();
 
     assert_eq!(store.record(0).pos, new_pos);

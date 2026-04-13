@@ -228,12 +228,7 @@ impl Alleles {
             target_type: "i32",
         })?;
         // r[impl bcf_writer.coordinate_system]
-        enc.pos_0based =
-            i32::try_from(pos.to_zero_based().get()).map_err(|_| VcfError::ValueOverflow {
-                field: "pos",
-                value: u64::from(pos.to_zero_based().get()),
-                target_type: "i32",
-            })?;
+        enc.pos_0based = pos.to_zero_based().as_i32();
         enc.rlen = i32::try_from(self.rlen()).map_err(|_| VcfError::ValueOverflow {
             field: "rlen",
             value: self.rlen() as u64,

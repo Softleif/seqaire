@@ -243,7 +243,7 @@ impl OwnedBamRecord {
 
         Ok(OwnedBamRecord {
             ref_id: h.tid,
-            pos: i64::from(h.pos.get().cast_signed()),
+            pos: h.pos.as_i64(),
             mapq: h.mapq,
             flags: h.flags,
             next_ref_id,
@@ -595,7 +595,7 @@ mod tests {
         let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
 
         assert_eq!(decoded.tid, 0);
-        assert_eq!(decoded.pos.get(), 100);
+        assert_eq!(*decoded.pos, 100);
         assert_eq!(decoded.mapq, 30);
         assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);

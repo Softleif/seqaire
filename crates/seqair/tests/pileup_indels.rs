@@ -50,7 +50,7 @@ fn deletion_positions_have_deletion_op() {
         assert!(
             matches!(aln.op, PileupOp::Match { .. }),
             "pos {} should be Match, got {:?}",
-            col.pos().get(),
+            col.pos(),
             aln.op
         );
     }
@@ -61,7 +61,7 @@ fn deletion_positions_have_deletion_op() {
         .filter(|c| c.pos() >= Pos0::new(110).unwrap() && c.pos() <= Pos0::new(114).unwrap())
     {
         let aln = col.alignments().next().unwrap();
-        assert!(aln.is_del(), "pos {} should be Deletion, got {:?}", col.pos().get(), aln.op);
+        assert!(aln.is_del(), "pos {} should be Deletion, got {:?}", col.pos(), aln.op);
         assert_eq!(aln.qpos(), None, "deletion should have no qpos");
         assert_eq!(aln.base(), None, "deletion should have no base");
         assert_eq!(aln.qual(), None, "deletion should have no qual");
@@ -76,7 +76,7 @@ fn deletion_positions_have_deletion_op() {
         assert!(
             matches!(aln.op, PileupOp::Match { .. }),
             "pos {} should be Match, got {:?}",
-            col.pos().get(),
+            col.pos(),
             aln.op
         );
     }
@@ -407,12 +407,12 @@ proptest! {
             let aln = col.alignments().next().unwrap();
             if covered.contains(&col.pos().as_i64()) {
                 prop_assert!(aln.qpos().is_some(),
-                    "pos {} is covered (M/=/X) but has no qpos", col.pos().get());
+                    "pos {} is covered (M/=/X) but has no qpos", col.pos());
             } else {
                 prop_assert!(aln.qpos().is_none(),
-                    "pos {} is not covered (D/N) but has qpos {:?}", col.pos().get(), aln.qpos());
+                    "pos {} is not covered (D/N) but has qpos {:?}", col.pos(), aln.qpos());
                 prop_assert!(aln.is_del() || aln.is_refskip(),
-                    "pos {} is not covered but op is {:?}", col.pos().get(), aln.op);
+                    "pos {} is not covered but op is {:?}", col.pos(), aln.op);
             }
         }
     }
@@ -465,11 +465,11 @@ proptest! {
             let aln = col.alignments().next().unwrap();
             if aln.is_del() {
                 prop_assert!(aln.del_len() > 0,
-                    "pos {}: Deletion op must have del_len > 0", col.pos().get());
+                    "pos {}: Deletion op must have del_len > 0", col.pos());
             } else {
                 prop_assert_eq!(aln.del_len(), 0,
                     "pos {}: non-Deletion op {:?} must have del_len == 0, got {}",
-                    col.pos().get(), aln.op, aln.del_len());
+                    col.pos(), aln.op, aln.del_len());
             }
         }
     }
@@ -497,8 +497,8 @@ proptest! {
                     if !a.is_del() { break; }
                     prop_assert_eq!(a.del_len(), expected_del_len,
                         "pos {}: del_len {} differs from first deletion pos {} del_len {}",
-                        columns[i].pos().get(), a.del_len(),
-                        columns[start].pos().get(), expected_del_len);
+                        columns[i].pos(), a.del_len(),
+                        columns[start].pos(), expected_del_len);
                     i += 1;
                 }
                 // The number of consecutive deletion columns must equal del_len

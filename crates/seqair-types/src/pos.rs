@@ -9,15 +9,10 @@
 //! Valid positions are `0..=i32::MAX` (for `Pos<Zero>`) or `1..=i32::MAX`
 //! (for `Pos<One>`). This cap matches BAM/CRAM/BCF which store positions as
 //! `i32`, and makes `as_i32()` infallible.
-//!
-//! The internal storage is `NonMaxU32`, so `u32::MAX` is reserved as the niche.
-//! This makes `Option<Pos<S>>` the same size as `Pos<S>` (4 bytes).
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::ops::Sub;
-
-use nonmax::NonMaxU32;
+use std::ops::{Deref, Sub};
 
 /// Maximum valid raw value for any `Pos`: `i32::MAX` (2,147,483,647).
 ///
@@ -71,7 +66,7 @@ pub type Pos1 = Pos<One>;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
 pub struct Pos<S> {
-    value: NonMaxU32,
+    value: u32,
     _system: PhantomData<S>,
 }
 
@@ -105,11 +100,7 @@ impl Pos<Zero> {
         if value > POS_MAX {
             return None;
         }
-        // value ≤ i32::MAX < u32::MAX, so NonMaxU32 invariant always holds.
-        match NonMaxU32::new(value) {
-            Some(v) => Some(Self { value: v, _system: PhantomData }),
-            None => None,
-        }
+        Some(Self { value, _system: PhantomData })
     }
 
     // r[impl pos.to_one_based]
@@ -117,12 +108,11 @@ impl Pos<Zero> {
     /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
     /// 1-based result would exceed `i32::MAX`.
     #[inline]
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "value ≤ i32::MAX, so + 1 ≤ i32::MAX + 1 < u32::MAX"
-    )]
     pub const fn to_one_based(self) -> Result<Pos<One>, PosOverflow> {
-        let new_val = self.value.get() + 1;
+        let Some(new_val) = self.value.checked_add(1) else {
+            // impossible by construction
+            return Err(PosOverflow);
+        };
         match Pos::<One>::new(new_val) {
             Some(v) => Ok(v),
             None => Err(PosOverflow),
@@ -149,11 +139,7 @@ impl Pos<One> {
         if value == 0 || value > POS_MAX {
             return None;
         }
-        // value is 1..=i32::MAX, well below u32::MAX.
-        match NonMaxU32::new(value) {
-            Some(v) => Some(Self { value: v, _system: PhantomData }),
-            None => None,
-        }
+        Some(Self { value, _system: PhantomData })
     }
 
     // r[impl pos.to_zero_based]
@@ -161,13 +147,12 @@ impl Pos<One> {
     /// Convert to 0-based. Infallible: 1-based values are in `1..=i32::MAX`,
     /// so subtracting 1 gives `0..=i32::MAX - 1`, always valid.
     #[inline]
-    #[expect(clippy::arithmetic_side_effects, reason = "value ≥ 1, so - 1 ≥ 0")]
     pub const fn to_zero_based(self) -> Pos<Zero> {
-        let new_val = self.value.get() - 1;
-        match NonMaxU32::new(new_val) {
-            Some(v) => Pos { value: v, _system: PhantomData },
-            None => unreachable!(),
-        }
+        let Some(new_val) = self.value.checked_sub(1) else {
+            // always >0 by construction
+            unreachable!()
+        };
+        Pos { value: new_val, _system: PhantomData }
     }
 
     /// Maximum valid 1-based position (`i32::MAX`).
@@ -182,22 +167,13 @@ impl Pos<One> {
 // ---- Common methods (both systems) ----
 
 impl<S> Pos<S> {
-    // r[impl pos.get]
-    // r[impl pos.must_use]
-    /// Raw u32 value in the position's native coordinate system.
-    #[inline]
-    #[must_use]
-    pub const fn get(self) -> u32 {
-        self.value.get()
-    }
-
     // r[impl pos.as_i32]
     /// Raw value as `i32`. Infallible because all valid positions are `<= i32::MAX`.
     #[inline]
     #[must_use]
     #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
     pub const fn as_i32(self) -> i32 {
-        self.value.get() as i32
+        self.value as i32
     }
 
     // r[impl pos.as_usize]
@@ -205,7 +181,7 @@ impl<S> Pos<S> {
     #[inline]
     #[must_use]
     pub const fn as_usize(self) -> usize {
-        self.value.get() as usize
+        self.value as usize
     }
 
     // r[impl pos.as_i64]
@@ -213,14 +189,14 @@ impl<S> Pos<S> {
     #[inline]
     #[must_use]
     pub const fn as_i64(self) -> i64 {
-        self.value.get() as i64
+        self.value as i64
     }
 
     /// Convenience for 64-bit arithmetic: returns the raw value as u64.
     #[inline]
     #[must_use]
     pub const fn as_u64(self) -> u64 {
-        self.value.get() as u64
+        self.value as u64
     }
 
     // r[impl pos.add_offset]
@@ -232,12 +208,12 @@ impl<S> Pos<S> {
         reason = "result is checked to be in 0..=i32::MAX"
     )]
     pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
-        let result = i64::from(self.value.get()).wrapping_add(offset.0);
+        let result = i64::from(self.value).wrapping_add(offset.0);
         if result < 0 || result > i64::from(POS_MAX) {
             return None;
         }
-        // result is in 0..=i32::MAX, safe for NonMaxU32.
-        NonMaxU32::new(result as u32).map(|v| Self { value: v, _system: PhantomData })
+        // result is in 0..=i32::MAX
+        Some(Self { value: result as u32, _system: PhantomData })
     }
 
     // r[impl pos.sub_offset]
@@ -246,6 +222,14 @@ impl<S> Pos<S> {
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
         let negated = Offset(offset.0.checked_neg()?);
         self.checked_add_offset(negated)
+    }
+}
+
+impl<S> Deref for Pos<S> {
+    type Target = u32;
+    #[inline]
+    fn deref(&self) -> &u32 {
+        &self.value
     }
 }
 
@@ -258,7 +242,7 @@ impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset(i64::from(self.value.get()).wrapping_sub(i64::from(rhs.value.get())))
+        Offset(i64::from(self.value).wrapping_sub(i64::from(rhs.value)))
     }
 }
 
@@ -311,7 +295,7 @@ impl Offset {
 impl<S> From<Pos<S>> for u32 {
     #[inline]
     fn from(pos: Pos<S>) -> u32 {
-        pos.value.get()
+        pos.value
     }
 }
 
@@ -319,28 +303,28 @@ impl<S> From<Pos<S>> for i32 {
     #[inline]
     #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
     fn from(pos: Pos<S>) -> i32 {
-        pos.value.get() as i32
+        pos.value as i32
     }
 }
 
 impl<S> From<Pos<S>> for u64 {
     #[inline]
     fn from(pos: Pos<S>) -> u64 {
-        u64::from(pos.value.get())
+        u64::from(pos.value)
     }
 }
 
 impl<S> From<Pos<S>> for i64 {
     #[inline]
     fn from(pos: Pos<S>) -> i64 {
-        i64::from(pos.value.get())
+        i64::from(pos.value)
     }
 }
 
 impl<S> From<Pos<S>> for usize {
     #[inline]
     fn from(pos: Pos<S>) -> usize {
-        pos.value.get() as usize
+        pos.value as usize
     }
 }
 
@@ -354,10 +338,7 @@ impl TryFrom<i32> for Pos<Zero> {
             return Err(PosOverflow);
         }
         // 0..=i32::MAX always valid.
-        Ok(Self {
-            value: NonMaxU32::new(value as u32).expect("BUG: non-negative i32 is valid NonMaxU32"),
-            _system: PhantomData,
-        })
+        Ok(Self { value: value as u32, _system: PhantomData })
     }
 }
 
@@ -370,10 +351,7 @@ impl TryFrom<i32> for Pos<One> {
         if value < 1 {
             return Err(PosOverflow);
         }
-        Ok(Self {
-            value: NonMaxU32::new(value as u32).expect("BUG: positive i32 is valid NonMaxU32"),
-            _system: PhantomData,
-        })
+        Ok(Self { value: value as u32, _system: PhantomData })
     }
 }
 
@@ -445,13 +423,13 @@ impl TryFrom<u64> for Pos<One> {
 
 impl fmt::Debug for Pos<Zero> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pos0({})", self.value.get())
+        write!(f, "Pos0({})", self.value)
     }
 }
 
 impl fmt::Debug for Pos<One> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Pos1({})", self.value.get())
+        write!(f, "Pos1({})", self.value)
     }
 }
 
@@ -504,7 +482,7 @@ mod tests {
     fn zero_based_roundtrip() {
         let z = Pos0::new(100).unwrap();
         let o = z.to_one_based().unwrap();
-        assert_eq!(o.get(), 101);
+        assert_eq!(*o, 101);
         assert_eq!(o.to_zero_based(), z);
     }
 
@@ -514,7 +492,7 @@ mod tests {
     fn one_based_roundtrip() {
         let o = Pos1::new(1).unwrap();
         let z = o.to_zero_based();
-        assert_eq!(z.get(), 0);
+        assert_eq!(*z, 0);
         assert_eq!(z.to_one_based().unwrap(), o);
     }
 
@@ -543,7 +521,7 @@ mod tests {
     fn pos_plus_offset() {
         let p = Pos0::new(10).unwrap();
         let q = p.checked_add_offset(Offset::new(5)).unwrap();
-        assert_eq!(q.get(), 15);
+        assert_eq!(*q, 15);
     }
 
     // r[verify pos.sub_offset]
@@ -551,7 +529,7 @@ mod tests {
     fn pos_minus_offset() {
         let p = Pos0::new(10).unwrap();
         let q = p.checked_sub_offset(Offset::new(3)).unwrap();
-        assert_eq!(q.get(), 7);
+        assert_eq!(*q, 7);
     }
 
     // r[verify pos.try_from]
@@ -565,9 +543,9 @@ mod tests {
     // r[verify pos.try_from]
     #[test]
     fn try_from_i32_accepts_valid() {
-        assert_eq!(Pos0::try_from(0i32).unwrap().get(), 0);
-        assert_eq!(Pos1::try_from(1i32).unwrap().get(), 1);
-        assert_eq!(Pos0::try_from(100i32).unwrap().get(), 100);
+        assert_eq!(*Pos0::try_from(0i32).unwrap(), 0);
+        assert_eq!(*Pos1::try_from(1i32).unwrap(), 1);
+        assert_eq!(*Pos0::try_from(100i32).unwrap(), 100);
     }
 
     // r[verify pos.try_from]
@@ -589,9 +567,9 @@ mod tests {
     // r[verify pos.try_from]
     #[test]
     fn try_from_i64_accepts_valid() {
-        assert_eq!(Pos0::try_from(0i64).unwrap().get(), 0);
-        assert_eq!(Pos1::try_from(1i64).unwrap().get(), 1);
-        assert_eq!(Pos0::try_from(100i64).unwrap().get(), 100);
+        assert_eq!(*Pos0::try_from(0i64).unwrap(), 0);
+        assert_eq!(*Pos1::try_from(1i64).unwrap(), 1);
+        assert_eq!(*Pos0::try_from(100i64).unwrap(), 100);
     }
 
     // r[verify pos.try_from]
@@ -602,21 +580,20 @@ mod tests {
         assert!(Pos0::try_from(i32::MAX as u64 + 1).is_err());
         assert!(Pos1::try_from(0u64).is_err(), "Pos1 rejects 0");
         assert!(Pos1::try_from(i32::MAX as u64 + 1).is_err());
-        assert_eq!(Pos1::try_from(1u64).unwrap().get(), 1);
+        assert_eq!(*Pos1::try_from(1u64).unwrap(), 1);
     }
 
     // r[verify pos.try_from]
     #[test]
     fn try_from_u32() {
-        assert_eq!(Pos0::try_from(0u32).unwrap().get(), 0);
-        assert_eq!(Pos0::try_from(i32::MAX as u32).unwrap().get(), i32::MAX as u32);
+        assert_eq!(*Pos0::try_from(0u32).unwrap(), 0);
+        assert_eq!(*Pos0::try_from(i32::MAX as u32).unwrap(), i32::MAX as u32);
         assert!(Pos0::try_from(i32::MAX as u32 + 1).is_err());
         assert!(Pos1::try_from(0u32).is_err());
-        assert_eq!(Pos1::try_from(1u32).unwrap().get(), 1);
+        assert_eq!(*Pos1::try_from(1u32).unwrap(), 1);
         assert!(Pos1::try_from(i32::MAX as u32 + 1).is_err());
     }
 
-    // r[verify pos.as_i32]
     #[test]
     fn as_i32_roundtrips() {
         let p = Pos0::new(42).unwrap();
@@ -657,13 +634,6 @@ mod tests {
         assert_eq!(std::mem::size_of::<Pos1>(), std::mem::size_of::<u32>());
     }
 
-    // r[verify pos.niche]
-    #[test]
-    fn option_pos_same_size_as_pos() {
-        assert_eq!(std::mem::size_of::<Option<Pos0>>(), std::mem::size_of::<Pos0>());
-        assert_eq!(std::mem::size_of::<Option<Pos0>>(), 4);
-    }
-
     // r[verify pos.derives]
     #[test]
     fn debug_shows_coordinate_system() {
@@ -677,14 +647,14 @@ mod tests {
     #[test]
     fn max_value_zero() {
         let m = Pos0::max_value();
-        assert_eq!(m.get(), I32_MAX_U32);
+        assert_eq!(*m, I32_MAX_U32);
     }
 
     // r[verify pos.niche]
     #[test]
     fn max_value_one() {
         let m = Pos1::max_value();
-        assert_eq!(m.get(), I32_MAX_U32);
+        assert_eq!(*m, I32_MAX_U32);
     }
 
     #[test]
@@ -733,7 +703,7 @@ mod tests {
     #[test]
     fn checked_sub_offset_works() {
         let p = Pos0::new(10).unwrap();
-        assert_eq!(p.checked_sub_offset(Offset::new(3)).unwrap().get(), 7);
+        assert_eq!(*p.checked_sub_offset(Offset::new(3)).unwrap(), 7);
         assert!(p.checked_sub_offset(Offset::new(11)).is_none());
     }
 
@@ -790,13 +760,6 @@ mod tests {
             prop_assert_eq!(off.get(), i64::from(a) - i64::from(b));
         }
 
-        // r[verify pos.niche]
-        #[test]
-        fn option_pos_niche_always_4_bytes(v in 0u32..=I32_MAX_U32) {
-            let p = Pos0::new(v);
-            assert_eq!(std::mem::size_of_val(&p), 4);
-        }
-
         #[test]
         fn new_never_accepts_above_i32_max(v in (I32_MAX_U32 + 1)..=u32::MAX) {
             prop_assert!(Pos0::new(v).is_none());
@@ -812,7 +775,7 @@ mod tests {
             if let Some(p) = Pos0::new(v)
                 && let Some(result) = p.checked_add_offset(Offset::new(off))
             {
-                prop_assert!(result.get() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
+                prop_assert!(*result <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
             }
         }
 
