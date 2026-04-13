@@ -7,7 +7,7 @@ use super::{
     index::{FaiError, FastaIndex},
 };
 use crate::bam::bgzf::{BgzfError, BgzfReader};
-use seqair_types::{Pos, SmolStr, Zero};
+use seqair_types::{Pos0, SmolStr};
 use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -232,8 +232,8 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
     pub fn fetch_seq(
         &mut self,
         name: &str,
-        start: Pos<Zero>,
-        stop: Pos<Zero>,
+        start: Pos0,
+        stop: Pos0,
     ) -> Result<Vec<u8>, FastaError> {
         let mut buf = Vec::new();
         self.fetch_seq_into(name, start, stop, &mut buf)?;
@@ -245,8 +245,8 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
     pub fn fetch_seq_into(
         &mut self,
         name: &str,
-        start: Pos<Zero>,
-        stop: Pos<Zero>,
+        start: Pos0,
+        stop: Pos0,
         out: &mut Vec<u8>,
     ) -> Result<(), FastaError> {
         out.clear();
@@ -395,12 +395,12 @@ fn detect_bgzf(path: &Path) -> Result<bool, FastaError> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic is not safety-critical")]
 mod tests {
     use super::*;
-    use seqair_types::Pos;
+    use seqair_types::Pos0;
     use std::io::Write;
     use tempfile::TempDir;
 
-    fn p(v: u32) -> Pos<Zero> {
-        Pos::<Zero>::new(v).unwrap()
+    fn p(v: u32) -> Pos0 {
+        Pos0::new(v).unwrap()
     }
 
     fn make_plain_fasta(dir: &TempDir) -> (PathBuf, PathBuf) {

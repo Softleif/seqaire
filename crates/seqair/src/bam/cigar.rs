@@ -3,7 +3,7 @@
 //! [`CigarPosInfo`] describes what occupies a given reference position.
 
 use crate::utils::{TraceErr, TraceOk};
-use seqair_types::{Pos, SmallVec, Zero};
+use seqair_types::{Pos0, SmallVec};
 
 // r[impl cigar.operations]
 // r[impl io.named_constants]
@@ -182,7 +182,7 @@ pub enum CigarPosInfo {
 /// Complex CIGARs use a `SmallVec` of compact ops that stays inline for ≤6 ops.
 pub enum CigarMapping {
     /// `qpos = (pos - rec_pos) as usize + query_offset as usize`
-    Linear { rec_pos: Pos<Zero>, query_offset: u32, match_len: u32 },
+    Linear { rec_pos: Pos0, query_offset: u32, match_len: u32 },
     /// Pre-computed compact ops for linear/binary search.
     Complex(SmallVec<CompactOp, 6>),
 }
@@ -212,7 +212,7 @@ pub struct CompactOp {
 
 impl CigarMapping {
     #[inline]
-    pub fn new(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Self> {
+    pub fn new(rec_pos: Pos0, cigar_bytes: &[u8]) -> Option<Self> {
         match try_linear(cigar_bytes) {
             Some((query_offset, match_len)) => {
                 Some(Self::Linear { rec_pos, query_offset, match_len })
@@ -223,7 +223,7 @@ impl CigarMapping {
 
     // r[impl cigar.qpos_at]
     #[inline]
-    pub fn pos_info_at(&self, pos: Pos<Zero>) -> Option<CigarPosInfo> {
+    pub fn pos_info_at(&self, pos: Pos0) -> Option<CigarPosInfo> {
         match self {
             Self::Linear { rec_pos, query_offset, match_len } => {
                 let offset = pos.as_i64().wrapping_sub(rec_pos.as_i64());
@@ -288,7 +288,7 @@ fn try_linear(cigar_bytes: &[u8]) -> Option<(u32, u32)> {
     if phase >= 1 { Some((query_offset, match_len)) } else { None }
 }
 
-fn build_compact_ops(rec_pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<SmallVec<CompactOp, 6>> {
+fn build_compact_ops(rec_pos: Pos0, cigar_bytes: &[u8]) -> Option<SmallVec<CompactOp, 6>> {
     let n_ops = cigar_bytes.len() / 4;
     let mut ops = SmallVec::with_capacity(n_ops);
     let mut ref_off: i64 = 0;
@@ -369,7 +369,7 @@ fn classify_op(
 }
 
 #[inline]
-fn pos_info_linear(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
+fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
     let pos32 = i32::try_from(pos.get()).trace_ok("pos exceeds i32 range")?;
     for (i, op) in ops.iter().enumerate() {
         if !consumes_ref(op.op_type) {
@@ -387,7 +387,7 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
 
 // r[impl perf.cigar_binary_search]
 #[inline]
-fn pos_info_bsearch(ops: &[CompactOp], pos: Pos<Zero>) -> Option<CigarPosInfo> {
+fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
     let pos32 = i32::try_from(pos.get()).trace_ok("pos exceeds i32 range")?;
     let idx = ops.partition_point(|op| op.ref_start <= pos32);
     if idx == 0 {
@@ -487,7 +487,7 @@ mod tests {
         // CompactOp stores ref_start as i32. Verify it works at the maximum BAM position.
         let mut cigar = Vec::new();
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
-        let rec_pos = Pos::<Zero>::new((i32::MAX as u32) - 100).unwrap(); // near max BAM position
+        let rec_pos = Pos0::new((i32::MAX as u32) - 100).unwrap(); // near max BAM position
         let mapping = CigarMapping::new(rec_pos, &cigar).unwrap();
         // Should work fine — position fits in i32
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
@@ -502,45 +502,45 @@ mod tests {
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_S, 5));
         cigar.extend_from_slice(&pack_cigar_op(CIGAR_M, 100));
 
-        let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &cigar).unwrap();
+        let mapping = CigarMapping::new(Pos0::new(1000).unwrap(), &cigar).unwrap();
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
 
         // Valid positions: 1000..1100
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1000).unwrap()),
+            mapping.pos_info_at(Pos0::new(1000).unwrap()),
             Some(CigarPosInfo::Match { qpos: 5 })
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1050).unwrap()),
+            mapping.pos_info_at(Pos0::new(1050).unwrap()),
             Some(CigarPosInfo::Match { qpos: 55 })
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1099).unwrap()),
+            mapping.pos_info_at(Pos0::new(1099).unwrap()),
             Some(CigarPosInfo::Match { qpos: 104 })
         );
 
         // Out-of-range: before alignment start
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(999).unwrap()),
+            mapping.pos_info_at(Pos0::new(999).unwrap()),
             None,
             "pos before rec_pos must return None"
         );
 
         // Out-of-range: at/past alignment end
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1100).unwrap()),
+            mapping.pos_info_at(Pos0::new(1100).unwrap()),
             None,
             "pos at rec_pos + match_len must return None"
         );
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(1200).unwrap()),
+            mapping.pos_info_at(Pos0::new(1200).unwrap()),
             None,
             "pos past alignment end must return None"
         );
 
         // Far out-of-range (would wrap with unsigned subtraction)
         assert_eq!(
-            mapping.pos_info_at(Pos::<Zero>::new(0).unwrap()),
+            mapping.pos_info_at(Pos0::new(0).unwrap()),
             None,
             "pos far before alignment must return None"
         );

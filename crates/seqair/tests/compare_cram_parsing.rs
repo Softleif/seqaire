@@ -13,7 +13,7 @@
     reason = "test code with known small values"
 )]
 
-use seqair::bam::{Pos, Zero};
+use seqair::bam::Pos0;
 use std::path::Path;
 
 fn test_cram_path() -> &'static Path {
@@ -243,8 +243,8 @@ fn cram_records_match_bam_records() {
     let cram_count = cram_reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut cram_store,
         )
         .unwrap();

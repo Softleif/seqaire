@@ -12,8 +12,8 @@
     reason = "test code with known small values"
 )]
 use rust_htslib::bam::{self, FetchDefinition, Read as _, record::Aux};
+use seqair::bam::Pos0;
 use seqair::bam::aux::{AuxValue, find_tag as find_aux_tag};
-use seqair::bam::{Pos, Zero};
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -83,8 +83,8 @@ fn all_contigs_record_count_matches() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -115,8 +115,8 @@ fn all_contigs_record_fields_match() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
@@ -199,16 +199,16 @@ fn all_contigs_pileup_positions_and_depth_match() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
 
         let engine = seqair::bam::PileupEngine::new(
             store,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
         );
         let rio: Vec<_> = engine.collect();
 
@@ -250,16 +250,16 @@ fn all_contigs_pileup_qpos_and_flags_match() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
 
         let engine = seqair::bam::PileupEngine::new(
             store,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
         );
         let rio: Vec<_> = engine.collect();
 
@@ -307,16 +307,16 @@ fn all_contigs_pileup_bases_match() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");
 
         let engine = seqair::bam::PileupEngine::new(
             store,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
         );
         let rio: Vec<_> = engine.collect();
 
@@ -406,8 +406,8 @@ fn all_contigs_aux_tags_match() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("fetch");

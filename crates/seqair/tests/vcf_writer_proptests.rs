@@ -12,7 +12,7 @@
 use proptest::prelude::*;
 use seqair::vcf::record_encoder::{FilterFieldDef, InfoFieldDef, InfoInt};
 use seqair::vcf::{Alleles, ContigDef, Number, OutputFormat, ValueType, VcfHeader, Writer};
-use seqair_types::{Base, One, Pos};
+use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
 fn arb_base() -> impl Strategy<Value = Base> {
@@ -59,7 +59,7 @@ proptest! {
         dp in 0i32..10000,
     ) {
         let setup = make_simple_setup();
-        let pos_typed = Pos::<One>::new(pos).unwrap();
+        let pos_typed = Pos1::new(pos).unwrap();
 
         let mut output = Vec::new();
         let writer = Writer::new(&mut output, OutputFormat::Vcf);
@@ -95,7 +95,7 @@ proptest! {
         alleles in arb_alleles(),
     ) {
         let setup = make_simple_setup();
-        let pos_typed = Pos::<One>::new(pos).unwrap();
+        let pos_typed = Pos1::new(pos).unwrap();
 
         let mut output = Vec::new();
         let writer = Writer::new(&mut output, OutputFormat::Vcf);
@@ -126,7 +126,7 @@ proptest! {
         dp in 0i32..1000,
     ) {
         let setup = make_simple_setup();
-        let pos_typed = Pos::<One>::new(pos).unwrap();
+        let pos_typed = Pos1::new(pos).unwrap();
 
         // Write plain VCF
         let mut plain_output = Vec::new();
@@ -191,7 +191,7 @@ proptest! {
             .unwrap();
         let header = Arc::new(builder.build().unwrap());
 
-        let pos_typed = Pos::<One>::new(pos).unwrap();
+        let pos_typed = Pos1::new(pos).unwrap();
         let alleles = Alleles::reference(Base::A);
 
         let mut output = Vec::new();

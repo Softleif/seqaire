@@ -1,4 +1,4 @@
-use crate::{One, Pos, SmolStr};
+use crate::{Pos1, SmolStr};
 use std::fmt;
 use winnow::{
     Parser,
@@ -26,9 +26,9 @@ pub struct RegionString {
     /// The chromosome name, includes the "chr" prefix.
     pub chromosome: SmolStr,
     /// The start position of the region, inclusive (1-based).
-    pub start: Option<Pos<One>>,
+    pub start: Option<Pos1>,
     /// The end position of the region, inclusive (1-based).
-    pub end: Option<Pos<One>>,
+    pub end: Option<Pos1>,
 }
 
 #[cfg_attr(coverage_nightly, coverage(off))]
@@ -75,10 +75,10 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
             .parse_next(input)
     }
 
-    fn index(input: &mut &str) -> winnow::Result<Pos<One>> {
+    fn index(input: &mut &str) -> winnow::Result<Pos1> {
         dec_uint::<&str, u32, _>
             .verify(|v| *v > 0 && *v != u32::MAX)
-            .map(|v| Pos::<One>::new(v).expect("BUG: verified v > 0 && v != u32::MAX"))
+            .map(|v| Pos1::new(v).expect("BUG: verified v > 0 && v != u32::MAX"))
             .context(StrContext::Expected(StrContextValue::Description("number greater than 0")))
             .parse_next(input)
     }
@@ -94,7 +94,7 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
             .context(StrContext::Label("range"))),
     )
         .context(StrContext::Label("range"))
-        .map(|(token, slice): (&str, Option<(Pos<One>, Option<Pos<One>>)>)| match slice {
+        .map(|(token, slice): (&str, Option<(Pos1, Option<Pos1>)>)| match slice {
             None => RegionString { chromosome: token.into(), start: None, end: None },
             Some((start, None)) => {
                 RegionString { chromosome: token.into(), start: Some(start), end: None }
@@ -171,18 +171,14 @@ mod tests {
         let region = RegionString::from_str("chr2:100").unwrap();
         assert_eq!(
             region,
-            RegionString { chromosome: "chr2".into(), start: Pos::<One>::new(100), end: None }
+            RegionString { chromosome: "chr2".into(), start: Pos1::new(100), end: None }
         );
 
         // chromosome with start and end positions
         let region = RegionString::from_str("chr3:100-200").unwrap();
         assert_eq!(
             region,
-            RegionString {
-                chromosome: "chr3".into(),
-                start: Pos::<One>::new(100),
-                end: Pos::<One>::new(200)
-            }
+            RegionString { chromosome: "chr3".into(), start: Pos1::new(100), end: Pos1::new(200) }
         );
     }
 
@@ -215,11 +211,7 @@ mod tests {
         let region = RegionString::from_str(" chr4:150-250 ").unwrap();
         assert_eq!(
             region,
-            RegionString {
-                chromosome: "chr4".into(),
-                start: Pos::<One>::new(150),
-                end: Pos::<One>::new(250)
-            }
+            RegionString { chromosome: "chr4".into(), start: Pos1::new(150), end: Pos1::new(250) }
         );
 
         // only whitespace in chromosome part
@@ -257,16 +249,12 @@ mod tests {
         insta::assert_snapshot!(region, @"chr1");
 
         // Test chromosome with start position
-        let region =
-            RegionString { chromosome: "chr2".into(), start: Pos::<One>::new(100), end: None };
+        let region = RegionString { chromosome: "chr2".into(), start: Pos1::new(100), end: None };
         insta::assert_snapshot!(region, @"chr2:100");
 
         // Test chromosome with start and end positions
-        let region = RegionString {
-            chromosome: "chr3".into(),
-            start: Pos::<One>::new(100),
-            end: Pos::<One>::new(200),
-        };
+        let region =
+            RegionString { chromosome: "chr3".into(), start: Pos1::new(100), end: Pos1::new(200) };
         insta::assert_snapshot!(region, @"chr3:100-200");
     }
 
@@ -295,7 +283,7 @@ mod tests {
             let region_str = format!("{chrom}:{start}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos::<One>::new(start));
+            assert_eq!(parsed.start, Pos1::new(start));
             assert_eq!(parsed.end, None);
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
@@ -304,8 +292,8 @@ mod tests {
             let region_str = format!("{chrom}:{start}-{end}");
             let parsed = RegionString::from_str(&region_str)?;
             assert_eq!(parsed.chromosome, chrom);
-            assert_eq!(parsed.start, Pos::<One>::new(start));
-            assert_eq!(parsed.end, Pos::<One>::new(end));
+            assert_eq!(parsed.start, Pos1::new(start));
+            assert_eq!(parsed.end, Pos1::new(end));
             #[cfg(feature = "hts-compat")]
             let _ = FetchDefinition::from(&parsed);
         }
@@ -347,8 +335,8 @@ mod tests {
             region,
             RegionString {
                 chromosome: "bacteriophage_lambda_CpG".into(),
-                start: Pos::<One>::new(1),
-                end: Pos::<One>::new(48502)
+                start: Pos1::new(1),
+                end: Pos1::new(48502)
             }
         );
     }

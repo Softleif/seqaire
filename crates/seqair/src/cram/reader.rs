@@ -13,7 +13,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use seqair_types::{Base, One, Pos, SmolStr, Zero};
+use seqair_types::{Base, Pos0, Pos1, SmolStr};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -389,8 +389,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, CramError> {
         store.clear();
@@ -462,8 +462,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 let crai_entry = entries.iter().find(|e| e.container_offset == container_offset);
                 match crai_entry {
                     Some(e) if e.alignment_span > 0 => {
-                        let s = Pos::<One>::try_from_i64(e.alignment_start.max(1))
-                            .ok_or(CramError::InvalidPosition { value: e.alignment_start })?
+                        let s = Pos1::try_from(e.alignment_start.max(1))
+                            .map_err(|_| CramError::InvalidPosition { value: e.alignment_start })?
                             .to_zero_based()
                             .as_u64();
                         let e_end =
@@ -480,8 +480,8 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     }
                 }
             } else {
-                let ref_start = Pos::<One>::try_from_i32(container_header.alignment_start.max(1))
-                    .ok_or(CramError::InvalidPosition {
+                let ref_start = Pos1::try_from(container_header.alignment_start.max(1))
+                    .map_err(|_| CramError::InvalidPosition {
                         value: i64::from(container_header.alignment_start),
                     })?
                     .to_zero_based()
@@ -499,16 +499,15 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                 self.fasta
                     .fetch_seq_into(
                         &ref_name,
-                        Pos::<Zero>::try_from_u64(ref_start)
-                            .ok_or(CramError::InvalidPosition {
+                        Pos0::try_from(ref_start)
+                            .map_err(|_| CramError::InvalidPosition {
                             #[expect(
                                 clippy::cast_possible_wrap,
                                 reason = "error reporting only; value may exceed i64::MAX but is only used for diagnostics"
                             )]
                             value: ref_start as i64,
                         })?,
-                        Pos::<Zero>::try_from_u64(ref_end_clamped)
-                            .unwrap_or_else(Pos::<Zero>::max_value),
+                        Pos0::try_from(ref_end_clamped).unwrap_or(Pos0::max_value()),
                         &mut self.ref_seq_buf,
                     )
                     .map_err(|e| match &e {
@@ -633,9 +632,8 @@ mod tests {
 
         // Fetch from first reference
         let tid = 0;
-        let count = reader
-            .fetch_into(tid, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::max_value(), &mut store)
-            .unwrap();
+        let count =
+            reader.fetch_into(tid, Pos0::new(0).unwrap(), Pos0::max_value(), &mut store).unwrap();
         assert!(count > 0, "should fetch records from tid={tid}");
     }
 

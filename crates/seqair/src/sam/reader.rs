@@ -8,7 +8,7 @@ use crate::bam::{
     record_store::RecordStore,
     region_buf::RegionBuf,
 };
-use seqair_types::{Base, One, Pos, Zero};
+use seqair_types::{Base, Pos0, Pos1};
 use std::{
     fs::File,
     io::{Read, Seek},
@@ -255,8 +255,8 @@ impl IndexedSamReader<std::io::Cursor<Vec<u8>>> {
     pub fn fetch_plain_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
         store.clear();
@@ -322,8 +322,8 @@ impl<R: Read + Seek> IndexedSamReader<R> {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, SamError> {
         store.clear();
@@ -478,10 +478,10 @@ fn parse_sam_line(
     let pos_field = fields.get(3).copied().unwrap_or(b"0");
     let pos_1based = parse_i64(pos_field)
         .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
-    // SAM POS is 1-based; convert to 0-based Pos<Zero>. POS=0 means unmapped — skip.
-    let pos = Pos::<One>::try_from_i64(pos_1based)
+    // SAM POS is 1-based; convert to 0-based Pos0. POS=0 means unmapped — skip.
+    let pos = Pos1::try_from(pos_1based)
         .map(|p| p.to_zero_based())
-        .ok_or_else(|| SamRecordError::InvalidPos { value: pos_field.into() })?;
+        .map_err(|_| SamRecordError::InvalidPos { value: pos_field.into() })?;
 
     // Field 5: MAPQ
     let mapq_field = fields.get(4).copied().unwrap_or(b"0");

@@ -14,7 +14,7 @@
 )]
 
 use rust_htslib::bam::{self, Read as _};
-use seqair::bam::{Pos, Zero};
+use seqair::bam::Pos0;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -94,8 +94,8 @@ fn record_count_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -123,8 +123,8 @@ fn record_fields_match() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -164,8 +164,8 @@ fn sequence_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -200,8 +200,8 @@ fn flag_helpers_match() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
@@ -242,8 +242,8 @@ fn aux_tags_accessible() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");

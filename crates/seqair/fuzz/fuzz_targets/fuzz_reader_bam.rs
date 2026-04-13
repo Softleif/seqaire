@@ -9,7 +9,7 @@ use seqair::bam::bgzf::BgzfReader;
 use seqair::bam::header::BamHeader;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::{Offset, Pos, Zero};
+use seqair_types::{Offset, Pos0};
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 4 || data.len() > 256 * 1024 {
@@ -54,7 +54,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Pileup over first contig's records
-    let region_start = Pos::<Zero>::new(0).unwrap();
+    let region_start = Pos0::new(0).unwrap();
     let region_end = match region_start.checked_add_offset(Offset::new(1000)) {
         Some(p) => p,
         None => return,

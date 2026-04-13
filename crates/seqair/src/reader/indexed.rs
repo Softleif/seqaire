@@ -5,7 +5,7 @@ use crate::{
     cram::reader::IndexedCramReader,
     sam::reader::IndexedSamReader,
 };
-use seqair_types::{Pos, Zero};
+use seqair_types::Pos0;
 use std::{
     io::{Read, Seek},
     path::Path,
@@ -51,8 +51,8 @@ impl<R: Read + Seek> IndexedReader<R> {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         match self {

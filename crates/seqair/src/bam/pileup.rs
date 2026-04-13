@@ -1,7 +1,7 @@
 //! Iterate over pileup columns. [`PileupEngine`] yields [`PileupColumn`]s with pre-extracted
 //! flat fields per active read. Supports read filtering and per-position max-depth.
 
-use seqair_types::{BamFlags, Base, Offset, Pos, Strand, Zero, strand_from_flags};
+use seqair_types::{BamFlags, Base, Offset, Pos0, Strand, strand_from_flags};
 // Rc is used only for RefSeq (reference sequence), not for BAM records.
 // PileupEngine is intentionally !Send due to RecordFilter: Box<dyn Fn(...)>.
 use std::rc::Rc;
@@ -15,7 +15,7 @@ use super::{
 
 pub struct RefSeq {
     bases: Rc<[Base]>,
-    start_pos: Pos<Zero>,
+    start_pos: Pos0,
 }
 
 impl std::fmt::Debug for RefSeq {
@@ -28,11 +28,11 @@ impl std::fmt::Debug for RefSeq {
 }
 
 impl RefSeq {
-    pub fn new(bases: Rc<[Base]>, start_pos: Pos<Zero>) -> Self {
+    pub fn new(bases: Rc<[Base]>, start_pos: Pos0) -> Self {
         Self { bases, start_pos }
     }
 
-    pub fn base_at(&self, pos: Pos<Zero>) -> Base {
+    pub fn base_at(&self, pos: Pos0) -> Base {
         let Some(offset) = pos.as_i64().checked_sub(self.start_pos.as_i64()) else {
             return Base::Unknown;
         };
@@ -61,12 +61,12 @@ type RecordFilter = Box<dyn Fn(BamFlags, &[u8]) -> bool>;
 // r[impl perf.reuse_alignment_vec+2]
 pub struct PileupEngine {
     store: RecordStore,
-    current_pos: Pos<Zero>,
-    region_end: Pos<Zero>,
+    current_pos: Pos0,
+    region_end: Pos0,
     next_entry: usize,
     /// Hot field: checked every column during retain. Stored separately so the
     /// retain loop strides 4 bytes instead of the full `ActiveRecord` size (~144 bytes).
-    active_end_pos: Vec<Pos<Zero>>,
+    active_end_pos: Vec<Pos0>,
     /// Cold fields: only accessed for records that survive retain.
     active: Vec<ActiveRecord>,
     max_depth: Option<u32>,
@@ -95,14 +95,14 @@ struct ActiveRecord {
 // r[impl pileup.htslib_compat]
 #[derive(Debug)]
 pub struct PileupColumn {
-    pos: Pos<Zero>,
+    pos: Pos0,
     reference_base: Base,
     alignments: Vec<PileupAlignment>,
 }
 
 impl PileupColumn {
     #[must_use]
-    pub fn pos(&self) -> Pos<Zero> {
+    pub fn pos(&self) -> Pos0 {
         self.pos
     }
 
@@ -259,7 +259,7 @@ impl PileupAlignment {
 
 impl PileupEngine {
     /// Create a pileup engine that owns the record store.
-    pub fn new(store: RecordStore, region_start: Pos<Zero>, region_end: Pos<Zero>) -> Self {
+    pub fn new(store: RecordStore, region_start: Pos0, region_end: Pos0) -> Self {
         PileupEngine {
             store,
             current_pos: region_start,
@@ -541,33 +541,31 @@ mod tests {
 
     #[test]
     fn ref_seq_base_at_within_range() {
-        let ref_seq = RefSeq::new(
-            Rc::from([Base::A, Base::C, Base::G, Base::T]),
-            Pos::<Zero>::new(100).unwrap(),
-        );
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100).unwrap()), Base::A);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(101).unwrap()), Base::C);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102).unwrap()), Base::G);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(103).unwrap()), Base::T);
+        let ref_seq =
+            RefSeq::new(Rc::from([Base::A, Base::C, Base::G, Base::T]), Pos0::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos0::new(100).unwrap()), Base::A);
+        assert_eq!(ref_seq.base_at(Pos0::new(101).unwrap()), Base::C);
+        assert_eq!(ref_seq.base_at(Pos0::new(102).unwrap()), Base::G);
+        assert_eq!(ref_seq.base_at(Pos0::new(103).unwrap()), Base::T);
     }
 
     #[test]
     fn ref_seq_base_at_before_start() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100).unwrap());
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(99).unwrap()), Base::Unknown);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(0).unwrap()), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos0::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos0::new(99).unwrap()), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos0::new(0).unwrap()), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_after_end() {
-        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos::<Zero>::new(100).unwrap());
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(102).unwrap()), Base::Unknown);
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(1000).unwrap()), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([Base::A, Base::C]), Pos0::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos0::new(102).unwrap()), Base::Unknown);
+        assert_eq!(ref_seq.base_at(Pos0::new(1000).unwrap()), Base::Unknown);
     }
 
     #[test]
     fn ref_seq_base_at_empty() {
-        let ref_seq = RefSeq::new(Rc::from([]), Pos::<Zero>::new(100).unwrap());
-        assert_eq!(ref_seq.base_at(Pos::<Zero>::new(100).unwrap()), Base::Unknown);
+        let ref_seq = RefSeq::new(Rc::from([]), Pos0::new(100).unwrap());
+        assert_eq!(ref_seq.base_at(Pos0::new(100).unwrap()), Base::Unknown);
     }
 }

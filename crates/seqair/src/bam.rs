@@ -65,5 +65,5 @@ pub use reader::{BamError, BamShared, IndexedBamReader};
 pub use record::BamRecord;
 pub use record_store::RecordStore;
 pub use seqair_types::bam_flags as flags;
-pub use seqair_types::{Offset, One, Pos, Zero};
+pub use seqair_types::{Offset, One, Pos, Pos0, Pos1, Zero};
 pub use writer::{BamWriteError, BamWriter};

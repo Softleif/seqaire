@@ -5,7 +5,7 @@ use crate::{
     reader::{ReaderError, indexed::CursorReader},
     sam::reader::IndexedSamReader,
 };
-use seqair_types::{Base, Pos, Zero};
+use seqair_types::{Base, Pos0};
 use std::rc::Rc;
 
 /// Alignment reader backend — indexed (BGZF+index) or plain (linear scan).
@@ -117,8 +117,8 @@ impl FuzzReaders {
     pub fn pileup(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
     ) -> Result<PileupEngine, ReaderError> {
         match &mut self.alignment {
             AlignmentBackend::Indexed(r) => r.fetch_into(tid, start, end, &mut self.store)?,
@@ -146,8 +146,8 @@ impl FuzzReaders {
     fn fetch_records(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         match &mut self.alignment {
@@ -161,8 +161,8 @@ impl FuzzReaders {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         self.fetch_records(tid, start, end, store)

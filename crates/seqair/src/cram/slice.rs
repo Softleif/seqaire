@@ -10,7 +10,7 @@ use super::{
 };
 use crate::bam::{BamHeader, record_store::RecordStore};
 use rustc_hash::FxHashMap;
-use seqair_types::{BamFlags, Base, One, Pos, Zero};
+use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
 
 /// Parsed CRAM slice header.
@@ -86,8 +86,8 @@ pub fn decode_slice(
     ref_start_0based: i64,
     header: &BamHeader,
     tid: u32,
-    query_start: Pos<Zero>,
-    query_end: Pos<Zero>,
+    query_start: Pos0,
+    query_end: Pos0,
     store: &mut RecordStore,
     cigar_buf: &mut Vec<u8>,
     bases_buf: &mut Vec<Base>,
@@ -121,8 +121,8 @@ pub fn decode_slice(
 
     // r[impl cram.edge.reference_mismatch]
     if !is_multi_ref && sh.reference_md5 != [0u8; 16] && !reference_seq.is_empty() {
-        let slice_start_0based = Pos::<One>::try_from_i32(sh.alignment_start.max(1))
-            .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
+        let slice_start_0based = Pos1::try_from(sh.alignment_start.max(1))
+            .map_err(|_| CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
             .to_zero_based()
             .as_i64();
         let slice_ref_start_i64 = slice_start_0based.wrapping_sub(ref_start_0based);
@@ -191,8 +191,8 @@ pub fn decode_slice(
     for _ in 0..sh.num_records {
         // For embedded reference, ref_start is the slice's alignment_start
         let effective_ref_start = if sh.embedded_reference >= 0 {
-            Pos::<One>::try_from_i32(sh.alignment_start.max(1))
-                .ok_or(CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
+            Pos1::try_from(sh.alignment_start.max(1))
+                .map_err(|_| CramError::InvalidPosition { value: i64::from(sh.alignment_start) })?
                 .to_zero_based()
                 .as_i64()
         } else {
@@ -241,8 +241,8 @@ fn decode_record(
     ref_start_0based: i64,
     header: &BamHeader,
     tid: u32,
-    query_start: Pos<Zero>,
-    query_end: Pos<Zero>,
+    query_start: Pos0,
+    query_end: Pos0,
     store: &mut RecordStore,
     cigar_buf: &mut Vec<u8>,
     bases_buf: &mut Vec<Base>,
@@ -291,9 +291,9 @@ fn decode_record(
     };
     // r[impl cram.edge.position_overflow]
     // Convert from 1-based to 0-based
-    let pos_0based = Pos::<One>::try_from_i64(alignment_pos)
+    let pos_0based = Pos1::try_from(alignment_pos)
         .map(|p| p.to_zero_based())
-        .ok_or(super::reader::CramError::InvalidPosition { value: alignment_pos })?;
+        .map_err(|_| super::reader::CramError::InvalidPosition { value: alignment_pos })?;
 
     // r[impl cram.record.read_group]
     // 6. RG (read group)
@@ -405,8 +405,8 @@ fn decode_record(
         }
 
         let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(result.ref_consumed));
-        let end_pos = Pos::<Zero>::try_from_i64(end_pos_raw)
-            .ok_or(super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
+        let end_pos = Pos0::try_from(end_pos_raw)
+            .map_err(|_| super::reader::CramError::InvalidPosition { value: end_pos_raw })?;
 
         // r[impl cram.index.multi_ref_slices]
         // Skip records from different references in multi-ref slices
@@ -862,7 +862,7 @@ mod tests {
 
         // Create a fake reference full of N's — MD5 will not match
         let fake_ref = vec![b'N'; 100_000];
-        let ref_start = Pos::<One>::try_from_i32(dc.alignment_start.max(1))
+        let ref_start = Pos1::try_from(dc.alignment_start.max(1))
             .map(|p| p.to_zero_based().as_i64())
             .unwrap_or(0);
 
@@ -875,8 +875,8 @@ mod tests {
             ref_start,
             &bam_header,
             0,
-            Pos::<Zero>::new(0).unwrap(),
-            Pos::<Zero>::max_value(),
+            Pos0::new(0).unwrap(),
+            Pos0::max_value(),
             &mut crate::bam::record_store::RecordStore::new(),
             &mut Vec::new(),
             &mut Vec::new(),

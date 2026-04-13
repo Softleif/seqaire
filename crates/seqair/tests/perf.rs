@@ -13,7 +13,7 @@ mod helpers;
 use helpers::{cigar_bytes, cigar_op, make_record, make_record_with_cigar};
 use proptest::prelude::*;
 use seqair::bam::cigar::{CigarMapping, CigarPosInfo};
-use seqair::bam::{Pos, RecordStore, Zero, pileup::PileupEngine};
+use seqair::bam::{Pos0, RecordStore, pileup::PileupEngine};
 
 // ---- perf.reuse_alignment_vec ----
 // Verified indirectly: if the engine reuses the vec internally, output must
@@ -53,7 +53,7 @@ proptest! {
             expected_depth[i] = running.max(0) as usize;
         }
 
-        let engine = PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(300).unwrap());
+        let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(300).unwrap());
         for col in engine {
             let pos = col.pos().as_usize();
             let exp = expected_depth.get(pos).copied().unwrap_or(0);
@@ -75,30 +75,17 @@ fn already_sorted_records_produce_correct_pileup() {
     arena.push_raw(&make_record(0, 20, 99, 60, 30)).unwrap();
     arena.push_raw(&make_record(0, 30, 99, 60, 30)).unwrap();
 
-    let engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(70).unwrap());
+    let engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(70).unwrap());
     let columns: Vec<_> = engine.collect();
 
     // pos 10-19: 1 read
-    assert_eq!(
-        columns.iter().find(|c| c.pos() == Pos::<Zero>::new(15).unwrap()).unwrap().depth(),
-        1
-    );
+    assert_eq!(columns.iter().find(|c| c.pos() == Pos0::new(15).unwrap()).unwrap().depth(), 1);
     // pos 20-29: 2 reads
-    assert_eq!(
-        columns.iter().find(|c| c.pos() == Pos::<Zero>::new(25).unwrap()).unwrap().depth(),
-        2
-    );
+    assert_eq!(columns.iter().find(|c| c.pos() == Pos0::new(25).unwrap()).unwrap().depth(), 2);
     // pos 30-39: 3 reads
-    assert_eq!(
-        columns.iter().find(|c| c.pos() == Pos::<Zero>::new(35).unwrap()).unwrap().depth(),
-        3
-    );
+    assert_eq!(columns.iter().find(|c| c.pos() == Pos0::new(35).unwrap()).unwrap().depth(), 3);
     // pos 40-49: 2 reads (first ended)
-    assert_eq!(
-        columns.iter().find(|c| c.pos() == Pos::<Zero>::new(45).unwrap()).unwrap().depth(),
-        2
-    );
+    assert_eq!(columns.iter().find(|c| c.pos() == Pos0::new(45).unwrap()).unwrap().depth(), 2);
 }
 
 // ---- perf.avoid_redundant_arena_get ----
@@ -111,19 +98,18 @@ fn single_arena_get_per_record_entry_still_correct() {
     arena.push_raw(&make_record(0, 0, 99, 60, 50)).unwrap();
     arena.push_raw(&make_record(0, 10, 99 | 0x100, 40, 50)).unwrap(); // secondary flag
 
-    let mut engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(59).unwrap());
+    let mut engine = PileupEngine::new(arena, Pos0::new(0).unwrap(), Pos0::new(59).unwrap());
     engine.set_filter(|flags, _aux| !flags.is_secondary());
     let columns: Vec<_> = engine.collect();
 
     // Only the mapq=60 read should pass the filter
     for col in &columns {
-        if col.pos() < Pos::<Zero>::new(10).unwrap() {
+        if col.pos() < Pos0::new(10).unwrap() {
             assert_eq!(col.depth(), 1, "only high-mapq read at pos {}", col.pos().get());
         }
     }
     // At pos 10+, still only 1 because second read is filtered
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(25).unwrap()).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos0::new(25).unwrap()).unwrap();
     assert_eq!(col.depth(), 1);
 }
 
@@ -145,21 +131,20 @@ fn cigar_index_from_arena_slab_correct() {
     );
     arena.push_raw(&raw).unwrap();
 
-    let engine =
-        PileupEngine::new(arena, Pos::<Zero>::new(100).unwrap(), Pos::<Zero>::new(154).unwrap());
+    let engine = PileupEngine::new(arena, Pos0::new(100).unwrap(), Pos0::new(154).unwrap());
     let columns: Vec<_> = engine.collect();
 
     // Before deletion: qpos = pos - 100
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(110).unwrap()).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos0::new(110).unwrap()).unwrap();
     assert_eq!(col.alignments().next().unwrap().qpos(), Some(10));
 
     // Inside deletion: alignment present with Deletion op (no qpos)
-    let del_col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(132).unwrap()).unwrap();
+    let del_col = columns.iter().find(|c| c.pos() == Pos0::new(132).unwrap()).unwrap();
     assert_eq!(del_col.depth(), 1);
     assert!(del_col.alignments().next().unwrap().is_del());
 
     // After deletion: qpos = pos - 100 - 5 (deletion consumes 5 ref but 0 query)
-    let col = columns.iter().find(|c| c.pos() == Pos::<Zero>::new(140).unwrap()).unwrap();
+    let col = columns.iter().find(|c| c.pos() == Pos0::new(140).unwrap()).unwrap();
     assert_eq!(col.alignments().next().unwrap().qpos(), Some(35));
 }
 
@@ -263,45 +248,45 @@ fn binary_search_correct_for_many_ops() {
         cigar_op(3000, 3),
         cigar_op(40, 0),
     ]);
-    let mapping = CigarMapping::new(Pos::<Zero>::new(1000).unwrap(), &ops).unwrap();
+    let mapping = CigarMapping::new(Pos0::new(1000).unwrap(), &ops).unwrap();
 
     // First M block: 1000-1029
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(1000).unwrap()),
+        mapping.pos_info_at(Pos0::new(1000).unwrap()),
         Some(CigarPosInfo::Match { qpos: 0 })
     );
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(1029).unwrap()),
+        mapping.pos_info_at(Pos0::new(1029).unwrap()),
         Some(CigarPosInfo::Match { qpos: 29 })
     );
 
     // N skip: 1030-6029 → RefSkip
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(1030).unwrap()), Some(CigarPosInfo::RefSkip));
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(5000).unwrap()), Some(CigarPosInfo::RefSkip));
+    assert_eq!(mapping.pos_info_at(Pos0::new(1030).unwrap()), Some(CigarPosInfo::RefSkip));
+    assert_eq!(mapping.pos_info_at(Pos0::new(5000).unwrap()), Some(CigarPosInfo::RefSkip));
 
     // Second M block: 6030-6059
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(6030).unwrap()),
+        mapping.pos_info_at(Pos0::new(6030).unwrap()),
         Some(CigarPosInfo::Match { qpos: 30 })
     );
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(6059).unwrap()),
+        mapping.pos_info_at(Pos0::new(6059).unwrap()),
         Some(CigarPosInfo::Match { qpos: 59 })
     );
 
     // Second N skip: 6060-9059 → RefSkip
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(6060).unwrap()), Some(CigarPosInfo::RefSkip));
+    assert_eq!(mapping.pos_info_at(Pos0::new(6060).unwrap()), Some(CigarPosInfo::RefSkip));
 
     // Third M block: 9060-9099
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(9060).unwrap()),
+        mapping.pos_info_at(Pos0::new(9060).unwrap()),
         Some(CigarPosInfo::Match { qpos: 60 })
     );
     assert_eq!(
-        mapping.pos_info_at(Pos::<Zero>::new(9099).unwrap()),
+        mapping.pos_info_at(Pos0::new(9099).unwrap()),
         Some(CigarPosInfo::Match { qpos: 99 })
     );
-    assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(9100).unwrap()), None);
+    assert_eq!(mapping.pos_info_at(Pos0::new(9100).unwrap()), None);
 }
 
 // r[verify perf.cigar_binary_search]
@@ -323,7 +308,7 @@ proptest! {
             }
         }
         let bytes = cigar_bytes(&ops);
-        let mapping = CigarMapping::new(Pos::<Zero>::new(0).unwrap(), &bytes).unwrap();
+        let mapping = CigarMapping::new(Pos0::new(0).unwrap(), &bytes).unwrap();
 
         // Compute total ref span
         let total_ref: u32 = ops.iter().map(|&op| {
@@ -335,7 +320,7 @@ proptest! {
         // Check every position — qpos must be in range and monotonically increasing
         let mut last_qpos: Option<u32> = None;
         for pos in 0..total_ref {
-            match mapping.pos_info_at(Pos::<Zero>::new(pos).unwrap()) {
+            match mapping.pos_info_at(Pos0::new(pos).unwrap()) {
                 Some(CigarPosInfo::Match { qpos }) => {
                     prop_assert!((qpos as usize) < total_query as usize,
                         "qpos {qpos} out of range at ref {pos}");
@@ -349,7 +334,7 @@ proptest! {
             }
         }
         // Out of range
-        prop_assert_eq!(mapping.pos_info_at(Pos::<Zero>::new(total_ref).unwrap()), None);
+        prop_assert_eq!(mapping.pos_info_at(Pos0::new(total_ref).unwrap()), None);
     }
 }
 
@@ -369,6 +354,6 @@ fn arena_with_capacity_avoids_realloc() {
     // All records accessible
     for i in 0..100u32 {
         let r = arena.record(i);
-        assert_eq!(r.pos, Pos::<Zero>::new(i * 10).unwrap());
+        assert_eq!(r.pos, Pos0::new(i * 10).unwrap());
     }
 }

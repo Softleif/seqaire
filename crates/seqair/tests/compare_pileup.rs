@@ -16,7 +16,7 @@
 
 use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::{Pos, Zero};
+use seqair::bam::Pos0;
 use std::path::Path;
 
 fn test_bam_path() -> &'static Path {
@@ -118,15 +118,15 @@ fn fetch_seqair_pileup_region(
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
     seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(start as u32).unwrap(),
-        Pos::<Zero>::new(end as u32).unwrap(),
+        Pos0::new(start as u32).unwrap(),
+        Pos0::new(end as u32).unwrap(),
     )
     .collect()
 }
@@ -145,16 +145,16 @@ fn pileup_positions_match() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32).unwrap(),
-        Pos::<Zero>::new(TEST_END as u32).unwrap(),
+        Pos0::new(TEST_START as u32).unwrap(),
+        Pos0::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 
@@ -188,16 +188,16 @@ fn pileup_depth_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32).unwrap(),
-        Pos::<Zero>::new(TEST_END as u32).unwrap(),
+        Pos0::new(TEST_START as u32).unwrap(),
+        Pos0::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 
@@ -237,16 +237,16 @@ fn pileup_qpos_matches() {
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(TEST_START as u32).unwrap(),
-            Pos::<Zero>::new(TEST_END as u32).unwrap(),
+            Pos0::new(TEST_START as u32).unwrap(),
+            Pos0::new(TEST_END as u32).unwrap(),
             &mut store,
         )
         .expect("seqair fetch");
 
     let engine = seqair::bam::PileupEngine::new(
         store,
-        Pos::<Zero>::new(TEST_START as u32).unwrap(),
-        Pos::<Zero>::new(TEST_END as u32).unwrap(),
+        Pos0::new(TEST_START as u32).unwrap(),
+        Pos0::new(TEST_END as u32).unwrap(),
     );
     let columns: Vec<_> = engine.collect();
 

@@ -12,8 +12,8 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
+use seqair::bam::Pos0;
 use seqair::bam::record_store::RecordStore;
-use seqair::bam::{Pos, Zero};
 use seqair_types::Base;
 
 // r[verify base_decode.table]
@@ -79,8 +79,7 @@ fn pileup_alignment_has_base_type() {
     let mut store = RecordStore::new();
     store.push_raw(&raw).unwrap();
 
-    let mut engine =
-        PileupEngine::new(store, Pos::<Zero>::new(100).unwrap(), Pos::<Zero>::new(103).unwrap());
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(103).unwrap());
     engine.set_max_depth(1000);
 
     let col = engine.next().expect("should have a column");
