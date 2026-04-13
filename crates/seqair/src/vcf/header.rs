@@ -280,6 +280,17 @@ impl VcfHeader {
 // The BCF string dictionary is built incrementally in the guaranteed-
 // correct order (FILTER → INFO → FORMAT) — no runtime order check needed.
 
+/// Result of [`VcfHeaderBuilder::from_bam_header`]: a builder pre-populated
+/// with contigs and the resolved [`ContigId`](super::record_encoder::ContigId)
+/// handles needed by the record encoder.
+#[derive(Debug, Clone)]
+pub struct FromBamHeader {
+    /// The builder, ready for further field registration.
+    pub builder: VcfHeaderBuilder<Contigs>,
+    /// One [`ContigId`](super::record_encoder::ContigId) per `@SQ` line, in BAM tid order.
+    pub contigs: Vec<super::record_encoder::ContigId>,
+}
+
 /// Initial phase: set file format, contigs, and metadata.
 #[derive(Debug, Clone, Copy)]
 pub struct Contigs;
@@ -309,6 +320,19 @@ pub struct Samples;
 /// the next phase.  Phases can be skipped (e.g. go from `Contigs`
 /// straight to `Infos`).  [`build`](VcfHeaderBuilder::build) is
 /// available from every phase.
+///
+/// Out-of-order registration is a compile error:
+///
+/// ```compile_fail
+/// use seqair::vcf::{VcfHeader, Number, ValueType};
+/// use seqair::vcf::record_encoder::{InfoFieldDef, Scalar};
+///
+/// let mut builder = VcfHeader::builder();
+/// // ERROR: register_info is not available in the Contigs phase
+/// builder.register_info(&InfoFieldDef::<Scalar<i32>>::new(
+///     "DP", Number::Count(1), ValueType::Integer, "Depth",
+/// )).unwrap();
+/// ```
 pub struct VcfHeaderBuilder<Phase = Contigs> {
     file_format: SmolStr,
     infos: IndexMap<SmolStr, InfoDef>,
@@ -375,6 +399,23 @@ impl<P> VcfHeaderBuilder<P> {
         u32::try_from(self.string_map.insert(id.clone())).map_err(|_| VcfHeaderError::TooManyFields)
     }
 
+    // r[impl vcf_header.file_format]
+    /// Set the VCF file format version (default: VCFv4.3).
+    ///
+    /// Available from any phase — metadata does not affect BCF string
+    /// dictionary ordering.
+    pub fn file_format(&mut self, version: impl Into<SmolStr>) {
+        self.file_format = version.into();
+    }
+
+    /// Append a `##key=value` metadata line (e.g. `##source=myapp`).
+    ///
+    /// Available from any phase — metadata does not affect BCF string
+    /// dictionary ordering.
+    pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
+        self.other_lines.push(line.into());
+    }
+
     // r[impl vcf_header.builder]
     // r[impl vcf_header.string_map]
     /// Finalize the builder and produce a [`VcfHeader`].
@@ -421,15 +462,6 @@ impl VcfHeaderBuilder<Contigs> {
         }
     }
 
-    // r[impl vcf_header.file_format]
-    pub fn file_format(&mut self, version: impl Into<SmolStr>) {
-        self.file_format = version.into();
-    }
-
-    pub fn add_other_line(&mut self, line: impl Into<SmolStr>) {
-        self.other_lines.push(line.into());
-    }
-
     // r[impl vcf_header.contig_required]
     pub fn add_contig(
         &mut self,
@@ -462,8 +494,13 @@ impl VcfHeaderBuilder<Contigs> {
 
     // r[impl vcf_header.from_bam_header]
     /// Build a `VcfHeaderBuilder` from a BAM header, copying contig names and lengths.
-    pub fn from_bam_header(header: &BamHeader) -> Result<Self, VcfHeaderError> {
+    ///
+    /// Returns a [`FromBamHeader`] containing the builder and all resolved
+    /// [`ContigId`](super::record_encoder::ContigId) handles, so callers
+    /// can use them with the record encoder without re-registering.
+    pub fn from_bam_header(header: &BamHeader) -> Result<FromBamHeader, VcfHeaderError> {
         let mut builder = Self::new();
+        let mut contigs = Vec::new();
         for (tid, name) in header.target_names().enumerate() {
             #[expect(
                 clippy::cast_possible_truncation,
@@ -471,9 +508,9 @@ impl VcfHeaderBuilder<Contigs> {
             )]
             let length = header.target_len(tid as u32);
             let def = ContigDef { length };
-            builder.add_contig(name, def)?;
+            contigs.push(builder.register_contig(name, def)?);
         }
-        Ok(builder)
+        Ok(FromBamHeader { builder, contigs })
     }
 
     /// Advance to the [`Filters`] phase.
@@ -501,17 +538,21 @@ impl VcfHeaderBuilder<Contigs> {
 
 impl VcfHeaderBuilder<Filters> {
     // r[impl vcf_header.filter_def]
+    /// Insert a FILTER definition, returning its BCF dict index.
+    fn insert_filter(&mut self, id: SmolStr, def: FilterDef) -> Result<u32, VcfHeaderError> {
+        if self.filters.contains_key(&id) {
+            return Err(VcfHeaderError::DuplicateFilter { id });
+        }
+        self.filters.insert(id.clone(), def);
+        self.insert_string_map_entry(&id)
+    }
+
     pub fn add_filter(
         &mut self,
         id: impl Into<SmolStr>,
         def: FilterDef,
     ) -> Result<(), VcfHeaderError> {
-        let id = id.into();
-        if self.filters.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFilter { id });
-        }
-        self.filters.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)?;
+        self.insert_filter(id.into(), def)?;
         Ok(())
     }
 
@@ -522,11 +563,8 @@ impl VcfHeaderBuilder<Filters> {
         def: &super::record_encoder::FilterFieldDef,
     ) -> Result<super::record_encoder::FilterId, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        if self.filters.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFilter { id });
-        }
-        self.filters.insert(id.clone(), FilterDef { description: SmolStr::from(def.description) });
-        let dict_idx = self.insert_string_map_entry(&id)?;
+        let dict_idx = self
+            .insert_filter(id.clone(), FilterDef { description: SmolStr::from(def.description) })?;
         Ok(super::record_encoder::FilterId { dict_idx, name: id })
     }
 
@@ -550,8 +588,8 @@ impl VcfHeaderBuilder<Filters> {
 
 impl VcfHeaderBuilder<Infos> {
     // r[impl vcf_header.info_def]
-    pub fn add_info(&mut self, id: impl Into<SmolStr>, def: InfoDef) -> Result<(), VcfHeaderError> {
-        let id = id.into();
+    /// Insert an INFO definition, returning its BCF dict index.
+    fn insert_info(&mut self, id: SmolStr, def: InfoDef) -> Result<u32, VcfHeaderError> {
         if self.infos.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateInfo { id });
         }
@@ -559,7 +597,11 @@ impl VcfHeaderBuilder<Infos> {
             return Err(VcfHeaderError::FlagNumberMismatch { id });
         }
         self.infos.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)?;
+        self.insert_string_map_entry(&id)
+    }
+
+    pub fn add_info(&mut self, id: impl Into<SmolStr>, def: InfoDef) -> Result<(), VcfHeaderError> {
+        self.insert_info(id.into(), def)?;
         Ok(())
     }
 
@@ -570,21 +612,14 @@ impl VcfHeaderBuilder<Infos> {
         def: &super::record_encoder::InfoFieldDef<V>,
     ) -> Result<super::record_encoder::InfoKey<V>, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        if self.infos.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateInfo { id });
-        }
-        if def.value_type == ValueType::Flag && def.number != Number::Count(0) {
-            return Err(VcfHeaderError::FlagNumberMismatch { id });
-        }
-        self.infos.insert(
+        let dict_idx = self.insert_info(
             id.clone(),
             InfoDef {
                 number: def.number,
                 typ: def.value_type,
                 description: SmolStr::from(def.description),
             },
-        );
-        let dict_idx = self.insert_string_map_entry(&id)?;
+        )?;
         Ok(super::record_encoder::InfoKey(
             super::record_encoder::FieldId { dict_idx, name: id },
             PhantomData,
@@ -606,12 +641,8 @@ impl VcfHeaderBuilder<Infos> {
 
 impl VcfHeaderBuilder<Formats> {
     // r[impl vcf_header.format_def]
-    pub fn add_format(
-        &mut self,
-        id: impl Into<SmolStr>,
-        def: FormatDef,
-    ) -> Result<(), VcfHeaderError> {
-        let id = id.into();
+    /// Insert a FORMAT definition, returning its BCF dict index.
+    fn insert_format(&mut self, id: SmolStr, def: FormatDef) -> Result<u32, VcfHeaderError> {
         if self.formats.contains_key(&id) {
             return Err(VcfHeaderError::DuplicateFormat { id });
         }
@@ -619,7 +650,15 @@ impl VcfHeaderBuilder<Formats> {
             return Err(VcfHeaderError::FormatFlagNotAllowed { id });
         }
         self.formats.insert(id.clone(), def);
-        self.insert_string_map_entry(&id)?;
+        self.insert_string_map_entry(&id)
+    }
+
+    pub fn add_format(
+        &mut self,
+        id: impl Into<SmolStr>,
+        def: FormatDef,
+    ) -> Result<(), VcfHeaderError> {
+        self.insert_format(id.into(), def)?;
         Ok(())
     }
 
@@ -630,21 +669,14 @@ impl VcfHeaderBuilder<Formats> {
         def: &super::record_encoder::FormatFieldDef<V>,
     ) -> Result<super::record_encoder::FormatKey<V>, VcfHeaderError> {
         let id = SmolStr::from(def.name);
-        if self.formats.contains_key(&id) {
-            return Err(VcfHeaderError::DuplicateFormat { id });
-        }
-        if def.value_type == ValueType::Flag {
-            return Err(VcfHeaderError::FormatFlagNotAllowed { id });
-        }
-        self.formats.insert(
+        let dict_idx = self.insert_format(
             id.clone(),
             FormatDef {
                 number: def.number,
                 typ: def.value_type,
                 description: SmolStr::from(def.description),
             },
-        );
-        let dict_idx = self.insert_string_map_entry(&id)?;
+        )?;
         Ok(super::record_encoder::FormatKey(
             super::record_encoder::FieldId { dict_idx, name: id },
             PhantomData,

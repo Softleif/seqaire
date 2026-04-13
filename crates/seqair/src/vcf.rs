@@ -125,7 +125,8 @@ pub(crate) mod writer;
 pub use alleles::Alleles;
 pub use error::{AllelesError, VcfEncodeError, VcfError, VcfHeaderError};
 pub use header::{
-    ContigDef, FilterDef, FormatDef, InfoDef, Number, ValueType, VcfHeader, VcfHeaderBuilder,
+    ContigDef, Contigs, FilterDef, Filters, FormatDef, Formats, FromBamHeader, InfoDef, Infos,
+    Number, Samples, ValueType, VcfHeader, VcfHeaderBuilder,
 };
 pub use record::Genotype;
 pub use record_encoder::{
