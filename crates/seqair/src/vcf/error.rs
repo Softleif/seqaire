@@ -137,6 +137,6 @@ pub enum VcfError {
     #[error("unrecognized output format for path: {path}")]
     UnrecognizedFormat { path: String },
 
-    #[error("failed to write field {field}")]
-    FailedToWriteFormattedString { field: SmolStr, source: WriteError },
+    #[error("failed to write float field")]
+    FailedToWriteFormattedString { source: WriteError },
 }
