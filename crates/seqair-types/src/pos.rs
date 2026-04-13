@@ -244,7 +244,8 @@ impl<S> Pos<S> {
     /// Checked position - offset. Returns `None` if result is negative or > `i32::MAX`.
     #[inline]
     pub fn checked_sub_offset(self, offset: Offset) -> Option<Self> {
-        self.checked_add_offset(Offset(offset.0.wrapping_neg()))
+        let negated = Offset(offset.0.checked_neg()?);
+        self.checked_add_offset(negated)
     }
 }
 
@@ -373,6 +374,26 @@ impl TryFrom<i32> for Pos<One> {
             value: NonMaxU32::new(value as u32).expect("BUG: positive i32 is valid NonMaxU32"),
             _system: PhantomData,
         })
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<u32> for Pos<Zero> {
+    type Error = PosOverflow;
+    /// Create a 0-based position from a `u32`. Fails if > `i32::MAX`.
+    #[inline]
+    fn try_from(value: u32) -> Result<Self, PosOverflow> {
+        Self::new(value).ok_or(PosOverflow)
+    }
+}
+
+// r[impl pos.try_from]
+impl TryFrom<u32> for Pos<One> {
+    type Error = PosOverflow;
+    /// Create a 1-based position from a `u32`. Fails if 0 or > `i32::MAX`.
+    #[inline]
+    fn try_from(value: u32) -> Result<Self, PosOverflow> {
+        Self::new(value).ok_or(PosOverflow)
     }
 }
 
@@ -579,6 +600,20 @@ mod tests {
         assert!(Pos0::try_from(u64::from(u32::MAX) + 1).is_err());
         assert!(Pos0::try_from(u64::from(u32::MAX)).is_err());
         assert!(Pos0::try_from(i32::MAX as u64 + 1).is_err());
+        assert!(Pos1::try_from(0u64).is_err(), "Pos1 rejects 0");
+        assert!(Pos1::try_from(i32::MAX as u64 + 1).is_err());
+        assert_eq!(Pos1::try_from(1u64).unwrap().get(), 1);
+    }
+
+    // r[verify pos.try_from]
+    #[test]
+    fn try_from_u32() {
+        assert_eq!(Pos0::try_from(0u32).unwrap().get(), 0);
+        assert_eq!(Pos0::try_from(i32::MAX as u32).unwrap().get(), i32::MAX as u32);
+        assert!(Pos0::try_from(i32::MAX as u32 + 1).is_err());
+        assert!(Pos1::try_from(0u32).is_err());
+        assert_eq!(Pos1::try_from(1u32).unwrap().get(), 1);
+        assert!(Pos1::try_from(i32::MAX as u32 + 1).is_err());
     }
 
     // r[verify pos.as_i32]

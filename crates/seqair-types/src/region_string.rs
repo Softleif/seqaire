@@ -77,9 +77,8 @@ fn parser(input: &mut &str) -> winnow::Result<RegionString> {
 
     fn index(input: &mut &str) -> winnow::Result<Pos1> {
         dec_uint::<&str, u32, _>
-            .verify(|v| *v > 0 && *v != u32::MAX)
-            .map(|v| Pos1::new(v).expect("BUG: verified v > 0 && v != u32::MAX"))
-            .context(StrContext::Expected(StrContextValue::Description("number greater than 0")))
+            .verify_map(Pos1::new)
+            .context(StrContext::Expected(StrContextValue::Description("position in 1..=i32::MAX")))
             .parse_next(input)
     }
 
@@ -203,6 +202,10 @@ mod tests {
         // start greater than end
         let err = RegionString::from_str("chr1:200-100").unwrap_err();
         assert!(matches!(err, RegionStringError::StartGreaterThanEnd));
+
+        // position exceeding i32::MAX must not panic
+        let err = RegionString::from_str("chr1:2147483648").unwrap_err();
+        assert!(matches!(err, RegionStringError::Malformed));
     }
 
     #[test]
