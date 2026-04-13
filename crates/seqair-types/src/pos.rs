@@ -89,7 +89,7 @@ pub struct PosOverflow;
 
 impl fmt::Display for PosOverflow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("position value out of valid range (0..=i32::MAX)")
+        f.write_str("position value out of valid range")
     }
 }
 
@@ -117,6 +117,10 @@ impl Pos<Zero> {
     /// Convert to 1-based. Fails only at `i32::MAX` (0-based) where the
     /// 1-based result would exceed `i32::MAX`.
     #[inline]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "value ≤ i32::MAX, so + 1 ≤ i32::MAX + 1 < u32::MAX"
+    )]
     pub const fn to_one_based(self) -> Result<Pos<One>, PosOverflow> {
         let new_val = self.value.get() + 1;
         match Pos::<One>::new(new_val) {
@@ -157,6 +161,7 @@ impl Pos<One> {
     /// Convert to 0-based. Infallible: 1-based values are in `1..=i32::MAX`,
     /// so subtracting 1 gives `0..=i32::MAX - 1`, always valid.
     #[inline]
+    #[expect(clippy::arithmetic_side_effects, reason = "value ≥ 1, so - 1 ≥ 0")]
     pub const fn to_zero_based(self) -> Pos<Zero> {
         let new_val = self.value.get() - 1;
         match NonMaxU32::new(new_val) {
@@ -190,6 +195,7 @@ impl<S> Pos<S> {
     /// Raw value as `i32`. Infallible because all valid positions are `<= i32::MAX`.
     #[inline]
     #[must_use]
+    #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
     pub const fn as_i32(self) -> i32 {
         self.value.get() as i32
     }
@@ -220,9 +226,14 @@ impl<S> Pos<S> {
     // r[impl pos.add_offset]
     /// Checked position + offset. Returns `None` if result is negative or > `i32::MAX`.
     #[inline]
+    #[expect(
+        clippy::cast_sign_loss,
+        clippy::cast_possible_truncation,
+        reason = "result is checked to be in 0..=i32::MAX"
+    )]
     pub fn checked_add_offset(self, offset: Offset) -> Option<Self> {
-        let result = (self.value.get() as i64).wrapping_add(offset.0);
-        if result < 0 || result > POS_MAX as i64 {
+        let result = i64::from(self.value.get()).wrapping_add(offset.0);
+        if result < 0 || result > i64::from(POS_MAX) {
             return None;
         }
         // result is in 0..=i32::MAX, safe for NonMaxU32.
@@ -246,7 +257,7 @@ impl<S> Sub for Pos<S> {
     type Output = Offset;
     #[inline]
     fn sub(self, rhs: Self) -> Offset {
-        Offset((self.value.get() as i64).wrapping_sub(rhs.value.get() as i64))
+        Offset(i64::from(self.value.get()).wrapping_sub(i64::from(rhs.value.get())))
     }
 }
 
@@ -305,8 +316,8 @@ impl<S> From<Pos<S>> for u32 {
 
 impl<S> From<Pos<S>> for i32 {
     #[inline]
+    #[expect(clippy::cast_possible_wrap, reason = "value ≤ i32::MAX by construction")]
     fn from(pos: Pos<S>) -> i32 {
-        // Valid positions are ≤ i32::MAX, so this never truncates.
         pos.value.get() as i32
     }
 }
@@ -763,10 +774,10 @@ mod tests {
             v in 0u32..=I32_MAX_U32,
             off in 0i64..=100,
         ) {
-            if let Some(p) = Pos0::new(v) {
-                if let Some(result) = p.checked_add_offset(Offset::new(off)) {
-                    prop_assert!(result.get() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
-                }
+            if let Some(p) = Pos0::new(v)
+                && let Some(result) = p.checked_add_offset(Offset::new(off))
+            {
+                prop_assert!(result.get() <= I32_MAX_U32, "checked_add must not exceed i32::MAX");
             }
         }
 

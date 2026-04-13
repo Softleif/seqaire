@@ -370,7 +370,7 @@ fn classify_op(
 
 #[inline]
 fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos32 = i32::try_from(pos.get()).trace_ok("pos exceeds i32 range")?;
+    let pos32 = pos.as_i32();
     for (i, op) in ops.iter().enumerate() {
         if !consumes_ref(op.op_type) {
             continue;
@@ -388,7 +388,7 @@ fn pos_info_linear(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
 // r[impl perf.cigar_binary_search]
 #[inline]
 fn pos_info_bsearch(ops: &[CompactOp], pos: Pos0) -> Option<CigarPosInfo> {
-    let pos32 = i32::try_from(pos.get()).trace_ok("pos exceeds i32 range")?;
+    let pos32 = pos.as_i32();
     let idx = ops.partition_point(|op| op.ref_start <= pos32);
     if idx == 0 {
         return None;
