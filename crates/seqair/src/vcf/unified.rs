@@ -42,6 +42,31 @@ pub struct WithSamples;
 /// Unified VCF/BCF writer. Output format is selected at construction time.
 ///
 /// See the [module documentation](self) for complete usage examples.
+///
+/// `begin_record` is only available after the header has been written:
+///
+/// ```compile_fail
+/// use seqair::vcf::{OutputFormat, Writer};
+///
+/// let mut buf = Vec::new();
+/// let mut writer = Writer::new(&mut buf, OutputFormat::Vcf);
+/// // ERROR: begin_record requires Writer<_, Ready>, not Unstarted
+/// writer.begin_record(todo!(), todo!(), todo!(), None).unwrap();
+/// ```
+///
+/// `write_header` cannot be called twice:
+///
+/// ```compile_fail
+/// use seqair::vcf::{OutputFormat, VcfHeader, Writer};
+/// use std::sync::Arc;
+///
+/// let header = Arc::new(VcfHeader::builder().build().unwrap());
+/// let mut buf = Vec::new();
+/// let writer = Writer::new(&mut buf, OutputFormat::Vcf);
+/// let writer = writer.write_header(&header).unwrap();
+/// // ERROR: write_header is on Unstarted, not Ready
+/// writer.write_header(&header).unwrap();
+/// ```
 pub struct Writer<W: Write, S = Unstarted> {
     inner: WriterInner<W>,
     _state: PhantomData<S>,
@@ -370,6 +395,44 @@ fn begin_vcf_record<'a>(
 
 // r[impl record_encoder.typestate]
 // r[impl record_encoder.typestate_must_use]
+/// Record encoder with typestate enforcement of the
+/// `Begun` → `Filtered` → `WithSamples` → `emit()` chain.
+///
+/// INFO fields cannot be encoded before the filter is set:
+///
+/// ```compile_fail
+/// use seqair::vcf::{Begun, RecordEncoder};
+/// use seqair::vcf::record_encoder::InfoEncoder;
+///
+/// fn check(enc: &mut RecordEncoder<'_, Begun>) {
+///     // ERROR: InfoEncoder is not implemented for RecordEncoder<Begun>
+///     enc.info_int(todo!(), 42);
+/// }
+/// ```
+///
+/// FORMAT fields cannot be encoded before `begin_samples`:
+///
+/// ```compile_fail
+/// use seqair::vcf::{Filtered, RecordEncoder};
+/// use seqair::vcf::record_encoder::FormatEncoder;
+///
+/// fn check(enc: &mut RecordEncoder<'_, Filtered>) {
+///     // ERROR: FormatEncoder is not implemented for RecordEncoder<Filtered>
+///     enc.format_int(todo!(), &[42]).unwrap();
+/// }
+/// ```
+///
+/// INFO fields cannot be encoded after `begin_samples`:
+///
+/// ```compile_fail
+/// use seqair::vcf::{WithSamples, RecordEncoder};
+/// use seqair::vcf::record_encoder::InfoEncoder;
+///
+/// fn check(enc: &mut RecordEncoder<'_, WithSamples>) {
+///     // ERROR: InfoEncoder is not implemented for RecordEncoder<WithSamples>
+///     enc.info_int(todo!(), 42);
+/// }
+/// ```
 #[must_use = "record is silently discarded if emit() is not called"]
 pub struct RecordEncoder<'a, S> {
     // r[impl record_encoder.typestate_w_erased]
