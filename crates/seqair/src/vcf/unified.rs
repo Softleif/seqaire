@@ -11,7 +11,7 @@ use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
 use crate::bam::bgzf_writer::BgzfWriter;
-use seqair_types::{One, Pos, SmallVec, SmolStr};
+use seqair_types::{Pos1, SmallVec, SmolStr};
 use std::io::Write;
 use std::marker::PhantomData;
 
@@ -172,7 +172,7 @@ impl<W: Write> Writer<W, Ready> {
     pub fn begin_record(
         &mut self,
         contig: &ContigId,
-        pos: Pos<One>,
+        pos: Pos1,
         alleles: &Alleles,
         qual: Option<f32>,
     ) -> Result<RecordEncoder<'_, Begun>, VcfError> {
@@ -317,7 +317,7 @@ fn begin_vcf_record<'a>(
     sample_bufs: &'a mut Vec<Vec<u8>>,
     output: VcfOutput<'a>,
     contig: &ContigId,
-    pos: Pos<One>,
+    pos: Pos1,
     alleles: &Alleles,
     qual: Option<f32>,
     n_samples: u32,

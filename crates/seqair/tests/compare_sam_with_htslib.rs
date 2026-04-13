@@ -14,7 +14,7 @@
     reason = "test code with known small values"
 )]
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
-use seqair::bam::{Pos, RecordStore, Zero};
+use seqair::bam::{Pos0, RecordStore};
 use seqair::sam::reader::IndexedSamReader;
 use std::path::Path;
 use std::process::Command;
@@ -109,8 +109,8 @@ fn sam_record_count_matches_htslib() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("rio fetch");
@@ -143,8 +143,8 @@ fn sam_record_fields_match_htslib() {
         reader
             .fetch_into(
                 tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut store,
             )
             .expect("rio fetch");
@@ -185,12 +185,7 @@ fn sam_aux_tags_present() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(
-            tid,
-            Pos::<Zero>::new(6_105_700).unwrap(),
-            Pos::<Zero>::new(6_105_800).unwrap(),
-            &mut store,
-        )
+        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
         .expect("fetch");
 
     // Every record in the test data should have aux tags (at least RG)
@@ -220,12 +215,7 @@ fn sam_aux_rg_tag_matches_htslib() {
     let tid = reader.header().tid("chr19").expect("tid");
     let mut store = RecordStore::new();
     reader
-        .fetch_into(
-            tid,
-            Pos::<Zero>::new(6_105_700).unwrap(),
-            Pos::<Zero>::new(6_105_800).unwrap(),
-            &mut store,
-        )
+        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
         .expect("fetch");
 
     assert_eq!(store.len(), hts.len());

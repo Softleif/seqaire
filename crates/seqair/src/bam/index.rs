@@ -2,7 +2,7 @@
 //! region; [`BamIndex::query_split`] separates nearby (levels 3–5) from distant (levels 0–2) chunks.
 
 use super::bgzf::{BgzfError, VirtualOffset};
-use seqair_types::{Pos, Zero};
+use seqair_types::Pos0;
 use std::path::Path;
 use tracing::instrument;
 
@@ -214,7 +214,7 @@ impl BamIndex {
     /// Query the index for chunks overlapping a region [start, end] (0-based inclusive).
     // r[impl tabix.query]
     // r[impl tabix.pseudo_bin]
-    pub fn query(&self, tid: u32, start: Pos<Zero>, end: Pos<Zero>) -> Vec<Chunk> {
+    pub fn query(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<Chunk> {
         let result = self.query_split(tid, start, end);
         let mut all = result.nearby;
         all.extend(result.distant);
@@ -225,12 +225,7 @@ impl BamIndex {
 
     /// Query the index, returning chunks annotated with their source bin ID.
     /// For diagnostics only — use `query_split` for production code.
-    pub fn query_annotated(
-        &self,
-        tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
-    ) -> Vec<AnnotatedChunk> {
+    pub fn query_annotated(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<AnnotatedChunk> {
         let Some(ref_idx) = self.references.get(tid as usize) else {
             return Vec::new();
         };
@@ -260,7 +255,7 @@ impl BamIndex {
     // r[impl bam.index.chunk_separation+2]
     // r[impl index.edge.no_records]
     /// Query the index, separating distant (level 0–2) from nearby (level 3–5) chunks.
-    pub fn query_split(&self, tid: u32, start: Pos<Zero>, end: Pos<Zero>) -> QueryChunks {
+    pub fn query_split(&self, tid: u32, start: Pos0, end: Pos0) -> QueryChunks {
         let Some(ref_idx) = self.references.get(tid as usize) else {
             return QueryChunks { nearby: Vec::new(), distant: Vec::new() };
         };
@@ -565,7 +560,7 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, BaiError> {
 #[allow(clippy::cast_possible_truncation, reason = "tests")]
 mod tests {
     use super::*;
-    use seqair_types::Pos;
+    use seqair_types::Pos0;
 
     #[test]
     fn reg2bins_includes_bin0() {
@@ -606,8 +601,7 @@ mod tests {
             (4681, vec![chunk(100, 500)]), // leaf bin: main data
         ]);
 
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
+        let result = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
 
         assert_eq!(result.distant.len(), 1, "bin 0 should have 1 chunk");
         assert_eq!(result.distant[0].begin.0, 9000);
@@ -627,9 +621,8 @@ mod tests {
             (4682, vec![chunk(500, 900)]),
         ]);
 
-        let split =
-            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(200).unwrap());
-        let flat = idx.query(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(200).unwrap());
+        let split = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(200).unwrap());
+        let flat = idx.query(0, Pos0::new(0).unwrap(), Pos0::new(200).unwrap());
 
         let mut combined: Vec<u64> =
             split.nearby.iter().chain(&split.distant).map(|c| c.begin.0).collect();
@@ -645,8 +638,7 @@ mod tests {
     fn query_split_no_bin0_in_index() {
         let idx = index_with_bins(vec![(4681, vec![chunk(100, 500)])]);
 
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
+        let result = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(result.distant.is_empty(), "no bin 0 in index → empty bin0");
         assert!(!result.nearby.is_empty());
     }
@@ -655,8 +647,7 @@ mod tests {
     #[test]
     fn query_split_empty_reference() {
         let idx = BamIndex { references: Vec::new() };
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(0).unwrap(), Pos::<Zero>::new(100).unwrap());
+        let result = idx.query_split(0, Pos0::new(0).unwrap(), Pos0::new(100).unwrap());
         assert!(result.nearby.is_empty());
         assert!(result.distant.is_empty());
     }
@@ -810,8 +801,7 @@ mod tests {
             (4685, vec![chunk(700, 1000)]), // level 5 nearby — overlaps with bin 73
         ]);
 
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+        let result = idx.query_split(0, Pos0::new(65500).unwrap(), Pos0::new(65700).unwrap());
 
         // After merging, there should be a single chunk [500, 1000]
         assert_eq!(
@@ -830,8 +820,7 @@ mod tests {
         let idx =
             index_with_bins(vec![(73, vec![chunk(500, 700)]), (4685, vec![chunk(700, 1000)])]);
 
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+        let result = idx.query_split(0, Pos0::new(65500).unwrap(), Pos0::new(65700).unwrap());
 
         assert_eq!(
             result.nearby.len(),
@@ -846,8 +835,7 @@ mod tests {
         let idx =
             index_with_bins(vec![(73, vec![chunk(500, 700)]), (4685, vec![chunk(900, 1200)])]);
 
-        let result =
-            idx.query_split(0, Pos::<Zero>::new(65500).unwrap(), Pos::<Zero>::new(65700).unwrap());
+        let result = idx.query_split(0, Pos0::new(65500).unwrap(), Pos0::new(65700).unwrap());
 
         assert_eq!(
             result.nearby.len(),

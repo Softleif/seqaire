@@ -430,7 +430,7 @@ mod tests {
     use crate::vcf::header::ContigDef;
     use crate::vcf::record::Genotype;
     use crate::vcf::unified::Writer;
-    use seqair_types::{Base, One, Pos};
+    use seqair_types::{Base, Pos1};
     use std::sync::Arc;
 
     // r[verify record_encoder.field_def_const]
@@ -596,7 +596,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(1).unwrap(), &alleles, None)
+            .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
         depth.encode_info(&mut enc, &setup.dp_info);
@@ -615,7 +615,7 @@ mod tests {
         let header = Arc::new(builder.build().unwrap());
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let pos = Pos::<One>::new(10).unwrap();
+        let pos = Pos1::new(10).unwrap();
 
         let bcf_bytes = {
             let mut buf = Vec::new();
@@ -662,7 +662,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
@@ -686,7 +686,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
@@ -713,7 +713,7 @@ mod tests {
         let mut writer = writer.write_header(&header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         writer
-            .begin_record(&contig, Pos::<One>::new(10).unwrap(), &alleles, None)
+            .begin_record(&contig, Pos1::new(10).unwrap(), &alleles, None)
             .unwrap()
             .filter_fail(&[&ld])
             .emit()
@@ -734,7 +734,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         writer
-            .begin_record(&setup.contig, Pos::<One>::new(1).unwrap(), &alleles, None)
+            .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass()
             .emit()
@@ -758,7 +758,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let mut filtered = writer
-            .begin_record(&setup.contig, Pos::<One>::new(1).unwrap(), &alleles, None)
+            .begin_record(&setup.contig, Pos1::new(1).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
         accepts_info_enc(&mut filtered);
@@ -779,7 +779,7 @@ mod tests {
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         for pos in [1u32, 100, 200] {
             writer
-                .begin_record(&setup.contig, Pos::<One>::new(pos).unwrap(), &alleles, None)
+                .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, None)
                 .unwrap()
                 .filter_pass()
                 .emit()
@@ -835,9 +835,8 @@ mod tests {
         let mut writer = writer.write_header(&header).unwrap();
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let enc = writer
-            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
-            .unwrap();
+        let enc =
+            writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0)).unwrap();
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
@@ -863,9 +862,8 @@ mod tests {
         let mut writer = writer.write_header(&header).unwrap();
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let enc = writer
-            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
-            .unwrap();
+        let enc =
+            writer.begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0)).unwrap();
         let mut enc = enc.filter_pass();
         dp_info.encode(&mut enc, 150);
         let mut enc = enc.begin_samples();
@@ -900,7 +898,7 @@ mod tests {
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap();
         let mut enc = enc.filter_pass();
         setup.dp_info.encode(&mut enc, 50);
@@ -922,7 +920,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();
@@ -939,7 +937,7 @@ mod tests {
         let mut writer = writer.write_header(&setup.header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();
@@ -959,7 +957,7 @@ mod tests {
         let mut writer = writer.write_header(&header).unwrap();
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
         let enc = writer
-            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         let mut enc = enc.begin_samples();

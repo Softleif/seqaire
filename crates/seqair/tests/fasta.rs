@@ -14,7 +14,7 @@
 )]
 use proptest::prelude::*;
 use rust_htslib::faidx;
-use seqair::bam::{Pos, Zero};
+use seqair::bam::Pos0;
 use seqair::fasta::{FaiEntry, IndexedFastaReader};
 use std::{io::Write, path::Path};
 use tempfile::TempDir;
@@ -217,8 +217,8 @@ proptest! {
         writeln!(fai, "seq1\t{}\t{}\t{}\t{}", seq_len, offset, linebases, linewidth).unwrap();
 
         let mut reader = IndexedFastaReader::open(&fasta_path).unwrap();
-        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
-        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let start_pos = Pos0::try_from(start).unwrap();
+        let stop_pos = Pos0::try_from(stop).unwrap();
         let fetched = reader.fetch_seq("seq1", start_pos, stop_pos).unwrap();
 
         let expected: Vec<u8> = bases[start as usize..stop as usize]
@@ -268,8 +268,8 @@ proptest! {
         let stop = start + fetch_len;
 
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
-        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
-        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let start_pos = Pos0::try_from(start).unwrap();
+        let stop_pos = Pos0::try_from(stop).unwrap();
         let seq = rio.fetch_seq(name, start_pos, stop_pos).expect("rio fetch");
         let hts_seq = htslib_fetch(name, start, stop);
 
@@ -294,8 +294,8 @@ proptest! {
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
         let mut forked = rio.fork().expect("fork");
 
-        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
-        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let start_pos = Pos0::try_from(start).unwrap();
+        let stop_pos = Pos0::try_from(stop).unwrap();
         let orig = rio.fetch_seq("chr19", start_pos, stop_pos).expect("orig fetch");
         let fork_result = forked.fetch_seq("chr19", start_pos, stop_pos).expect("fork fetch");
 
@@ -321,11 +321,7 @@ fn fetch_base_seq_reuses_buffer() {
 
     // First call: buffer starts empty, gets allocated
     let seq1 = readers
-        .fetch_base_seq(
-            "bacteriophage_lambda_CpG",
-            Pos::<Zero>::new(0).unwrap(),
-            Pos::<Zero>::new(100).unwrap(),
-        )
+        .fetch_base_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
         .unwrap();
     assert_eq!(seq1.len(), 100);
     // Every element must be a valid Base
@@ -338,30 +334,22 @@ fn fetch_base_seq_reuses_buffer() {
     let seq2 = readers
         .fetch_base_seq(
             "bacteriophage_lambda_CpG",
-            Pos::<Zero>::new(100).unwrap(),
-            Pos::<Zero>::new(300).unwrap(),
+            Pos0::new(100).unwrap(),
+            Pos0::new(300).unwrap(),
         )
         .unwrap();
     assert_eq!(seq2.len(), 200);
 
     // Third call: same region as first, must produce identical result
     let seq3 = readers
-        .fetch_base_seq(
-            "bacteriophage_lambda_CpG",
-            Pos::<Zero>::new(0).unwrap(),
-            Pos::<Zero>::new(100).unwrap(),
-        )
+        .fetch_base_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
         .unwrap();
     assert_eq!(seq1, seq3, "repeated fetch must produce identical results");
 
     // Verify against raw fetch + manual conversion
     let mut raw_reader = IndexedFastaReader::open(test_fasta_path()).unwrap();
     let raw = raw_reader
-        .fetch_seq(
-            "bacteriophage_lambda_CpG",
-            Pos::<Zero>::new(0).unwrap(),
-            Pos::<Zero>::new(100).unwrap(),
-        )
+        .fetch_seq("bacteriophage_lambda_CpG", Pos0::new(0).unwrap(), Pos0::new(100).unwrap())
         .unwrap();
     let expected: Vec<Base> = Base::from_ascii_vec(raw);
     assert_eq!(&*seq1, &expected[..], "fetch_base_seq must match from_ascii_vec on raw fetch");
@@ -388,8 +376,8 @@ proptest! {
         let mut rio = IndexedFastaReader::open(test_fasta_path()).expect("rio open");
         let mut buf = Vec::new();
 
-        let start_pos = Pos::<Zero>::try_from_u64(start).unwrap();
-        let stop_pos = Pos::<Zero>::try_from_u64(stop).unwrap();
+        let start_pos = Pos0::try_from(start).unwrap();
+        let stop_pos = Pos0::try_from(stop).unwrap();
         let alloc = rio.fetch_seq("bacteriophage_lambda_CpG", start_pos, stop_pos).expect("fetch_seq");
         rio.fetch_seq_into("bacteriophage_lambda_CpG", start_pos, stop_pos, &mut buf)
             .expect("fetch_seq_into");

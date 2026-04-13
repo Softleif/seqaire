@@ -18,7 +18,7 @@ use seqair::vcf::header::{ContigDef, Number, ValueType};
 use seqair::vcf::record::Genotype;
 use seqair::vcf::record_encoder::{FormatFieldDef, Gt, InfoFieldDef, Scalar};
 use seqair::vcf::{ContigId, FormatGt, FormatInt, InfoInt, OutputFormat, VcfHeader, Writer};
-use seqair_types::{Base, One, Pos};
+use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
 struct TestSetup {
@@ -90,7 +90,7 @@ fn write_seqair_bcf(
         let writer = Writer::new(&mut buf, OutputFormat::Bcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig, Pos::<One>::new(pos).unwrap(), &alleles, Some(qual))
+            .begin_record(&setup.contig, Pos1::new(pos).unwrap(), &alleles, Some(qual))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, depth);

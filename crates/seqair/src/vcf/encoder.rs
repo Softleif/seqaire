@@ -201,7 +201,7 @@ impl<'a> BcfRecordEncoder<'a> {
 // ── Alleles integration ─────────────────────────────────────────────────
 
 use super::alleles::Alleles;
-use seqair_types::{One, Pos};
+use seqair_types::Pos1;
 
 impl Alleles {
     // r[impl bcf_encoder.begin_record]
@@ -213,7 +213,7 @@ impl Alleles {
         &self,
         enc: &mut BcfRecordEncoder<'_>,
         contig: ContigHandle,
-        pos: Pos<One>,
+        pos: Pos1,
         qual: Option<f32>,
     ) -> Result<(), VcfError> {
         enc.shared_buf.clear();
@@ -371,7 +371,7 @@ mod tests {
         let mut enc = test_encoder(&mut shared, &mut indiv, &mut bgzf);
 
         let alleles = Alleles::snv(Base::A, Base::T).unwrap();
-        let pos = Pos::<One>::new(100).unwrap();
+        let pos = Pos1::new(100).unwrap();
         alleles.begin_record(&mut enc, ContigHandle(0), pos, Some(30.0)).unwrap();
 
         assert_eq!(enc.n_allele, 2);

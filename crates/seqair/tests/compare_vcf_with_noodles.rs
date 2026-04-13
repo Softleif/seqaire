@@ -22,7 +22,7 @@ use seqair::vcf::{
     ContigId, FormatGt, FormatInt, InfoFlag, InfoFloat, InfoInt, InfoInts, OutputFormat, VcfHeader,
     Writer,
 };
-use seqair_types::{Base, One, Pos};
+use seqair_types::{Base, Pos1};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -115,7 +115,7 @@ fn vcf_text_readable_by_noodles() {
         let writer = Writer::new(&mut output, OutputFormat::Vcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig_chr1, Pos::<One>::new(12345).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.contig_chr1, Pos1::new(12345).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 50);
@@ -154,7 +154,7 @@ fn bcf_write_record_readable_by_noodles() {
         let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig_chr1, Pos::<One>::new(100).unwrap(), &alleles, Some(29.5))
+            .begin_record(&setup.contig_chr1, Pos1::new(100).unwrap(), &alleles, Some(29.5))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 42);
@@ -189,7 +189,7 @@ fn bcf_encoder_readable_by_noodles() {
         let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
         let mut writer = writer.write_header(&setup.header).unwrap();
         let mut enc = writer
-            .begin_record(&setup.contig_chr1, Pos::<One>::new(500).unwrap(), &alleles, Some(45.0))
+            .begin_record(&setup.contig_chr1, Pos1::new(500).unwrap(), &alleles, Some(45.0))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, 100);
@@ -254,7 +254,7 @@ proptest! {
         dp in 0i32..10000,
     ) {
         let setup = rich_setup();
-        let pos = Pos::<One>::new(pos).unwrap();
+        let pos = Pos1::new(pos).unwrap();
 
         let mut bcf_output = Vec::new();
         {
@@ -300,7 +300,7 @@ proptest! {
             .unwrap();
         let header = Arc::new(builder.build().unwrap());
 
-        let pos = Pos::<One>::new(pos).unwrap();
+        let pos = Pos1::new(pos).unwrap();
 
         let mut output = Vec::new();
         {
@@ -375,7 +375,7 @@ fn multi_sample_bcf_readable_by_noodles() {
         let writer = Writer::new(&mut bcf_output, OutputFormat::Bcf);
         let mut writer = writer.write_header(&header).unwrap();
         let mut enc = writer
-            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         dp_info.encode(&mut enc, 150);
@@ -420,7 +420,7 @@ fn multi_sample_vcf_readable_by_noodles() {
         let writer = Writer::new(&mut output, OutputFormat::Vcf);
         let mut writer = writer.write_header(&header).unwrap();
         let mut enc = writer
-            .begin_record(&contig, Pos::<One>::new(100).unwrap(), &alleles, Some(30.0))
+            .begin_record(&contig, Pos1::new(100).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         dp_info.encode(&mut enc, 150);
@@ -474,7 +474,7 @@ fn multi_sample_bcf_readable_by_bcftools() {
         let writer = Writer::new(&mut buf, OutputFormat::Bcf);
         let mut writer = writer.write_header(&header).unwrap();
         let mut enc = writer
-            .begin_record(&contig, Pos::<One>::new(200).unwrap(), &alleles, Some(50.0))
+            .begin_record(&contig, Pos1::new(200).unwrap(), &alleles, Some(50.0))
             .unwrap()
             .filter_pass();
         dp_info.encode(&mut enc, 120);

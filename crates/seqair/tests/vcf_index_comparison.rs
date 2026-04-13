@@ -20,7 +20,7 @@ use seqair::vcf::record_encoder::{FormatFieldDef, FormatGt, Gt, InfoFieldDef, In
 use seqair::vcf::{
     Alleles, ContigDef, Genotype, Number, OutputFormat, ValueType, VcfHeader, Writer,
 };
-use seqair_types::{Base, One, Pos};
+use seqair_types::{Base, Pos1};
 use std::sync::Arc;
 
 fn has_bcftools() -> bool {
@@ -81,7 +81,7 @@ fn write_vcf_gz_with_index(
         let (ref_base, alt_base) = bases[i % bases.len()];
         let alleles = Alleles::snv(ref_base, alt_base).unwrap();
         let mut enc = writer
-            .begin_record(&setup.chr1, Pos::<One>::new(pos).unwrap(), &alleles, Some(30.0))
+            .begin_record(&setup.chr1, Pos1::new(pos).unwrap(), &alleles, Some(30.0))
             .unwrap()
             .filter_pass();
         setup.dp_info.encode(&mut enc, (i as i32 + 1) * 10);
@@ -93,7 +93,7 @@ fn write_vcf_gz_with_index(
     // Add a record on chr2
     let alleles = Alleles::snv(Base::T, Base::C).unwrap();
     let mut enc = writer
-        .begin_record(&setup.chr2, Pos::<One>::new(10000).unwrap(), &alleles, Some(50.0))
+        .begin_record(&setup.chr2, Pos1::new(10000).unwrap(), &alleles, Some(50.0))
         .unwrap()
         .filter_pass();
     setup.dp_info.encode(&mut enc, 80);
@@ -353,7 +353,7 @@ fn write_proptest_vcf(
     for &pos in positions {
         let alleles = Alleles::snv(ref_base, alt_base).unwrap();
         let mut enc = writer
-            .begin_record(&chr1, Pos::<One>::new(pos).unwrap(), &alleles, None)
+            .begin_record(&chr1, Pos1::new(pos).unwrap(), &alleles, None)
             .unwrap()
             .filter_pass();
         dp_info.encode(&mut enc, 30);

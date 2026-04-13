@@ -12,7 +12,7 @@
     reason = "test code with known small values"
 )]
 
-use seqair::bam::{Pos, RecordStore, Zero};
+use seqair::bam::{Pos0, RecordStore};
 use seqair::reader::{IndexedReader, Readers};
 use std::path::Path;
 use std::process::Command;
@@ -112,8 +112,8 @@ fn bam_and_sam_produce_same_records() {
         bam_reader
             .fetch_into(
                 bam_tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut bam_store,
             )
             .unwrap();
@@ -122,8 +122,8 @@ fn bam_and_sam_produce_same_records() {
         sam_reader
             .fetch_into(
                 sam_tid,
-                Pos::<Zero>::new(start as u32).unwrap(),
-                Pos::<Zero>::new(end as u32).unwrap(),
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
                 &mut sam_store,
             )
             .unwrap();
@@ -165,12 +165,7 @@ fn fork_works_for_both_formats() {
     let tid = bam_fork.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
     bam_fork
-        .fetch_into(
-            tid,
-            Pos::<Zero>::new(6_105_700).unwrap(),
-            Pos::<Zero>::new(6_105_800).unwrap(),
-            &mut store,
-        )
+        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
         .unwrap();
     assert!(!store.is_empty(), "bam fork should fetch records");
 
@@ -178,8 +173,8 @@ fn fork_works_for_both_formats() {
     sam_fork
         .fetch_into(
             sam_tid,
-            Pos::<Zero>::new(6_105_700).unwrap(),
-            Pos::<Zero>::new(6_105_800).unwrap(),
+            Pos0::new(6_105_700).unwrap(),
+            Pos0::new(6_105_800).unwrap(),
             &mut store,
         )
         .unwrap();
@@ -239,12 +234,7 @@ fn readers_fork_cram() {
     let tid = forked.header().tid("chr19").unwrap();
     let mut store = RecordStore::new();
     forked
-        .fetch_into(
-            tid,
-            Pos::<Zero>::new(6_105_700).unwrap(),
-            Pos::<Zero>::new(6_105_800).unwrap(),
-            &mut store,
-        )
+        .fetch_into(tid, Pos0::new(6_105_700).unwrap(), Pos0::new(6_105_800).unwrap(), &mut store)
         .unwrap();
     assert!(!store.is_empty(), "cram fork should fetch records");
 }
@@ -262,8 +252,8 @@ fn bam_and_cram_produce_same_records() {
         let mut bam_store = RecordStore::new();
         bam.fetch_into(
             bam_tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut bam_store,
         )
         .unwrap();
@@ -271,8 +261,8 @@ fn bam_and_cram_produce_same_records() {
         let mut cram_store = RecordStore::new();
         cram.fetch_into(
             cram_tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut cram_store,
         )
         .unwrap();
@@ -325,22 +315,22 @@ fn all_three_formats_produce_same_records() {
 
     bam.fetch_into(
         bam_tid,
-        Pos::<Zero>::new(start as u32).unwrap(),
-        Pos::<Zero>::new(end as u32).unwrap(),
+        Pos0::new(start as u32).unwrap(),
+        Pos0::new(end as u32).unwrap(),
         &mut bam_store,
     )
     .unwrap();
     sam.fetch_into(
         sam_tid,
-        Pos::<Zero>::new(start as u32).unwrap(),
-        Pos::<Zero>::new(end as u32).unwrap(),
+        Pos0::new(start as u32).unwrap(),
+        Pos0::new(end as u32).unwrap(),
         &mut sam_store,
     )
     .unwrap();
     cram.fetch_into(
         cram_tid,
-        Pos::<Zero>::new(start as u32).unwrap(),
-        Pos::<Zero>::new(end as u32).unwrap(),
+        Pos0::new(start as u32).unwrap(),
+        Pos0::new(end as u32).unwrap(),
         &mut cram_store,
     )
     .unwrap();

@@ -14,7 +14,7 @@
     reason = "test code with known small values"
 )]
 use proptest::prelude::*;
-use seqair::bam::{Pos, Zero};
+use seqair::bam::Pos0;
 use seqair_types::Base;
 
 // We can't directly call the private parse functions, but we can test the
@@ -73,7 +73,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
+        reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert!(!store.is_empty(), "should fetch at least 1 record");
         let rec = store.record(0);
@@ -127,7 +127,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
+        reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let seq = store.seq(0);
@@ -172,7 +172,7 @@ proptest! {
         let mut reader = seqair::sam::reader::IndexedSamReader::open(&sam_gz)?;
         let tid = reader.header().tid("chr1").unwrap();
         let mut store = seqair::bam::RecordStore::new();
-        reader.fetch_into(tid, Pos::<Zero>::new(1).unwrap(), Pos::<Zero>::new(100_000_000).unwrap(), &mut store)?;
+        reader.fetch_into(tid, Pos0::new(1).unwrap(), Pos0::new(100_000_000).unwrap(), &mut store)?;
 
         prop_assert_eq!(store.len(), 1);
         let stored_qual = store.qual(0);

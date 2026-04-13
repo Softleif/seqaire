@@ -9,7 +9,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use seqair::reader::FuzzReaders;
-use seqair_types::{Offset, Pos, Zero};
+use seqair_types::{Offset, Pos0};
 
 fuzz_target!(|data: &[u8]| {
     // Layout: [bam_len:4][bai_len:4][fai_len:2][gzi_len:2][bam][bai][fasta_gz][fai_text][gzi]
@@ -61,7 +61,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let start = Pos::<Zero>::new(0).unwrap();
+    let start = Pos0::new(0).unwrap();
     let end = match start.checked_add_offset(Offset::new(5_000)) {
         Some(p) => p,
         None => return,

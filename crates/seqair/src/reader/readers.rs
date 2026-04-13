@@ -4,8 +4,7 @@ use crate::{
     fasta::{FastaError, IndexedFastaReader},
 };
 use seqair_types::Base;
-use seqair_types::Pos;
-use seqair_types::Zero;
+use seqair_types::Pos0;
 use std::path::Path;
 use std::rc::Rc;
 use tracing::instrument;
@@ -133,8 +132,8 @@ impl Readers {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, ReaderError> {
         self.alignment.fetch_into(tid, start, end, store)
@@ -149,8 +148,8 @@ impl Readers {
     pub fn pileup(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
     ) -> Result<PileupEngine, ReaderError> {
         self.alignment.fetch_into(tid, start, end, &mut self.store)?;
 
@@ -185,8 +184,8 @@ impl Readers {
     pub fn fetch_base_seq(
         &mut self,
         name: &str,
-        start: Pos<Zero>,
-        stop: Pos<Zero>,
+        start: Pos0,
+        stop: Pos0,
     ) -> Result<Rc<[Base]>, FastaError> {
         self.fasta.fetch_seq_into(name, start, stop, &mut self.fasta_buf)?;
         // Take the buffer so from_ascii_vec can reinterpret it in-place (safe),

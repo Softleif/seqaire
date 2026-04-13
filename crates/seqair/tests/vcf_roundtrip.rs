@@ -27,7 +27,7 @@ use seqair::vcf::{
     Alleles, ContigDef, FilterId, Genotype, Number, OutputFormat, Ready, ValueType, VcfHeader,
     Writer,
 };
-use seqair_types::{Base, One, Pos};
+use seqair_types::{Base, Pos1};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -186,7 +186,7 @@ fn write_one_record<W: std::io::Write>(
     let ref_depth = rec.dp / 2;
 
     let enc = writer
-        .begin_record(&setup.contig, Pos::<One>::new(rec.pos).unwrap(), &rec.alleles, rec.qual)
+        .begin_record(&setup.contig, Pos1::new(rec.pos).unwrap(), &rec.alleles, rec.qual)
         .unwrap();
 
     let mut enc =

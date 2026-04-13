@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::{Offset, Pos, Zero};
+use seqair_types::{Offset, Pos0};
 
 // Valid BAM CIGAR op codes (0..=8, skipping 6=P which is rare and adds no coverage)
 // M=0, I=1, D=2, N=3, S=4, H=5, P=6, ==7, X=8
@@ -174,7 +174,7 @@ fuzz_target!(|input: FuzzPileupInput| {
     const MAX_RECORDS: usize = 32;
     const MAX_REGION_LEN: u32 = 1000;
 
-    let region_start = match Pos::<Zero>::new(u32::from(input.region_start)) {
+    let region_start = match Pos0::new(u32::from(input.region_start)) {
         Some(p) => p,
         None => return,
     };

@@ -2,7 +2,7 @@
 //! Used transiently during region loading; the pileup engine works from [`crate::bam::RecordStore`] instead.
 
 use super::seq;
-use seqair_types::{BamFlags, Offset, Pos, Zero};
+use seqair_types::{BamFlags, Offset, Pos0};
 
 /// A decoded BAM record with owned variable-length data.
 ///
@@ -13,8 +13,8 @@ use seqair_types::{BamFlags, Offset, Pos, Zero};
 // r[impl flags.field_type]
 #[derive(Debug, Clone)]
 pub struct BamRecord {
-    pub pos: Pos<Zero>,
-    pub end_pos: Pos<Zero>,
+    pub pos: Pos0,
+    pub end_pos: Pos0,
     pub tid: i32,
     pub seq_len: u32,
     pub flags: BamFlags,
@@ -51,13 +51,7 @@ impl BamRecord {
         )]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
         let end_pos = compute_end_pos(h.pos, cigar_slice)
-            .ok_or(DecodeError::InvalidPosition {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> decoded from BAM always fits i32"
-                )]
-                value: h.pos.get() as i32,
-            })?;
+            .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
         let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(cigar_slice);
 
         #[allow(
@@ -119,7 +113,7 @@ impl BamRecord {
 }
 
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
-pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos<Zero>> {
+pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos0> {
     let h = parse_header(raw).ok()?;
     // All bounds ≤ qual_end ≤ raw.len() checked by parse_header
     debug_assert!(h.cigar_end <= raw.len(), "cigar overrun: {} > {}", h.cigar_end, raw.len());
@@ -129,7 +123,7 @@ pub fn compute_end_pos_from_raw(raw: &[u8]) -> Option<Pos<Zero>> {
 
 // r[impl bam.record.end_pos]
 // r[impl bam.record.zero_refspan]
-pub(crate) fn compute_end_pos(pos: Pos<Zero>, cigar_bytes: &[u8]) -> Option<Pos<Zero>> {
+pub(crate) fn compute_end_pos(pos: Pos0, cigar_bytes: &[u8]) -> Option<Pos0> {
     use super::cigar::{CIGAR_D, CIGAR_EQ, CIGAR_M, CIGAR_N, CIGAR_X};
 
     let mut ref_len: i64 = 0;
@@ -190,7 +184,7 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 /// duplicating the 36-byte header parsing and checked offset arithmetic.
 pub(crate) struct ParsedHeader {
     pub tid: i32,
-    pub pos: Pos<Zero>,
+    pub pos: Pos0,
     pub mapq: u8,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
@@ -223,8 +217,8 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     debug_assert!(raw.len() >= 32, "raw record too short for fixed fields: {}", raw.len());
     let tid = i32::from_le_bytes(read4(raw, 0));
     let pos_i32 = i32::from_le_bytes(read4(raw, 4));
-    let pos = Pos::<Zero>::try_from_i64(i64::from(pos_i32))
-        .ok_or(DecodeError::InvalidPosition { value: pos_i32 })?;
+    let pos =
+        Pos0::try_from(pos_i32).map_err(|_| DecodeError::InvalidPosition { value: pos_i32 })?;
     // raw.len() >= 32, so raw[8] and raw[9] are in bounds
     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
     let name_len = raw[8] as usize;
@@ -295,8 +289,8 @@ mod tests {
     fn test_compute_end_pos() {
         let op = 50u32 << 4;
         assert_eq!(
-            compute_end_pos(Pos::<Zero>::new(100).unwrap(), &op.to_le_bytes()),
-            Some(Pos::<Zero>::new(149).unwrap())
+            compute_end_pos(Pos0::new(100).unwrap(), &op.to_le_bytes()),
+            Some(Pos0::new(149).unwrap())
         );
     }
 
@@ -342,8 +336,8 @@ mod tests {
         raw[43..47].copy_from_slice(&[30, 30, 30, 30]);
 
         let rec = BamRecord::decode(&raw[..47]).unwrap();
-        assert_eq!(rec.pos, Pos::<Zero>::new(100).unwrap());
-        assert_eq!(rec.end_pos, Pos::<Zero>::new(103).unwrap());
+        assert_eq!(rec.pos, Pos0::new(100).unwrap());
+        assert_eq!(rec.end_pos, Pos0::new(103).unwrap());
         assert_eq!(rec.flags, BamFlags::from(99));
         assert_eq!(rec.mapq, 60);
         assert_eq!(&*rec.qname, b"read");

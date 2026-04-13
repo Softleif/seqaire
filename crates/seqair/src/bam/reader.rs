@@ -11,7 +11,7 @@ use super::{
     record_store::RecordStore,
     region_buf::{self, RegionBuf},
 };
-use seqair_types::{Pos, SmolStr, Zero};
+use seqair_types::{Pos0, SmolStr};
 use std::{
     fs::File,
     io::{Read, Seek},
@@ -170,8 +170,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
     pub fn fetch_into(
         &mut self,
         tid: u32,
-        start: Pos<Zero>,
-        end: Pos<Zero>,
+        start: Pos0,
+        end: Pos0,
         store: &mut RecordStore,
     ) -> Result<usize, BamError> {
         store.clear();
@@ -228,8 +228,8 @@ impl<R: Read + Seek> IndexedBamReader<R> {
                     let rec_tid = i32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_pos_raw = i32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-                    let rec_pos = Pos::<Zero>::try_from_i64(i64::from(rec_pos_raw))
-                        .ok_or(BamError::InvalidPosition { value: rec_pos_raw })?;
+                    let rec_pos = Pos0::try_from(rec_pos_raw)
+                        .map_err(|_| BamError::InvalidPosition { value: rec_pos_raw })?;
                     #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 checked above")]
                     let rec_flags = BamFlags::from(u16::from_le_bytes([raw[14], raw[15]]));
 

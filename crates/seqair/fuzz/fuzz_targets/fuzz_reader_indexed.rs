@@ -12,7 +12,7 @@ use seqair::{
     reader::FuzzReaders,
 };
 use seqair_fuzz::indexed_reader::{Format, Input};
-use seqair_types::{Offset, Pos, Zero};
+use seqair_types::{Offset, Pos0};
 
 fuzz_target!(|data: &[u8]| {
     let Some(input) = Input::parse(data) else {
@@ -66,7 +66,7 @@ fuzz_target!(|data: &[u8]| {
         let _ = header.target_len(i as u32);
     }
 
-    let start = Pos::<Zero>::new(0).unwrap();
+    let start = Pos0::new(0).unwrap();
     let Some(end) = start.checked_add_offset(Offset::new(10_000)) else {
         return;
     };

@@ -11,7 +11,7 @@
     clippy::cast_possible_wrap,
     reason = "test code with known small values"
 )]
-use seqair::bam::{IndexedBamReader, Pos, RecordStore, Zero};
+use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use std::{path::Path, sync::Arc, thread};
 
 fn test_bam_path() -> &'static Path {
@@ -35,8 +35,8 @@ fn fetch_record_positions(
     reader
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut store,
         )
         .expect("fetch_into");
@@ -137,8 +137,8 @@ fn fork_fetches_are_independent() {
     fork_a
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut store_a,
         )
         .expect("fetch_a");
@@ -150,8 +150,8 @@ fn fork_fetches_are_independent() {
     fork_b
         .fetch_into(
             tid2,
-            Pos::<Zero>::new(start2 as u32).unwrap(),
-            Pos::<Zero>::new(end2 as u32).unwrap(),
+            Pos0::new(start2 as u32).unwrap(),
+            Pos0::new(end2 as u32).unwrap(),
             &mut store_b,
         )
         .expect("fetch_b different region");
@@ -160,8 +160,8 @@ fn fork_fetches_are_independent() {
     fork_b
         .fetch_into(
             tid,
-            Pos::<Zero>::new(start as u32).unwrap(),
-            Pos::<Zero>::new(end as u32).unwrap(),
+            Pos0::new(start as u32).unwrap(),
+            Pos0::new(end as u32).unwrap(),
             &mut store_b,
         )
         .expect("fetch_b same region");

@@ -5,7 +5,7 @@
 //! - **Bases slab**: decoded `Base` values per record, accessed per-position in pileup
 //! - **Data slab**: cigar + qual + aux per record, accessed during pileup construction
 
-use seqair_types::{BamFlags, Base, Pos, Zero};
+use seqair_types::{BamFlags, Base, Pos0};
 
 use super::{
     cigar,
@@ -17,8 +17,8 @@ use super::{
 // r[impl record_store.push_raw+2]
 // r[impl record_store.slim_record_fields]
 pub struct SlimRecord {
-    pub pos: Pos<Zero>,
-    pub end_pos: Pos<Zero>,
+    pub pos: Pos0,
+    pub end_pos: Pos0,
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub mapq: u8,
@@ -123,13 +123,7 @@ impl RecordStore {
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
         let cigar_slice = &raw[h.var_start..h.cigar_end];
         let end_pos = record::compute_end_pos(h.pos, cigar_slice)
-            .ok_or(DecodeError::InvalidPosition {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> decoded from BAM always fits i32"
-                )]
-                value: h.pos.get() as i32,
-            })?;
+            .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(cigar_slice);
 
         // --- Write into name slab ---
@@ -257,8 +251,8 @@ impl RecordStore {
     )]
     pub fn push_fields(
         &mut self,
-        pos: Pos<Zero>,
-        end_pos: Pos<Zero>,
+        pos: Pos0,
+        end_pos: Pos0,
         flags: BamFlags,
         mapq: u8,
         matching_bases: u32,
@@ -417,7 +411,7 @@ impl RecordStore {
     pub fn set_alignment(
         &mut self,
         idx: u32,
-        new_pos: Pos<Zero>,
+        new_pos: Pos0,
         new_cigar_packed: &[u8],
     ) -> Result<(), DecodeError> {
         let rec = self.record(idx);
@@ -439,13 +433,7 @@ impl RecordStore {
             u16::try_from(n_ops).map_err(|_| DecodeError::CigarOpCountOverflow { count: n_ops })?;
 
         let end_pos = record::compute_end_pos(new_pos, new_cigar_packed)
-            .ok_or(DecodeError::InvalidPosition {
-                #[expect(
-                    clippy::cast_possible_wrap,
-                    reason = "BAM positions are capped at 2^29 by format spec; Pos<Zero> always fits i32"
-                )]
-                value: new_pos.get() as i32,
-            })?;
+            .ok_or(DecodeError::InvalidPosition { value: new_pos.as_i32() })?;
 
         let (matching_bases, indel_bases) = cigar::calc_matches_indels(new_cigar_packed);
 
@@ -569,8 +557,8 @@ mod tests {
         // We can't actually allocate 4GB in a test, so we test the check path
         // by verifying the function returns Result (compile-time check)
         let result: Result<u32, _> = store.push_fields(
-            Pos::<Zero>::new(0).unwrap(),
-            Pos::<Zero>::new(0).unwrap(),
+            Pos0::new(0).unwrap(),
+            Pos0::new(0).unwrap(),
             BamFlags::empty(),
             0,
             0,

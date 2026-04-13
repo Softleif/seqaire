@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use seqair::bam::pileup::PileupEngine;
 use seqair::bam::record_store::RecordStore;
-use seqair_types::{Pos, Zero};
+use seqair_types::Pos0;
 
 /// Fuzz input: multiple raw BAM records + a region to pileup over.
 #[derive(Arbitrary, Debug)]
@@ -22,7 +22,7 @@ fuzz_target!(|input: PileupInput| {
     let max_records = 32;
     let max_region_len = 1000;
 
-    let region_start = match Pos::<Zero>::new(input.region_start) {
+    let region_start = match Pos0::new(input.region_start) {
         Some(p) => p,
         None => return,
     };
