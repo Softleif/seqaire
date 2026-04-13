@@ -62,8 +62,12 @@ struct GermlineSetup {
 fn germline_setup() -> GermlineSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+
+    let mut builder = builder.filters();
     let lowqual_filter =
         builder.register_filter(&FilterFieldDef::new("LowQual", "Low quality")).unwrap();
+
+    let mut builder = builder.infos();
     let dp_info = builder
         .register_info(&InfoFieldDef::new(
             "DP",
@@ -120,6 +124,8 @@ fn germline_setup() -> GermlineSetup {
             "Phred-scaled p-value using Fisher's exact test for strand bias",
         ))
         .unwrap();
+
+    let mut builder = builder.formats();
     let gt_fmt = builder
         .register_format(&FormatFieldDef::new(
             "GT",
@@ -144,9 +150,11 @@ fn germline_setup() -> GermlineSetup {
             "Genotype quality",
         ))
         .unwrap();
-    let mut builder = builder.add_sample("SAMPLE01").unwrap();
+
+    let mut builder = builder.samples();
+    builder.add_sample("SAMPLE01").unwrap();
     for s in 2..=N_GERMLINE_SAMPLES {
-        builder = builder.add_sample(format!("SAMPLE{s:02}")).unwrap();
+        builder.add_sample(format!("SAMPLE{s:02}")).unwrap();
     }
     let header = Arc::new(builder.build().unwrap());
     let alleles_bank = vec![

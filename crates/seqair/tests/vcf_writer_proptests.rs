@@ -41,6 +41,7 @@ struct SimpleSetup {
 fn make_simple_setup() -> SimpleSetup {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info = builder
         .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
         .unwrap();
@@ -184,8 +185,9 @@ proptest! {
         let contig =
             builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
         // Register filters before info (BCF string dict order: PASS, filters, info, format).
-        // TODO: enforce this ordering at the type level in VcfHeaderBuilder.
+        let mut builder = builder.filters();
         let q20 = builder.register_filter(&FilterFieldDef::new("q20", "Quality below 20")).unwrap();
+        let mut builder = builder.infos();
         let _dp: InfoInt = builder
             .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
             .unwrap();

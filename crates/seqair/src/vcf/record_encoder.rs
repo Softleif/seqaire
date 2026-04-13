@@ -16,11 +16,16 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut builder = VcfHeader::builder();
+//! // advance past contigs/filters to the infos phase
+//! let mut builder = builder.infos();
 //!
 //! // Returns InfoKey<Scalar<i32>> (aliased InfoInt) — can only encode i32 values
 //! let dp_key: InfoInt = builder.register_info(
 //!     &InfoFieldDef::<Scalar<i32>>::new("DP", Number::Count(1), ValueType::Integer, "Depth")
 //! )?;
+//!
+//! // advance to the formats phase
+//! let mut builder = builder.formats();
 //!
 //! // Returns FormatKey<Gt> (aliased FormatGt) — can only encode Genotype slices
 //! let gt_key: FormatGt = builder.register_format(
@@ -492,6 +497,7 @@ mod tests {
         fn new() -> Self {
             let mut builder = crate::vcf::header::VcfHeader::builder();
             let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+            let mut builder = builder.infos();
             let dp_info = builder
                 .register_info(&InfoFieldDef::new(
                     "DP",
@@ -519,6 +525,7 @@ mod tests {
                     "Allele depth",
                 ))
                 .unwrap();
+            let mut builder = builder.formats();
             let gt_fmt = builder
                 .register_format(&FormatFieldDef::new(
                     "GT",
@@ -535,7 +542,9 @@ mod tests {
                     "Read depth",
                 ))
                 .unwrap();
-            let header = Arc::new(builder.add_sample("S1").unwrap().build().unwrap());
+            let mut builder = builder.samples();
+            builder.add_sample("S1").unwrap();
+            let header = Arc::new(builder.build().unwrap());
             Self { header, contig, dp_info, bq_info, db_flag, ad_info, gt_fmt, dp_fmt }
         }
     }
@@ -601,6 +610,7 @@ mod tests {
     fn filter_fail_bcf_and_vcf_text() {
         let mut builder = crate::vcf::header::VcfHeader::builder();
         let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut builder = builder.filters();
         let low_dp = builder.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let header = Arc::new(builder.build().unwrap());
 
@@ -695,6 +705,7 @@ mod tests {
     fn typestate_filter_fail() {
         let mut hb = crate::vcf::header::VcfHeader::builder();
         let contig = hb.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut hb = hb.filters();
         let ld = hb.register_filter(&FilterFieldDef::new("lowDp", "Low depth")).unwrap();
         let header = Arc::new(hb.build().unwrap());
         let mut buf = Vec::new();
@@ -786,9 +797,11 @@ mod tests {
     -> (Arc<crate::vcf::header::VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
         let mut builder = crate::vcf::header::VcfHeader::builder();
         let contig = builder.register_contig("chr1", ContigDef { length: Some(1000) }).unwrap();
+        let mut builder = builder.infos();
         let dp_info = builder
             .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
             .unwrap();
+        let mut builder = builder.formats();
         let gt_fmt = builder
             .register_format(&FormatFieldDef::new(
                 "GT",
@@ -805,17 +818,11 @@ mod tests {
                 "Read depth",
             ))
             .unwrap();
-        let header = Arc::new(
-            builder
-                .add_sample("S1")
-                .unwrap()
-                .add_sample("S2")
-                .unwrap()
-                .add_sample("S3")
-                .unwrap()
-                .build()
-                .unwrap(),
-        );
+        let mut builder = builder.samples();
+        builder.add_sample("S1").unwrap();
+        builder.add_sample("S2").unwrap();
+        builder.add_sample("S3").unwrap();
+        let header = Arc::new(builder.build().unwrap());
         (header, contig, dp_info, gt_fmt, dp_fmt)
     }
 

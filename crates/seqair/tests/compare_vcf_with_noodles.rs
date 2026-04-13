@@ -39,6 +39,7 @@ fn rich_setup() -> RichSetup {
     let contig_chr1 =
         builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info = builder
         .register_info(&InfoFieldDef::new(
             "DP",
@@ -71,6 +72,7 @@ fn rich_setup() -> RichSetup {
             "dbSNP membership",
         ))
         .unwrap();
+    let mut builder = builder.formats();
     let gt_fmt = builder
         .register_format(&FormatFieldDef::<Gt>::new(
             "GT",
@@ -95,7 +97,9 @@ fn rich_setup() -> RichSetup {
             "Genotype Quality",
         ))
         .unwrap();
-    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    let mut builder = builder.samples();
+    builder.add_sample("sample1").unwrap();
+    let header = Arc::new(builder.build().unwrap());
     RichSetup { header, contig_chr1, dp_info, gt_fmt, dp_fmt }
 }
 
@@ -285,6 +289,7 @@ proptest! {
         let mut builder = VcfHeader::builder();
         let contig =
             builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+        let mut builder = builder.infos();
         let dp_info: InfoInt = builder
             .register_info(&InfoFieldDef::new(
                 "DP",
@@ -325,6 +330,7 @@ proptest! {
 fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatInt) {
     let mut builder = VcfHeader::builder();
     let contig = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info = builder
         .register_info(&InfoFieldDef::new(
             "DP",
@@ -333,6 +339,7 @@ fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatI
             "Total Depth",
         ))
         .unwrap();
+    let mut builder = builder.formats();
     let gt_fmt = builder
         .register_format(&FormatFieldDef::<Gt>::new(
             "GT",
@@ -349,17 +356,11 @@ fn multi_sample_setup() -> (Arc<VcfHeader>, ContigId, InfoInt, FormatGt, FormatI
             "Read Depth",
         ))
         .unwrap();
-    let header = Arc::new(
-        builder
-            .add_sample("S1")
-            .unwrap()
-            .add_sample("S2")
-            .unwrap()
-            .add_sample("S3")
-            .unwrap()
-            .build()
-            .unwrap(),
-    );
+    let mut builder = builder.samples();
+    builder.add_sample("S1").unwrap();
+    builder.add_sample("S2").unwrap();
+    builder.add_sample("S3").unwrap();
+    let header = Arc::new(builder.build().unwrap());
     (header, contig, dp_info, gt_fmt, dp_fmt)
 }
 

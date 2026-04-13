@@ -39,6 +39,7 @@ fn make_index_setup() -> IndexSetup {
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef { length: Some(250_000_000) }).unwrap();
     let chr2 = builder.register_contig("chr2", ContigDef { length: Some(243_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info: InfoInt = builder
         .register_info(&InfoFieldDef::<Scalar<i32>>::new(
             "DP",
@@ -47,6 +48,7 @@ fn make_index_setup() -> IndexSetup {
             "Depth",
         ))
         .unwrap();
+    let mut builder = builder.formats();
     let gt_fmt: FormatGt = builder
         .register_format(&FormatFieldDef::<Gt>::new(
             "GT",
@@ -55,7 +57,9 @@ fn make_index_setup() -> IndexSetup {
             "Genotype",
         ))
         .unwrap();
-    let header = Arc::new(builder.add_sample("sample1").unwrap().build().unwrap());
+    let mut builder = builder.samples();
+    builder.add_sample("sample1").unwrap();
+    let header = Arc::new(builder.build().unwrap());
     IndexSetup { header, chr1, chr2, dp_info, gt_fmt }
 }
 
@@ -323,9 +327,11 @@ fn write_proptest_vcf(
 ) -> (std::path::PathBuf, std::path::PathBuf) {
     let mut builder = VcfHeader::builder();
     let chr1 = builder.register_contig("chr1", ContigDef { length: Some(1_000_000) }).unwrap();
+    let mut builder = builder.infos();
     let dp_info: InfoInt = builder
         .register_info(&InfoFieldDef::new("DP", Number::Count(1), ValueType::Integer, "Depth"))
         .unwrap();
+    let mut builder = builder.formats();
     let gt_fmt: FormatGt = builder
         .register_format(&FormatFieldDef::new(
             "GT",
@@ -334,7 +340,9 @@ fn write_proptest_vcf(
             "Genotype",
         ))
         .unwrap();
-    let header = Arc::new(builder.add_sample("s1").unwrap().build().unwrap());
+    let mut builder = builder.samples();
+    builder.add_sample("s1").unwrap();
+    let header = Arc::new(builder.build().unwrap());
 
     let vcf_path = dir.join("test.vcf.gz");
     let file = std::fs::File::create(&vcf_path).unwrap();
