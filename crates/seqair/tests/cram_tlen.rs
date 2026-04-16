@@ -4,11 +4,9 @@
 //! htslib's tlen/ directory contains CRAM/SAM pairs testing all combinations
 //! of read pair orientations, start/end matching, and ordering.
 //!
-//! The CRAMs in this directory use attached (downstream) mates, which means
-//! seqair's CRAM reader currently does not reconstruct template_len (it is
-//! only populated for detached mates). We therefore validate TLEN via the
-//! BAM path: SAM -> sorted BAM -> seqair, which preserves TLEN exactly.
-//! A separate test verifies the CRAM path for all non-TLEN fields.
+//! The CRAMs in this directory use attached (downstream) mates. TLEN is
+//! validated both via the BAM path (SAM -> sorted BAM -> seqair) and the
+//! CRAM path (pre-built CRAM -> seqair), covering both storage formats.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -120,9 +118,8 @@ fn assert_tlen_via_bam(name: &str) {
     }
 }
 
-/// Validate that the CRAM path preserves all fields except TLEN
-/// (which seqair doesn't reconstruct for attached mates).
-fn assert_cram_fields_except_tlen(name: &str) {
+/// Validate that the CRAM path preserves all fields including TLEN.
+fn assert_cram_fields_with_tlen(name: &str) {
     let dir = tlen_dir();
     let cram_path = dir.join(format!("{name}.cram"));
     let sam_path = dir.join(format!("{name}.sam"));
@@ -158,17 +155,17 @@ fn assert_cram_fields_except_tlen(name: &str) {
     let mut actual: Vec<_> = (0..store.len() as u32)
         .map(|idx| {
             let r = store.record(idx);
-            (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64())
+            (store.qname(idx).to_vec(), r.flags.raw(), r.pos.as_i64(), r.template_len)
         })
         .collect();
     actual.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
 
-    for (i, ((sq, sf, sp), (eq, ef, ep, _))) in actual.iter().zip(&expected).enumerate() {
+    for (i, ((sq, sf, sp, st), (eq, ef, ep, et))) in actual.iter().zip(&expected).enumerate() {
+        let qn = String::from_utf8_lossy(eq);
         assert_eq!(sq.as_slice(), eq.as_slice(), "{name}[{i}]: qname");
-        assert_eq!(*sf, *ef, "{name}[{i}]: flags");
-        assert_eq!(*sp, *ep, "{name}[{i}]: pos");
-        // NOTE: template_len is NOT checked — seqair's CRAM reader
-        // does not reconstruct it for attached/downstream mates.
+        assert_eq!(*sf, *ef, "{name}[{i}] ({qn}): flags");
+        assert_eq!(*sp, *ep, "{name}[{i}] ({qn}): pos");
+        assert_eq!(*st, *et, "{name}[{i}] ({qn}): cram tlen seqair={st} expected={et}");
     }
 }
 
@@ -299,25 +296,25 @@ fn tlen_a5() {
 
 #[test]
 fn cram_fields_a7() {
-    assert_cram_fields_except_tlen("a7");
+    assert_cram_fields_with_tlen("a7");
 }
 #[test]
 fn cram_fields_b7() {
-    assert_cram_fields_except_tlen("b7");
+    assert_cram_fields_with_tlen("b7");
 }
 #[test]
 fn cram_fields_c7() {
-    assert_cram_fields_except_tlen("c7");
+    assert_cram_fields_with_tlen("c7");
 }
 #[test]
 fn cram_fields_d7() {
-    assert_cram_fields_except_tlen("d7");
+    assert_cram_fields_with_tlen("d7");
 }
 #[test]
 fn cram_fields_d4() {
-    assert_cram_fields_except_tlen("d4");
+    assert_cram_fields_with_tlen("d4");
 }
 #[test]
 fn cram_fields_a4() {
-    assert_cram_fields_except_tlen("a4");
+    assert_cram_fields_with_tlen("a4");
 }

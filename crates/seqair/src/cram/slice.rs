@@ -13,6 +13,21 @@ use rustc_hash::FxHashMap;
 use seqair_types::{BamFlags, Base, Pos0, Pos1};
 use tracing::warn;
 
+/// Mate cross-reference info collected during CRAM record decoding.
+/// Used to reconstruct `template_len` for attached/downstream mates.
+struct SliceMateInfo {
+    /// 0-based alignment start position.
+    pos: i64,
+    /// 0-based exclusive alignment end position.
+    end_pos: i64,
+    /// Absolute index of the mate record within this slice, or -1 if detached/no mate.
+    mate_line: i32,
+    /// Index in the RecordStore if this record was pushed, or `None` if filtered out.
+    store_idx: Option<u32>,
+    /// BAM flags (needed for READ1/READ2 tie-breaking).
+    bam_flags: u16,
+}
+
 /// Parsed CRAM slice header.
 #[derive(Debug)]
 pub struct SliceHeader {
@@ -184,11 +199,14 @@ pub fn decode_slice(
 
     let mut ctx = DecodeContext::new(&core_data.data, external_blocks);
 
-    // Decode records
+    // Decode records, collecting mate cross-reference info for TLEN reconstruction.
     let mut alignment_pos = i64::from(sh.alignment_start);
     let mut records_pushed = 0usize;
+    let num_records = usize::try_from(sh.num_records)
+        .map_err(|_| CramError::InvalidLength { value: sh.num_records })?;
+    let mut mate_infos: Vec<SliceMateInfo> = Vec::with_capacity(num_records);
 
-    for _ in 0..sh.num_records {
+    for record_index in 0..num_records {
         // For embedded reference, ref_start is the slice's alignment_start
         let effective_ref_start = if sh.embedded_reference >= 0 {
             Pos1::try_from(sh.alignment_start.max(1))
@@ -199,7 +217,7 @@ pub fn decode_slice(
             ref_start_0based
         };
 
-        let count = decode_record(
+        let (count, mate_info) = decode_record(
             ch,
             &sh,
             is_multi_ref,
@@ -216,16 +234,24 @@ pub fn decode_slice(
             bases_buf,
             qual_buf,
             aux_buf,
+            record_index,
         )?;
+        mate_infos.push(mate_info);
         records_pushed = records_pushed.wrapping_add(count);
     }
+
+    // Post-process: resolve template_len for attached/downstream mates.
+    // Follow mate_line chains to compute alignment span, then assign signed TLEN.
+    resolve_mate_tlen(&mate_infos, store);
 
     Ok(records_pushed)
 }
 
 /// Decode a single CRAM record from the decode context.
 ///
-/// Returns 1 if the record was pushed to the store, 0 if filtered out.
+/// Returns `(count, mate_info)` where `count` is 1 if the record was pushed to the
+/// store and 0 if filtered out, and `mate_info` contains the position and mate-link
+/// data needed for post-processing TLEN of attached mates.
 // r[impl cram.record.decode_order]
 #[expect(
     clippy::too_many_arguments,
@@ -248,7 +274,8 @@ fn decode_record(
     bases_buf: &mut Vec<Base>,
     qual_buf: &mut Vec<u8>,
     aux_buf: &mut Vec<u8>,
-) -> Result<usize, CramError> {
+    record_index: usize,
+) -> Result<(usize, SliceMateInfo), CramError> {
     let ds = &ch.data_series;
 
     // r[impl cram.record.flags]
@@ -309,6 +336,7 @@ fn decode_record(
     // 8. Mate data
     let mut next_pos_val: i32 = -1;
     let mut template_len_val: i32 = 0;
+    let mut mate_line: i32 = -1;
     if detached {
         let _mate_flags = ds.mate_flags.decode(ctx)?;
         if !ch.preservation.read_names_included {
@@ -318,7 +346,15 @@ fn decode_record(
         next_pos_val = ds.next_mate_pos.decode(ctx)?;
         template_len_val = ds.template_size.decode(ctx)?;
     } else if mate_downstream {
-        let _next_fragment = ds.next_fragment.decode(ctx)?;
+        let nf = ds.next_fragment.decode(ctx)?;
+        // NF is relative: absolute mate index = current + 1 + nf
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "record_index is bounded by num_records (i32), fits in i32"
+        )]
+        {
+            mate_line = (record_index as i32).wrapping_add(1).wrapping_add(nf);
+        }
     }
 
     // 9. TL (tag line index)
@@ -415,17 +451,35 @@ fn decode_record(
             reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
         )]
         if record_ref_id != tid as i32 {
-            return Ok(0);
+            return Ok((
+                0,
+                SliceMateInfo {
+                    pos: pos_0based.as_i64(),
+                    end_pos: end_pos_raw,
+                    mate_line,
+                    store_idx: None,
+                    bam_flags: raw_flags,
+                },
+            ));
         }
 
         // Check overlap with query region
         if pos_0based >= query_end || end_pos <= query_start {
-            return Ok(0);
+            return Ok((
+                0,
+                SliceMateInfo {
+                    pos: pos_0based.as_i64(),
+                    end_pos: end_pos_raw,
+                    mate_line,
+                    store_idx: None,
+                    bam_flags: raw_flags,
+                },
+            ));
         }
 
         let qname: &[u8] = &read_name;
 
-        store.push_fields(
+        let store_idx = store.push_fields(
             pos_0based,
             end_pos,
             bam_flags,
@@ -442,7 +496,16 @@ fn decode_record(
             template_len_val,
         )?;
 
-        return Ok(1);
+        return Ok((
+            1,
+            SliceMateInfo {
+                pos: pos_0based.as_i64(),
+                end_pos: end_pos_raw,
+                mate_line,
+                store_idx: Some(store_idx),
+                bam_flags: raw_flags,
+            },
+        ));
     }
 
     // Unmapped read
@@ -465,7 +528,122 @@ fn decode_record(
 
     // r[impl cram.edge.unmapped_reads]
     // Unmapped reads — skip for fetch_into (same as BAM/SAM)
-    Ok(0)
+    Ok((
+        0,
+        SliceMateInfo {
+            pos: -1,
+            end_pos: -1,
+            mate_line: -1,
+            store_idx: None,
+            bam_flags: raw_flags,
+        },
+    ))
+}
+
+/// Post-process mate cross-references to reconstruct `template_len` for
+/// attached/downstream mates. Mirrors htslib's `cram_decode_slice_xref`.
+///
+/// For each record with a downstream mate link, follows the chain to find
+/// the alignment span (min start to max end) across all fragments, then
+/// assigns signed TLEN: positive for the leftmost fragment, negative for
+/// the rightmost, with ties broken by the READ1 flag.
+fn resolve_mate_tlen(infos: &[SliceMateInfo], store: &mut RecordStore) {
+    let n = infos.len();
+    // Track which records we've already resolved to avoid reprocessing.
+    let mut resolved = vec![false; n];
+
+    for i in 0..n {
+        if resolved[i] || infos[i].mate_line < 0 {
+            continue;
+        }
+
+        // Collect all records in this mate chain.
+        let mut chain: Vec<usize> = Vec::with_capacity(4);
+        let mut idx = i;
+        loop {
+            if idx >= n || resolved[idx] {
+                break;
+            }
+            chain.push(idx);
+            resolved[idx] = true;
+            let ml = infos[idx].mate_line;
+            if ml < 0 || ml as usize >= n {
+                break;
+            }
+            idx = ml as usize;
+            // Safety: break cycles
+            if chain.len() > n {
+                break;
+            }
+        }
+
+        if chain.len() < 2 {
+            continue;
+        }
+
+        // Compute alignment span and position counts across all fragments.
+        let mut aleft = i64::MAX;
+        let mut aright = i64::MIN;
+        let mut left_cnt = 0u32;
+        let mut right_cnt = 0u32;
+
+        for &j in &chain {
+            let info = &infos[j];
+            if info.pos < 0 {
+                continue; // unmapped
+            }
+            if info.pos < aleft {
+                aleft = info.pos;
+                left_cnt = 1;
+            } else if info.pos == aleft {
+                left_cnt = left_cnt.wrapping_add(1);
+            }
+            if info.end_pos > aright {
+                aright = info.end_pos;
+                right_cnt = 1;
+            } else if info.end_pos == aright {
+                right_cnt = right_cnt.wrapping_add(1);
+            }
+        }
+
+        if aright <= aleft {
+            continue; // unmapped or degenerate
+        }
+
+        // In 0-based half-open coordinates: tlen = max(end) - min(start).
+        // Equivalent to htslib's (aright - aleft + 1) in 1-based inclusive.
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "template length fits in i32 for genomic data"
+        )]
+        let tlen_magnitude = (aright.wrapping_sub(aleft)) as i32;
+
+        // Determine sign for the FIRST record in the chain, then assign
+        // the opposite sign to all remaining records. This mirrors htslib's
+        // cram_decode_slice_xref sign assignment logic.
+        let first = &infos[chain[0]];
+        let first_tlen = if first.pos == aleft && (first.end_pos < aright || left_cnt <= 1) {
+            // Leftmost, and either not rightmost or unique leftmost
+            tlen_magnitude
+        } else if first.pos == aleft && first.end_pos == aright && left_cnt > 1 && right_cnt > 1 {
+            // Both leftmost and rightmost with ties — break by READ1 flag
+            if first.bam_flags & 0x40 != 0 { tlen_magnitude } else { -tlen_magnitude }
+        } else {
+            // Rightmost or internal
+            -tlen_magnitude
+        };
+
+        // First record gets first_tlen; all remaining get the opposite.
+        if let Some(idx) = first.store_idx {
+            store.set_template_len(idx, first_tlen);
+        }
+        let rest_tlen = -first_tlen;
+        for &j in &chain[1..] {
+            if let Some(idx) = infos[j].store_idx {
+                store.set_template_len(idx, rest_tlen);
+            }
+        }
+    }
 }
 
 struct ReconstructResult {
