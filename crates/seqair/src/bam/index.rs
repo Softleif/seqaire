@@ -315,6 +315,15 @@ impl AlignmentIndex {
         }
     }
 
+    /// Query the index, returning chunks annotated with their source bin ID.
+    /// For diagnostics only — use `query_split` for production code.
+    pub fn query_annotated(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<AnnotatedChunk> {
+        match self {
+            Self::Bai(idx) => idx.query_annotated(tid, start, end),
+            Self::Csi(idx) => idx.query_annotated(tid, start, end),
+        }
+    }
+
     /// Query the index, separating distant from nearby chunks.
     pub fn query_split(&self, tid: u32, start: Pos0, end: Pos0) -> QueryChunks {
         match self {

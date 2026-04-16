@@ -60,7 +60,7 @@ pub enum BamError {
     #[error("region {contig}:{start}-{end} is out of bounds (contig length: {contig_len})")]
     RegionOutOfBounds { contig: SmolStr, start: u64, end: u64, contig_len: u64 },
 
-    #[error("BAI index not found for {bam_path}")]
+    #[error("index not found for {bam_path} (checked .csi and .bai)")]
     IndexNotFound { bam_path: PathBuf },
 
     #[error("record decode error")]
@@ -321,21 +321,18 @@ fn partition_chunks(chunks: &[Chunk], max_bytes: usize) -> Vec<Vec<Chunk>> {
 // r[impl unified.detect_error]
 // r[impl csi.detect]
 fn find_and_open_index(bam_path: &Path) -> Result<AlignmentIndex, BamError> {
-    // CSI preferred: try .csi first (per htslib convention)
+    // CSI preferred: try {file}.csi first, then {file_without_ext}.csi (per htslib convention)
     let csi_path = bam_path.with_extension("bam.csi");
     if csi_path.exists() {
         return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path)?));
     }
 
-    let mut csi_path2 = bam_path.to_path_buf();
-    let mut name2 = csi_path2.file_name().unwrap_or_default().to_os_string();
-    name2.push(".csi");
-    csi_path2.set_file_name(name2);
+    let csi_path2 = bam_path.with_extension("csi");
     if csi_path2.exists() {
         return Ok(AlignmentIndex::Csi(CsiIndex::from_path(&csi_path2)?));
     }
 
-    // Fall back to BAI
+    // Fall back to BAI: try {file}.bai first, then {file_without_ext}.bai
     let bai_path = bam_path.with_extension("bam.bai");
     if bai_path.exists() {
         return Ok(AlignmentIndex::Bai(
@@ -343,10 +340,7 @@ fn find_and_open_index(bam_path: &Path) -> Result<AlignmentIndex, BamError> {
         ));
     }
 
-    let mut bai_path2 = bam_path.to_path_buf();
-    let mut name = bai_path2.file_name().unwrap_or_default().to_os_string();
-    name.push(".bai");
-    bai_path2.set_file_name(name);
+    let bai_path2 = bam_path.with_extension("bai");
     if bai_path2.exists() {
         return Ok(AlignmentIndex::Bai(
             BamIndex::from_path(&bai_path2).map_err(|source| BamError::Index { source })?,

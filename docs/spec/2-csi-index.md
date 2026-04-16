@@ -16,6 +16,9 @@ A CSI file MUST begin with the magic bytes `CSI\1` (0x43, 0x53, 0x49, 0x01). The
 r[csi.header]
 After the magic, the header contains three `int32_t` fields: `min_shift` (number of bits for the minimum interval, default 14), `depth` (depth of the binning index, default 5), and `l_aux` (length of auxiliary data in bytes). The reader MUST read all three to parameterize the binning scheme.
 
+r[csi.header_bounds]
+The reader MUST reject `min_shift` < 0, `depth` < 0, and `l_aux` < 0. Additionally, `depth` MUST NOT exceed 16 — the binning scheme computes `1 << (depth * 3)` which overflows a 64-bit integer at depth 22, and `min_shift + depth * 3` which overflows a 64-bit shift at depth 17 with typical `min_shift` values. Depth 16 with `min_shift` 1 gives `min_shift + depth * 3 = 49`, safely below 64. No real-world genome requires depth > 10 (depth 10 with `min_shift` 14 addresses 2^44 = 17.6 Tbp).
+
 r[csi.aux_data]
 After the header fields, `l_aux` bytes of auxiliary data follow. For tabix-style CSI files, this contains the tabix metadata (format, col_seq, col_beg, col_end, meta character, skip lines, and the sequence name dictionary). The reader MUST parse the auxiliary data when present.
 
@@ -101,10 +104,10 @@ r[csi.write]
 The `IndexBuilder` MUST support writing CSI indexes in addition to BAI. The builder MUST accept `min_shift` and `depth` parameters at construction time. When the maximum position in the data exceeds 2^29, the builder SHOULD automatically select CSI output (with appropriate `min_shift`/`depth`) instead of BAI.
 
 r[csi.write_format]
-The CSI writer MUST emit the full binary format: magic, `min_shift`, `depth`, `l_aux`, auxiliary data (if any), `n_ref`, then per-reference bins with `loffset` and chunks, and the optional `n_no_coor` trailer.
+The CSI writer MUST emit the full binary format: magic, `min_shift`, `depth`, `l_aux`, auxiliary data (if any), `n_ref`, then per-reference bins with `loffset` and chunks, and the optional `n_no_coor` trailer. All CSI write methods (`write_csi`, `write_csi_tabix`) MUST require `finish()` to have been called first, returning an error otherwise — the same guard as `write_bai`.
 
 r[csi.write_loffset]
-When building a CSI index, the builder MUST track the `loffset` for each bin — the minimum virtual offset of any record whose alignment start falls within the bin's genomic range. This is computed during the single-pass index construction.
+When building a CSI index, the builder MUST track the `loffset` for each bin — the virtual file offset of the first record that starts in the bin's genomic window. In the single-pass `IndexBuilder`, this is the `begin` of the bin's first chunk (i.e. `save_off` when the bin was first entered), which matches htslib's `hts_idx_push` behavior for coordinate-sorted input. For standard parameters (depth=5, min_shift=14), this is equivalent to the linear-index value at the corresponding window. The approximation is conservative: queries may scan a few extra records at the start of a bin, but will never miss valid records.
 
 r[csi.write_tabix_aux]
 When building a CSI index for tabix (VCF/BED/GFF), the builder MUST write the tabix metadata into the `aux` block. The `format`, `col_seq`, `col_beg`, `col_end`, `meta`, `skip`, and sequence name dictionary MUST be serialized in the standard tabix header layout.
@@ -112,7 +115,7 @@ When building a CSI index for tabix (VCF/BED/GFF), the builder MUST write the ta
 ## Alloc limits
 
 r[csi.alloc_limits]
-The CSI reader MUST enforce the same allocation limits as the BAI reader (see `r[io.fuzz.alloc_limits]`): `n_ref` MUST NOT exceed 100,000, `n_bin` per reference MUST NOT exceed 100,000, `n_chunk` per bin MUST NOT exceed 1,000,000. These limits prevent denial-of-service from malformed index files.
+The CSI reader MUST enforce the same allocation limits as the BAI reader (see `r[io.fuzz.alloc_limits]`): `n_ref` MUST NOT exceed 100,000, `n_bin` per reference MUST NOT exceed 100,000, `n_chunk` per bin MUST NOT exceed 1,000,000. These limits prevent denial-of-service from malformed index files. All count fields (`n_ref`, `n_bin`, `n_chunk`) are `int32_t` and MUST be rejected with a `NegativeCount` error when negative, before casting to an unsigned type.
 
 ## Error handling
 

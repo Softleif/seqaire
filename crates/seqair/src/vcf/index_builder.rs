@@ -411,6 +411,9 @@ impl IndexBuilder {
         writer: W,
         contig_names: &[SmolStr],
     ) -> Result<(), IndexError> {
+        if !self.finished {
+            return Err(IndexError::NotFinished);
+        }
         use crate::bam::bgzf_writer::BgzfWriter;
 
         // Build tabix aux block
@@ -688,5 +691,20 @@ mod tests {
         let mut decompressed = Vec::new();
         reader.read_to_end(&mut decompressed).unwrap();
         assert_eq!(&decompressed[..4], b"TBI\x01");
+    }
+
+    // r[verify csi.write_format]
+    #[test]
+    fn write_csi_tabix_rejects_unfinished() {
+        let mut builder = IndexBuilder::tbi(1, VirtualOffset(0));
+        builder.push(0, 100, 200, VirtualOffset(1000)).unwrap();
+        // Intentionally skip finish()
+        let names = vec![SmolStr::from("chr1")];
+        let mut output = Vec::new();
+        let result = builder.write_csi_tabix(&mut output, &names);
+        assert!(
+            matches!(result, Err(IndexError::NotFinished)),
+            "write_csi_tabix without finish() must return NotFinished, got: {result:?}"
+        );
     }
 }
