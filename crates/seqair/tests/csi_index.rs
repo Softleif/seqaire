@@ -275,6 +275,48 @@ fn seqair_queries_samtools_csi_match_bai() {
     }
 }
 
+// --- Format detection: file.csi (without .bam infix) ---
+
+// r[verify csi.detect]
+#[test]
+fn indexed_reader_finds_csi_without_bam_infix() {
+    let dir = tempfile::tempdir().unwrap();
+    let bam_path = write_multi_contig_bam(dir.path());
+
+    // Remove both default index files
+    std::fs::remove_file(bam_path.with_extension("bam.bai")).unwrap();
+    std::fs::remove_file(bam_path.with_extension("bam.csi")).unwrap();
+
+    // Place CSI at {file_without_ext}.csi (e.g. multi.csi instead of multi.bam.csi)
+    let csi_without_infix = bam_path.with_extension("csi"); // multi.csi
+    {
+        // Recreate the index to write to the new path
+        let header = make_header();
+        let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+        for i in 0..5u32 {
+            let rec =
+                OwnedBamRecord::builder(0, i64::from(i) * 10000, format!("r{i}").into_bytes())
+                    .mapq(60)
+                    .cigar(vec![CigarOp::new(CigarOpType::Match, 100)])
+                    .seq(cyclic_seq(100))
+                    .qual(vec![30; 100])
+                    .build()
+                    .unwrap();
+            writer.write(&rec).unwrap();
+        }
+        let (_inner, ib) = writer.finish().unwrap();
+        let ib = ib.unwrap();
+        ib.write_csi(std::fs::File::create(&csi_without_infix).unwrap(), 1, &[]).unwrap();
+    }
+
+    let mut reader = IndexedBamReader::open(&bam_path).expect("should find multi.csi");
+    let mut store = RecordStore::new();
+    reader
+        .fetch_into(0, Pos0::new(0).unwrap(), Pos0::new(1_000_000).unwrap(), &mut store)
+        .expect("fetch");
+    assert!(store.len() > 0, "should find records via multi.csi");
+}
+
 // --- IndexedBamReader with CSI (format detection) ---
 
 #[test]

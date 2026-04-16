@@ -4,7 +4,10 @@
 
 use super::{
     bgzf::{BgzfError, VirtualOffset},
-    index::{BaiError, Chunk, QueryChunks, decompress_bgzf_file, merge_overlapping_chunks},
+    index::{
+        AnnotatedChunk, BaiError, Chunk, QueryChunks, decompress_bgzf_file,
+        merge_overlapping_chunks,
+    },
 };
 use seqair_types::Pos0;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,12 @@ use tracing::instrument;
 const MAX_INDEX_REFS: usize = 100_000;
 const MAX_BINS_PER_REF: usize = 100_000;
 const MAX_CHUNKS_PER_BIN: usize = 1_000_000;
+
+// r[impl csi.header_bounds]
+// depth * 3 is used as a shift amount on u64 values. depth=17 with min_shift=14
+// gives shift=65 which overflows. depth=16 with min_shift=1 gives shift=49, safe.
+// No real genome needs depth > 10 (depth 10, min_shift 14 → 2^44 = 17.6 Tbp).
+const MAX_CSI_DEPTH: u32 = 16;
 
 // r[impl csi.errors]
 #[derive(Debug, thiserror::Error)]
@@ -32,6 +41,9 @@ pub enum CsiError {
 
     #[error("CSI field `{field}` count {value} exceeds limit {limit}")]
     FieldTooLarge { field: &'static str, value: usize, limit: usize },
+
+    #[error("CSI depth {depth} exceeds maximum {max}")]
+    DepthTooLarge { depth: u32, max: u32 },
 
     #[error("BGZF error decompressing CSI file")]
     Bgzf {
@@ -72,6 +84,15 @@ fn read_u64(data: &[u8], pos: &mut usize) -> Result<u64, CsiError> {
         .ok_or(CsiError::Truncated)?;
     *pos = pos.wrapping_add(8);
     Ok(u64::from_le_bytes(bytes))
+}
+
+/// Read an i32 count field, rejecting negative values before casting to usize.
+fn read_count(data: &[u8], pos: &mut usize) -> Result<usize, CsiError> {
+    let raw = read_i32(data, pos)?;
+    if raw < 0 {
+        return Err(CsiError::NegativeCount { value: raw });
+    }
+    Ok(raw as usize)
 }
 
 // r[impl csi.header]
@@ -147,6 +168,10 @@ impl CsiIndex {
             return Err(CsiError::NegativeCount { value: depth });
         }
         let depth = depth as u32;
+        // r[impl csi.header_bounds]
+        if depth > MAX_CSI_DEPTH {
+            return Err(CsiError::DepthTooLarge { depth, max: MAX_CSI_DEPTH });
+        }
 
         // r[impl csi.aux_data]
         let l_aux = read_i32(data, &mut pos)?;
@@ -161,15 +186,15 @@ impl CsiIndex {
         pos = pos.wrapping_add(l_aux);
 
         // r[impl csi.n_ref]
-        let n_ref = read_i32(data, &mut pos)? as usize;
         // r[impl csi.alloc_limits]
+        let n_ref = read_count(data, &mut pos)?;
         check_limit(n_ref, MAX_INDEX_REFS, "n_ref")?;
 
         let pseudo_bin_id = csi_pseudo_bin(depth);
         let mut references = Vec::with_capacity(n_ref);
 
         for _ in 0..n_ref {
-            let n_bin = read_i32(data, &mut pos)? as usize;
+            let n_bin = read_count(data, &mut pos)?;
             check_limit(n_bin, MAX_BINS_PER_REF, "n_bin")?;
             let mut bins = Vec::with_capacity(n_bin);
 
@@ -178,7 +203,7 @@ impl CsiIndex {
                 // r[impl csi.no_linear_index]
                 // r[impl csi.loffset]
                 let loffset = VirtualOffset(read_u64(data, &mut pos)?);
-                let n_chunk = read_i32(data, &mut pos)? as usize;
+                let n_chunk = read_count(data, &mut pos)?;
                 check_limit(n_chunk, MAX_CHUNKS_PER_BIN, "n_chunk")?;
                 let mut chunks = Vec::with_capacity(n_chunk);
 
@@ -225,6 +250,32 @@ impl CsiIndex {
         all.sort_by_key(|c| c.begin);
         merge_overlapping_chunks(&mut all);
         all
+    }
+
+    /// Query the index, returning chunks annotated with their source bin ID.
+    /// For diagnostics only — use `query_split` for production code.
+    pub fn query_annotated(&self, tid: u32, start: Pos0, end: Pos0) -> Vec<AnnotatedChunk> {
+        let Some(ref_idx) = self.references.get(tid as usize) else {
+            return Vec::new();
+        };
+        let start_u64 = start.as_u64();
+        let end_u64 = end.as_u64();
+        let candidate_bins =
+            csi_reg2bins(start_u64, end_u64.wrapping_add(1), self.min_shift, self.depth);
+        let min_offset = csi_min_offset(ref_idx, start_u64, self.min_shift, self.depth);
+
+        let mut result = Vec::new();
+        for bin in &ref_idx.bins {
+            if candidate_bins.contains(&bin.bin_id) {
+                for chunk in &bin.chunks {
+                    if chunk.end > min_offset {
+                        result.push(AnnotatedChunk { chunk: *chunk, bin_id: bin.bin_id });
+                    }
+                }
+            }
+        }
+        result.sort_by_key(|c| c.chunk.begin);
+        result
     }
 
     // r[impl csi.query_split]
@@ -571,6 +622,62 @@ mod tests {
         let data = b"CSI\x01\x0e"; // too short for header
         let err = CsiIndex::from_bytes_inner(data).unwrap_err();
         assert!(matches!(err, CsiError::Truncated));
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
+    fn depth_22_panicked_before_fix() {
+        // depth=22 causes 1u64 << 66 in csi_pseudo_bin — must return error, not panic
+        let data = build_csi_bytes(14, 22, &[], &[]);
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::DepthTooLarge { depth: 22, .. }));
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
+    fn depth_17_rejected() {
+        // depth=17 with min_shift=14 → shift = 14+51 = 65, overflows u64 shift
+        let data = build_csi_bytes(14, 17, &[], &[]);
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::DepthTooLarge { .. }));
+    }
+
+    // r[verify csi.header_bounds]
+    #[test]
+    fn depth_16_accepted() {
+        // depth=16 is the maximum allowed (min_shift+depth*3 = 14+48 = 62, safe)
+        let data = build_csi_bytes(14, 16, &[], &[]);
+        let idx = CsiIndex::from_bytes_inner(&data).unwrap();
+        assert_eq!(idx.depth(), 16);
+    }
+
+    // r[verify csi.alloc_limits]
+    #[test]
+    fn negative_n_ref_rejected() {
+        // n_ref = -5 should produce NegativeCount, not a giant allocation
+        let mut data = Vec::new();
+        data.extend_from_slice(b"CSI\x01");
+        data.extend_from_slice(&14i32.to_le_bytes()); // min_shift
+        data.extend_from_slice(&5i32.to_le_bytes()); // depth
+        data.extend_from_slice(&0i32.to_le_bytes()); // l_aux
+        data.extend_from_slice(&(-5i32).to_le_bytes()); // n_ref = -5
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::NegativeCount { value: -5 }), "got: {err:?}");
+    }
+
+    // r[verify csi.alloc_limits]
+    #[test]
+    fn negative_n_bin_rejected() {
+        // First ref has n_bin = -1
+        let mut data = Vec::new();
+        data.extend_from_slice(b"CSI\x01");
+        data.extend_from_slice(&14i32.to_le_bytes());
+        data.extend_from_slice(&5i32.to_le_bytes());
+        data.extend_from_slice(&0i32.to_le_bytes());
+        data.extend_from_slice(&1i32.to_le_bytes()); // n_ref = 1
+        data.extend_from_slice(&(-1i32).to_le_bytes()); // n_bin = -1
+        let err = CsiIndex::from_bytes_inner(&data).unwrap_err();
+        assert!(matches!(err, CsiError::NegativeCount { value: -1 }), "got: {err:?}");
     }
 
     // --- Query tests ---
