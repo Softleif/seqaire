@@ -350,6 +350,18 @@ impl RecordStore {
         &self.records[idx as usize]
     }
 
+    /// Update the template_len field for a record in the store.
+    /// Used by the CRAM decoder to fill in TLEN after resolving mate
+    /// cross-references within a slice.
+    pub fn set_template_len(&mut self, idx: u32, tlen: i32) {
+        debug_assert!(
+            (idx as usize) < self.records.len(),
+            "set_template_len idx {idx} out of bounds (len={})",
+            self.records.len()
+        );
+        self.records[idx as usize].template_len = tlen;
+    }
+
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn qname(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
