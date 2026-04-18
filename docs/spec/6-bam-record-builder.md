@@ -60,7 +60,7 @@ r[bam.owned_record.seq_length_limit]
 The sequence length MUST NOT exceed `i32::MAX` (2,147,483,647). The `l_seq` field in the BAM header is an i32. The builder, `set_seq`, and `to_bam_bytes` MUST reject sequences exceeding this limit with a typed error.
 
 r[bam.owned_record.from_record_store]
-`RecordStore` MUST provide a `to_owned_record(idx: u32) -> BamRecord` method that extracts a complete owned copy of a record from the slabs. CIGAR bytes MUST be converted to `Vec<CigarOp>`, sequence MUST be cloned from the bases slab, and auxiliary data MUST be copied from the data slab.
+`RecordStore` MUST provide a `to_owned_record(idx: u32) -> BamRecord` method that extracts a complete owned copy of a record from the slabs. CIGAR bytes MUST be converted to `Vec<CigarOp>`, sequence MUST be cloned from the bases slab, and auxiliary data MUST be copied from the aux slab.
 
 ## Modification
 
@@ -113,7 +113,7 @@ The BAM `bin` value in the serialized `bin_mq_nl` field MUST be computed from th
 For realignment workflows, modified records need to be fed back into the pileup engine for re-calling. This requires converting the owned record back into the slab-based format.
 
 r[bam.owned_record.push_owned]
-`RecordStore` MUST provide a `push_owned(record: &BamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST encode the sequence from `Vec<Base>` into the bases slab, pack CIGAR ops into u32 format for the data slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
+`RecordStore` MUST provide a `push_owned(record: &BamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST encode the sequence from `Vec<Base>` into the bases slab, pack CIGAR ops into u32 format for the cigar slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
 
 r[bam.owned_record.roundtrip]
 A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()` (without modification) MUST produce a store entry with field values identical to the original. This MUST be verified by tests comparing all accessible fields.
@@ -150,7 +150,7 @@ r[bam.owned_record.aux_replace_semantics]
 When `set_*` is called for a tag that already exists, the tag MUST be removed and re-appended with the new value. Implementations MAY optimize the case where the new encoded byte length (including tag name and type byte) matches the old length by replacing in-place, but this is not required.
 
 r[bam.owned_record.aux_from_slab]
-When extracting a record from `RecordStore`, the auxiliary data MUST be copied verbatim from the data slab into `AuxData`. No parsing or re-encoding is needed — the slab already stores tags in BAM binary format.
+When extracting a record from `RecordStore`, the auxiliary data MUST be copied verbatim from the aux slab into `AuxData`. No parsing or re-encoding is needed — the slab already stores tags in BAM binary format.
 
 ## Flag convenience methods
 

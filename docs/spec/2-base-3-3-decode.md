@@ -30,7 +30,7 @@ r[base_decode.decode]
 ## Storage in RecordStore
 
 r[base_decode.slab]
-The `RecordStore` MUST store decoded bases in a dedicated slab (`Vec<Base>`) separate from the data slab. The data slab continues to hold cigar, qual, and aux data. The `seq_at` method MUST return `Base` instead of `u8`.
+The `RecordStore` MUST store decoded bases in a dedicated slab (`Vec<Base>`) separate from the cigar, qual, and aux slabs. The `seq_at` method MUST return `Base` instead of `u8`.
 
 ## PileupAlignment
 

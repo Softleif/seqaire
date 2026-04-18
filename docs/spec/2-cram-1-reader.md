@@ -426,7 +426,7 @@ The `q` (0x71) read feature carries a stretch of quality scores from the `QQ` da
 > - `H` → H ops
 > - `P` → P ops
 
-The reconstructed CIGAR MUST be packed into BAM u32 format for the data slab.
+The reconstructed CIGAR MUST be packed into BAM u32 format for the cigar slab.
 
 ### Mate information
 
@@ -458,7 +458,7 @@ Only records that were pushed to the RecordStore (i.e., overlapping the query re
 > _[CRAM3] §10.5 "Auxiliary tags" — TL tag line index, tag dictionary, tag encoding map_
 
 r[cram.record.aux_tags]
-`TL` (tag line index) selects which tag combination this record has from the tag dictionary in the preservation map. For each tag in the combination, the tag encoding map provides the encoding for its value. Tag values MUST be decoded and serialized to BAM binary aux format for storage in the data slab.
+`TL` (tag line index) selects which tag combination this record has from the tag dictionary in the preservation map. For each tag in the combination, the tag encoding map provides the encoding for its value. Tag values MUST be decoded and serialized to BAM binary aux format for storage in the aux slab.
 
 r[cram.record.rg_tag]
 The `RG` data series is separate from aux tags. If a read group is present, the reader MUST emit an `RG:Z:<id>` aux tag using the read group ID from the header's `@RG` entries. This tag MUST be included in the aux slab alongside dictionary-decoded tags.

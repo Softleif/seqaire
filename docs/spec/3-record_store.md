@@ -10,20 +10,22 @@ The record store replaces this with a **slab-based design**: all variable-length
 
 ## Layout
 
-The store contains five vectors:
+The store contains six vectors:
 
 - **Record table** (`Vec<SlimRecord>`): compact fixed-size structs with alignment fields and offsets into the slabs.
 - **Name slab** (`Vec<u8>`): all read names (qnames) packed sequentially. Separated because qnames are only accessed during dedup mate detection — a linear scan of a compact, contiguous buffer.
 - **Bases slab** (`Vec<Base>`): decoded base sequences stored as `Base` enum values (A/C/G/T/Unknown). For BAM, decoded from 4-bit nibbles via SIMD at push time. For SAM/CRAM, provided directly as `&[Base]` by the reader.
-- **Cigar slab** (`Vec<u8>`): CIGAR ops in BAM packed u32 format. Separated from the data slab because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying qual/aux.
-- **Data slab** (`Vec<u8>`): packed per-record as `[qual | aux]` — quality as raw Phred bytes, aux tags in BAM binary format.
+- **Cigar slab** (`Vec<u8>`): CIGAR ops in BAM packed u32 format. Separated because CIGAR is the field that changes during local realignment — isolating it allows append-only mutation without copying other per-record data.
+- **Qual slab** (`Vec<u8>`): per-record quality as raw Phred bytes. Separated from aux so that the pileup hot path (which reads qual but rarely aux) scans a dense, contiguous buffer without aux bytes polluting the cache.
+- **Aux slab** (`Vec<u8>`): per-record auxiliary tag bytes in BAM binary format.
 
 ```
 Record table:  [SlimRecord₀] [SlimRecord₁] [SlimRecord₂] ...
 Name slab:     [qname₀|qname₁|qname₂|...]
 Bases slab:    [bases₀|bases₁|bases₂|...]
 Cigar slab:    [cigar₀|cigar₁|cigar₂|...]
-Data slab:     [qual₀|aux₀|qual₁|aux₁|...]
+Qual slab:     [qual₀|qual₁|qual₂|...]
+Aux slab:      [aux₀|aux₁|aux₂|...]
 ```
 
 ## Record fields
@@ -34,7 +36,7 @@ Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `
 ## Capacity estimation
 
 r[record_store.capacity]
-On construction, the store MUST pre-allocate all five vectors with estimated capacities to avoid reallocation during `push_raw`. Estimates SHOULD be based on the number of compressed bytes loaded for the region: a typical BAM compression ratio of ~3:1, an average record size of ~400 bytes, ~25 bytes per read name, ~20 bytes per record of CIGAR data, and ~355 bytes per record of non-name/non-cigar data. The store MUST accept a byte-count hint for this purpose.
+On construction, the store MUST pre-allocate all six vectors with estimated capacities to avoid reallocation during `push_raw`. Estimates SHOULD be based on the number of compressed bytes loaded for the region: a typical BAM compression ratio of ~3:1, an average record size of ~400 bytes, ~25 bytes per read name, ~20 bytes per record of CIGAR data, ~150 bytes per record of quality data, and the remaining bytes budgeted for aux. The store MUST accept a byte-count hint for this purpose.
 
 ## Decoding into slabs
 
@@ -42,7 +44,7 @@ r[record_store.push_raw+2]
 `push_raw(raw_bytes)` MUST decode a BAM record's fixed fields and append its variable-length data directly into the slabs, without allocating intermediate `Box<[u8]>` or `Vec<u8>` per field. The 4-bit packed sequence MUST be decoded (via SIMD when available) to `Base` enum values in the bases slab.
 
 r[record_store.checked_offsets]
-Slab offsets (name_off, bases_off, cigar_off, data_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
+Slab offsets (name_off, bases_off, cigar_off, qual_off, aux_off) MUST be checked for u32 overflow before storing in both `push_raw` and `push_fields`. If any slab exceeds `u32::MAX` bytes, the store MUST return an error rather than silently truncating the offset.
 
 r[record_store.push_fields]
 `push_fields(...)` MUST accept pre-parsed record fields for SAM and CRAM readers: pos, end_pos, flags, mapq, matching_bases, indel_bases, qname bytes, CIGAR as packed BAM-format u32 ops, sequence as `&[Base]`, quality bytes, and aux tag bytes in BAM binary format. This avoids encoding to BAM binary only to immediately decode it again. SAM and CRAM parsers convert their native representations to these types before pushing.
@@ -55,7 +57,7 @@ The store MUST provide methods to access each variable-length field for a given 
 ## Region lifecycle
 
 r[record_store.clear+2]
-Clearing the store for a new region MUST retain the allocated capacity of all five vectors, so that subsequent regions reuse the same memory without reallocation.
+Clearing the store for a new region MUST retain the allocated capacity of all six vectors, so that subsequent regions reuse the same memory without reallocation.
 
 r[record_store.region_scoped]
 All records in the store MUST remain valid and accessible until the store is cleared.
