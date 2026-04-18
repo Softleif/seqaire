@@ -76,13 +76,15 @@ fn clear_retains_capacity() {
 
     let records_cap = store.records_capacity();
     let names_cap = store.names_capacity();
-    let data_cap = store.data_capacity();
+    let qual_cap = store.qual_capacity();
+    let aux_cap = store.aux_capacity();
 
     store.clear();
     assert_eq!(store.len(), 0);
     assert!(store.records_capacity() >= records_cap);
     assert!(store.names_capacity() >= names_cap);
-    assert!(store.data_capacity() >= data_cap);
+    assert!(store.qual_capacity() >= qual_cap);
+    assert!(store.aux_capacity() >= aux_cap);
 }
 
 // r[verify record_store.capacity]
@@ -91,7 +93,53 @@ fn with_capacity_hint_preallocates() {
     let store = RecordStore::with_byte_hint(100_000);
     assert!(store.records_capacity() > 0);
     assert!(store.names_capacity() > 0);
-    assert!(store.data_capacity() > 0);
+    assert!(store.qual_capacity() > 0);
+    assert!(store.aux_capacity() > 0);
+}
+
+// r[verify record_store.field_access]
+// r[verify record_store.checked_offsets]
+#[test]
+fn qual_and_aux_are_stored_in_independent_slabs() {
+    // Two records with very different qual/aux proportions. If qual and aux
+    // shared a single slab, each record's aux_off would depend on prior qual
+    // sizes; with independent slabs the two grow orthogonally.
+    let aux1 = b"RGZshort\0";
+    let aux2 = b"XXZa_longer_tag_value_for_record_two\0";
+    let raw1 =
+        make_test_record(0, 100, 0x63, 60, b"read1", &[(4 << 4)], &[0x12, 0x48], &[30; 4], aux1);
+    let raw2 = make_test_record(
+        0,
+        200,
+        0x63,
+        60,
+        b"read2",
+        &[(8 << 4)],
+        &[0x12, 0x48, 0x24, 0x81],
+        &[25; 8],
+        aux2,
+    );
+
+    let mut store = RecordStore::new();
+    let i1 = store.push_raw(&raw1).unwrap();
+    let i2 = store.push_raw(&raw2).unwrap();
+
+    // Round-trip: each accessor returns exactly the bytes that were pushed.
+    assert_eq!(store.qual(i1).len(), 4);
+    assert_eq!(store.qual(i2).len(), 8);
+    assert!(store.qual(i1).iter().all(|&q| q == 30));
+    assert!(store.qual(i2).iter().all(|&q| q == 25));
+    assert_eq!(store.aux(i1), aux1);
+    assert_eq!(store.aux(i2), aux2);
+
+    // Slab independence: record 2's aux starts immediately after record 1's
+    // aux (not after record 1's qual + aux combined).
+    let combined_aux_len = aux1.len() + aux2.len();
+    let combined_qual_len = 4 + 8;
+    // qual slab holds only qual bytes
+    assert_eq!(store.qual(i1).len() + store.qual(i2).len(), combined_qual_len);
+    // aux slab holds only aux bytes
+    assert_eq!(store.aux(i1).len() + store.aux(i2).len(), combined_aux_len);
 }
 
 // r[verify record_store.field_access]

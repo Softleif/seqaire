@@ -3,7 +3,9 @@
 //! All variable-length data is packed into contiguous byte buffers:
 //! - **Name slab**: read names (qnames), accessed during dedup mate detection
 //! - **Bases slab**: decoded `Base` values per record, accessed per-position in pileup
-//! - **Data slab**: cigar + qual + aux per record, accessed during pileup construction
+//! - **Cigar slab**: packed CIGAR ops, append-only mutation during realignment
+//! - **Qual slab**: raw Phred bytes, hot in pileup per-base quality lookup
+//! - **Aux slab**: auxiliary tag bytes in BAM binary format, rarely read in pileup
 
 use seqair_types::{BamFlags, Base, Pos0};
 
@@ -17,16 +19,27 @@ use super::{
 // r[impl record_store.push_raw+2]
 // r[impl record_store.slim_record_fields]
 pub struct SlimRecord {
+    /// 0-based leftmost aligned reference position.
     pub pos: Pos0,
+    /// 0-based exclusive end (`pos` + reference-consuming CIGAR length).
     pub end_pos: Pos0,
+    /// BAM flag bits (paired, unmapped, reverse strand, …).
     pub flags: BamFlags,
+    /// Number of CIGAR ops; bounded by BAM's u16 `l_op` field.
     pub n_cigar_ops: u16,
+    /// Mapping quality (0..=254; 255 = unavailable per [SAM1] §1.4).
     pub mapq: u8,
+    /// Query sequence length in bases — also the qual slab length for this record.
     pub seq_len: u32,
+    /// Sum of M/=/X op lengths, pre-computed from CIGAR at push time.
     pub matching_bases: u32,
+    /// Sum of I/D op lengths, pre-computed from CIGAR at push time.
     pub indel_bases: u32,
+    /// Reference target index; -1 for unmapped.
     pub tid: i32,
+    /// Mate's 0-based reference position; -1 if unavailable.
     pub next_pos: i32,
+    /// Signed template/insert size (TLEN); 0 if unavailable or mates on different refs.
     pub template_len: i32,
     /// Offset into the name slab.
     name_off: u32,
@@ -36,9 +49,11 @@ pub struct SlimRecord {
     bases_off: u32,
     /// Offset into the cigar slab (packed u32 ops).
     cigar_off: u32,
-    /// Offset into the data slab (start of [qual|aux]).
-    data_off: u32,
-    /// Length of aux data in the data slab.
+    /// Offset into the qual slab (`seq_len` Phred bytes).
+    qual_off: u32,
+    /// Offset into the aux slab (`aux_len` BAM aux bytes).
+    aux_off: u32,
+    /// Length of aux data in the aux slab.
     aux_len: u32,
 }
 
@@ -46,15 +61,15 @@ impl SlimRecord {
     fn cigar_len(&self) -> usize {
         (self.n_cigar_ops as usize).checked_mul(4).expect("cigar_len overflow")
     }
-
-    fn qual_off(&self) -> usize {
-        self.data_off as usize
-    }
-
-    fn aux_off(&self) -> usize {
-        self.qual_off().checked_add(self.seq_len as usize).expect("aux_off overflow")
-    }
 }
+
+// Compile-time size guard: splitting the former `data` slab into independent
+// `qual` and `aux` slabs adds one u32 offset. With Rust's field reordering the
+// struct still packs to 64 bytes (14 u32 + 3 u16 + 1 u8 + 1 pad). If this ever
+// grows, revisit the layout before accepting the hit — see
+// `docs/spec/3-record_store.md` "Layout".
+const _: () =
+    assert!(std::mem::size_of::<SlimRecord>() <= 64, "SlimRecord grew unexpectedly large");
 
 // r[impl record_store.push_raw+2]
 // r[impl record_store.field_access]
@@ -66,18 +81,21 @@ impl SlimRecord {
 // r[related pileup.qpos]
 /// Slab-based storage for BAM records.
 ///
-/// Five contiguous buffers hold all data for a region:
+/// Six contiguous buffers hold all data for a region:
 /// - `records`: compact fixed-size structs
 /// - `names`: packed qnames (for dedup)
 /// - `bases`: decoded `Base` values per record (for per-position base lookup)
 /// - `cigar`: packed CIGAR ops (separated for append-only mutation during realignment)
-/// - `data`: packed [qual|aux] per record
+/// - `qual`: raw Phred bytes per record (dense, hot in pileup)
+/// - `aux`: auxiliary tag bytes per record (rarely read in pileup; isolated so it
+///   does not pollute the cache when scanning qual)
 pub struct RecordStore {
     records: Vec<SlimRecord>,
     names: Vec<u8>,
     bases: Vec<Base>,
     cigar: Vec<u8>,
-    data: Vec<u8>,
+    qual: Vec<u8>,
+    aux: Vec<u8>,
 }
 
 impl RecordStore {
@@ -87,22 +105,35 @@ impl RecordStore {
             names: Vec::new(),
             bases: Vec::new(),
             cigar: Vec::new(),
-            data: Vec::new(),
+            qual: Vec::new(),
+            aux: Vec::new(),
         }
     }
 
     // r[impl perf.arena_capacity_hint+2]
     /// Pre-allocate based on estimated compressed bytes for the region.
     /// Assumes ~3:1 compression ratio, ~400 bytes per record, ~150bp avg read.
+    /// Qual is ~`seq_len` bytes per record; aux receives the remaining budget.
     pub fn with_byte_hint(compressed_bytes: usize) -> Self {
         let uncompressed_est = compressed_bytes.saturating_mul(3);
         let record_count_est = (uncompressed_est / 400).max(64);
+        let qual_est = record_count_est.saturating_mul(150);
+        let cigar_est = record_count_est.saturating_mul(20);
+        let names_est = record_count_est.saturating_mul(25);
+        // Aux slab gets whatever is left after names/cigar/qual; use saturating_sub
+        // so tiny hints don't underflow.
+        let aux_est = uncompressed_est
+            .saturating_sub(names_est)
+            .saturating_sub(cigar_est)
+            .saturating_sub(qual_est)
+            .max(record_count_est.saturating_mul(16));
         Self {
             records: Vec::with_capacity(record_count_est),
-            names: Vec::with_capacity(record_count_est.saturating_mul(25)),
+            names: Vec::with_capacity(names_est),
             bases: Vec::with_capacity(record_count_est.saturating_mul(150)),
-            cigar: Vec::with_capacity(record_count_est.saturating_mul(20)),
-            data: Vec::with_capacity(uncompressed_est),
+            cigar: Vec::with_capacity(cigar_est),
+            qual: Vec::with_capacity(qual_est),
+            aux: Vec::with_capacity(aux_est),
         }
     }
 
@@ -159,18 +190,22 @@ impl RecordStore {
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
         self.cigar.extend_from_slice(cigar_slice);
 
-        // --- Write into data slab [qual|aux] ---
+        // --- Write into qual slab ---
         // r[impl record_store.checked_offsets]
-        let data_off = u32::try_from(self.data.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        let qual_off = u32::try_from(self.qual.len()).map_err(|_| DecodeError::SlabOverflow)?;
 
         // Quality scores
         #[allow(clippy::indexing_slicing, reason = "all bounds ≤ qual_end ≤ raw.len()")]
-        self.data.extend_from_slice(&raw[h.seq_end..h.qual_end]);
+        self.qual.extend_from_slice(&raw[h.seq_end..h.qual_end]);
+
+        // --- Write into aux slab ---
+        // r[impl record_store.checked_offsets]
+        let aux_off = u32::try_from(self.aux.len()).map_err(|_| DecodeError::SlabOverflow)?;
 
         // Aux data (everything after qual)
         #[allow(clippy::indexing_slicing, reason = "qual_end ≤ raw.len()")]
         let aux_slice = &raw[h.qual_end..];
-        self.data.extend_from_slice(aux_slice);
+        self.aux.extend_from_slice(aux_slice);
 
         self.records.push(SlimRecord {
             pos: h.pos,
@@ -192,7 +227,8 @@ impl RecordStore {
             name_len: qname_actual_len as u16,
             bases_off,
             cigar_off,
-            data_off,
+            qual_off,
+            aux_off,
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "aux data is bounded by slab limits (u32); slab overflow checked above via SlabOverflow"
@@ -293,11 +329,15 @@ impl RecordStore {
         let cigar_off = u32::try_from(self.cigar.len()).map_err(|_| DecodeError::SlabOverflow)?;
         self.cigar.extend_from_slice(cigar_packed);
 
-        // Data slab [qual|aux]
+        // Qual slab
         // r[impl record_store.checked_offsets]
-        let data_off = u32::try_from(self.data.len()).map_err(|_| DecodeError::SlabOverflow)?;
-        self.data.extend_from_slice(qual);
-        self.data.extend_from_slice(aux);
+        let qual_off = u32::try_from(self.qual.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        self.qual.extend_from_slice(qual);
+
+        // Aux slab
+        // r[impl record_store.checked_offsets]
+        let aux_off = u32::try_from(self.aux.len()).map_err(|_| DecodeError::SlabOverflow)?;
+        self.aux.extend_from_slice(aux);
 
         self.records.push(SlimRecord {
             pos,
@@ -319,7 +359,8 @@ impl RecordStore {
             name_len: qname.len() as u16,
             bases_off,
             cigar_off,
-            data_off,
+            qual_off,
+            aux_off,
             #[expect(
                 clippy::cast_possible_truncation,
                 reason = "aux data bounded by slab limits (u32); slab overflow checked via SlabOverflow"
@@ -402,17 +443,19 @@ impl RecordStore {
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn qual(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.qual_off().checked_add(rec.seq_len as usize).expect("qual end overflow");
-        debug_assert!(end <= self.data.len(), "qual slab overrun: {end} > {}", self.data.len());
-        &self.data[rec.qual_off()..end]
+        let start = rec.qual_off as usize;
+        let end = start.checked_add(rec.seq_len as usize).expect("qual end overflow");
+        debug_assert!(end <= self.qual.len(), "qual slab overrun: {end} > {}", self.qual.len());
+        &self.qual[start..end]
     }
 
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn aux(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);
-        let end = rec.aux_off().checked_add(rec.aux_len as usize).expect("aux end overflow");
-        debug_assert!(end <= self.data.len(), "aux slab overrun: {end} > {}", self.data.len());
-        &self.data[rec.aux_off()..end]
+        let start = rec.aux_off as usize;
+        let end = start.checked_add(rec.aux_len as usize).expect("aux end overflow");
+        debug_assert!(end <= self.aux.len(), "aux slab overrun: {end} > {}", self.aux.len());
+        &self.aux[start..end]
     }
 
     // r[impl record_store.set_alignment]
@@ -475,7 +518,8 @@ impl RecordStore {
         self.names.clear();
         self.bases.clear();
         self.cigar.clear();
-        self.data.clear();
+        self.qual.clear();
+        self.aux.clear();
     }
 
     pub fn records_capacity(&self) -> usize {
@@ -494,8 +538,12 @@ impl RecordStore {
         self.cigar.capacity()
     }
 
-    pub fn data_capacity(&self) -> usize {
-        self.data.capacity()
+    pub fn qual_capacity(&self) -> usize {
+        self.qual.capacity()
+    }
+
+    pub fn aux_capacity(&self) -> usize {
+        self.aux.capacity()
     }
 }
 

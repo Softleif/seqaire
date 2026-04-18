@@ -74,7 +74,7 @@ r[sam.record.qual_decode]
 QUAL characters MUST have 33 subtracted (Phred+33 encoding). The string `*` means quality unavailable; all quality bytes MUST be set to 0xFF (255). QUAL length MUST equal SEQ length when both are present.
 
 > r[sam.record.aux_tags]
-> Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They MUST be serialized to BAM binary aux format for storage in the data slab:
+> Optional fields after the 11th column follow the format `TAG:TYPE:VALUE`. They MUST be serialized to BAM binary aux format for storage in the aux slab:
 >
 > - `A` (char): `[tag0, tag1, 'A', char]`
 > - `i` (integer): `[tag0, tag1, type, bytes...]` where type is the smallest fitting BAM integer type:
