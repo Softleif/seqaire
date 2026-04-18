@@ -189,6 +189,7 @@ pub(crate) struct ParsedHeader {
     pub flags: BamFlags,
     pub n_cigar_ops: u16,
     pub seq_len: u32,
+    pub next_ref_id: i32,
     pub next_pos: i32,
     pub template_len: i32,
     /// Start of variable-length data (32 + `name_len`).
@@ -227,7 +228,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     let n_cigar_ops = u16::from_le_bytes(read2(raw, 12));
     let flags = BamFlags::from(u16::from_le_bytes(read2(raw, 14)));
     let seq_len = u32::from_le_bytes(read4(raw, 16));
-    // next_ref_id at offset 20 is not stored (mate's tid rarely needed for realignment).
+    let next_ref_id = i32::from_le_bytes(read4(raw, 20));
     let next_pos = i32::from_le_bytes(read4(raw, 24));
     let template_len = i32::from_le_bytes(read4(raw, 28));
 
@@ -250,6 +251,7 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         flags,
         n_cigar_ops,
         seq_len,
+        next_ref_id,
         next_pos,
         template_len,
         var_start,
