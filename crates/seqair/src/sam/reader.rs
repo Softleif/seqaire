@@ -538,6 +538,18 @@ fn parse_sam_line(
         parse_aux_tags(aux_text, aux_buf)?;
     }
 
+    // Field 7: RNEXT (mate reference name; * = unavailable, = = same as RNAME)
+    let rnext_field = fields.get(6).copied().unwrap_or(b"*");
+    let next_ref_id: i32 = if rnext_field == b"*" {
+        -1
+    } else if rnext_field == b"=" {
+        rec_tid
+    } else {
+        let rnext_str = std::str::from_utf8(rnext_field)
+            .map_err(|_| SamRecordError::InvalidRname { value: rnext_field.into() })?;
+        header.tid(rnext_str).map_or(-1, |t| t.cast_signed())
+    };
+
     // Field 8: PNEXT (1-based mate position, 0 = unavailable)
     let pnext_field = fields.get(7).copied().unwrap_or(b"0");
     let pnext = parse_i64(pnext_field)
@@ -572,6 +584,7 @@ fn parse_sam_line(
         qual_buf,
         aux_buf,
         rec_tid,
+        next_ref_id,
         next_pos,
         template_len,
     )?;

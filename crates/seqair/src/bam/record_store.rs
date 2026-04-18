@@ -37,6 +37,7 @@ pub struct SlimRecord {
     pub indel_bases: u32,
     /// Reference target index; -1 for unmapped.
     pub tid: i32,
+    pub next_ref_id: i32,
     /// Mate's 0-based reference position; -1 if unavailable.
     pub next_pos: i32,
     /// Signed template/insert size (TLEN); 0 if unavailable or mates on different refs.
@@ -224,6 +225,7 @@ impl RecordStore {
             matching_bases,
             indel_bases,
             tid: h.tid,
+            next_ref_id: h.next_ref_id,
             next_pos: h.next_pos,
             template_len: h.template_len,
             name_off,
@@ -306,6 +308,7 @@ impl RecordStore {
         qual: &[u8],
         aux: &[u8],
         tid: i32,
+        next_ref_id: i32,
         next_pos: i32,
         template_len: i32,
     ) -> Result<u32, DecodeError> {
@@ -356,6 +359,7 @@ impl RecordStore {
             matching_bases,
             indel_bases,
             tid,
+            next_ref_id,
             next_pos,
             template_len,
             name_off,
@@ -638,9 +642,10 @@ mod tests {
             &[Base::A],
             &[30],
             &[],
-            0, // tid
-            0, // next_pos
-            0, // template_len
+            0,  // tid
+            -1, // next_ref_id
+            0,  // next_pos
+            0,  // template_len
         );
         assert!(result.is_ok());
     }
@@ -653,5 +658,43 @@ mod tests {
         let result = store.push_raw(&raw);
         assert!(result.is_ok());
         assert_eq!(store.len(), 1);
+    }
+
+    // r[verify record_store.slim_record_fields]
+    #[test]
+    fn push_raw_preserves_next_ref_id() {
+        let mut store = RecordStore::new();
+        let mut raw = make_raw_record(b"read1", 4, 1);
+        // Write next_ref_id = 7 at BAM offset 20
+        raw[20..24].copy_from_slice(&7i32.to_le_bytes());
+        store.push_raw(&raw).unwrap();
+        assert_eq!(store.record(0).next_ref_id, 7);
+    }
+
+    // r[verify record_store.slim_record_fields]
+    #[test]
+    fn push_fields_preserves_next_ref_id() {
+        use seqair_types::Base;
+        let mut store = RecordStore::new();
+        store
+            .push_fields(
+                Pos0::new(100).unwrap(),
+                Pos0::new(105).unwrap(),
+                BamFlags::empty(),
+                30,
+                5,
+                0,
+                b"read1",
+                &(5u32 << 4).to_le_bytes(), // 5M cigar
+                &[Base::A, Base::C, Base::G, Base::T, Base::A],
+                &[30, 31, 32, 33, 34],
+                &[],
+                0,   // tid
+                3,   // next_ref_id
+                500, // next_pos
+                200, // template_len
+            )
+            .unwrap();
+        assert_eq!(store.record(0).next_ref_id, 3);
     }
 }

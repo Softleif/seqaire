@@ -337,6 +337,7 @@ fn decode_record(
     // r[impl cram.record.mate_attached]
     // 8. Mate data
     let mut next_pos_val: i32 = -1;
+    let mut next_ref_id_val: i32 = -1;
     let mut template_len_val: i32 = 0;
     let mut mate_line: i32 = -1;
     if detached {
@@ -344,7 +345,7 @@ fn decode_record(
         if !ch.preservation.read_names_included {
             let _ = ds.read_name.decode(ctx)?;
         }
-        let _next_ref = ds.next_segment_ref.decode(ctx)?;
+        next_ref_id_val = ds.next_segment_ref.decode(ctx)?;
         next_pos_val = ds.next_mate_pos.decode(ctx)?;
         template_len_val = ds.template_size.decode(ctx)?;
     } else if mate_downstream {
@@ -498,6 +499,7 @@ fn decode_record(
             qual_buf,
             aux_buf,
             record_ref_id,
+            next_ref_id_val,
             next_pos_val,
             template_len_val,
         )?;

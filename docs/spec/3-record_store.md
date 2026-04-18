@@ -31,7 +31,7 @@ Aux slab:      [aux₀|aux₁|aux₂|...]
 ## Record fields
 
 r[record_store.slim_record_fields]
-Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_pos` (mate position), `template_len` (signed insert size). The `tid`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
+Each `SlimRecord` MUST store the following fixed fields: `tid` (reference ID), `pos`, `end_pos`, `flags`, `mapq`, `n_cigar_ops`, `seq_len`, `matching_bases`, `indel_bases`, `next_ref_id` (mate reference ID), `next_pos` (mate position), `template_len` (signed insert size). The `tid`, `next_ref_id`, `next_pos`, and `template_len` fields are required for BAM write-back after local realignment.
 
 ## Capacity estimation
 
