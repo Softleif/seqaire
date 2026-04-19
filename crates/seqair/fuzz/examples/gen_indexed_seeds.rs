@@ -39,11 +39,7 @@ fn main() {
 
     // Header-only BAM: just enough blocks for the header, no records — exercises empty fetch
     let header_bam = truncate_bgzf(&bam, 2);
-    write_seed(
-        &seed_dir,
-        "bam_header_only",
-        Input::encode(0, &header_bam, &bai, &[], &fai, &gzi),
-    );
+    write_seed(&seed_dir, "bam_header_only", Input::encode(0, &header_bam, &bai, &[], &fai, &gzi));
 
     // BAM with empty BAI (magic + n_ref=0) — exercises index-mismatch path
     let empty_bai = b"BAI\x01\x00\x00\x00\x00";
@@ -83,11 +79,7 @@ fn main() {
     let plain_sam = b"@HD\tVN:1.6\tSO:coordinate\n\
         @SQ\tSN:chr1\tLN:1000\n\
         read1\t0\tchr1\t100\t60\t10M\t*\t0\t0\tACGTACGTAC\t*\n";
-    write_seed(
-        &seed_dir,
-        "plain_sam",
-        Input::encode(3, plain_sam, &[], &[], &fai, &gzi),
-    );
+    write_seed(&seed_dir, "plain_sam", Input::encode(3, plain_sam, &[], &[], &fai, &gzi));
 
     // Plain SAM with multiple contigs
     let plain_sam_multi = b"@HD\tVN:1.6\tSO:coordinate\n\
@@ -102,11 +94,7 @@ fn main() {
     );
 
     // Plain SAM without FASTA
-    write_seed(
-        &seed_dir,
-        "plain_sam_no_fasta",
-        Input::encode(3, plain_sam, &[], &[], b"", &[]),
-    );
+    write_seed(&seed_dir, "plain_sam_no_fasta", Input::encode(3, plain_sam, &[], &[], b"", &[]));
 
     // === CRAM seeds ===
     let crai_v31_gz = fs::read(data_dir.join("test.cram.crai")).unwrap();
@@ -115,22 +103,14 @@ fn main() {
     // CRAM v3.1
     let cram_v31 = fs::read(data_dir.join("test.cram")).unwrap();
     let small_cram_v31 = &cram_v31[..cram_v31.len().min(50_000)];
-    write_seed(
-        &seed_dir,
-        "cram_v31",
-        Input::encode(2, small_cram_v31, &crai_v31, &[], &fai, &gzi),
-    );
+    write_seed(&seed_dir, "cram_v31", Input::encode(2, small_cram_v31, &crai_v31, &[], &fai, &gzi));
 
     // CRAM v3.0
     let cram_v30 = fs::read(data_dir.join("test_v30.cram")).unwrap();
     let crai_v30_gz = fs::read(data_dir.join("test_v30.cram.crai")).unwrap();
     let crai_v30 = decompress_gz(&crai_v30_gz);
     let small_cram_v30 = &cram_v30[..cram_v30.len().min(50_000)];
-    write_seed(
-        &seed_dir,
-        "cram_v30",
-        Input::encode(2, small_cram_v30, &crai_v30, &[], &fai, &gzi),
-    );
+    write_seed(&seed_dir, "cram_v30", Input::encode(2, small_cram_v30, &crai_v30, &[], &fai, &gzi));
 
     // CRAM gzip codec
     let cram_gzip = fs::read(data_dir.join("test_gzip.cram")).unwrap();
@@ -153,7 +133,10 @@ fn main() {
 
 fn write_seed(seed_dir: &Path, name: &str, data: Vec<u8>) {
     let parsed = Input::parse(&data).unwrap_or_else(|| panic!("{name} seed must round-trip parse"));
-    let total = parsed.data1.len() + parsed.data2.len() + parsed.fasta_gz.len() + parsed.fai.len()
+    let total = parsed.data1.len()
+        + parsed.data2.len()
+        + parsed.fasta_gz.len()
+        + parsed.fai.len()
         + parsed.gzi.len();
     fs::write(seed_dir.join(name), &data).unwrap();
     println!("  {name}: {} bytes ({total} payload)", data.len());
@@ -224,8 +207,8 @@ fn make_bgzf_block(data: &[u8]) -> Vec<u8> {
 
     // EOF block
     block.extend_from_slice(&[
-        0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43,
-        0x02, 0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x1f, 0x8b, 0x08, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x06, 0x00, 0x42, 0x43, 0x02,
+        0x00, 0x1b, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     ]);
 
     block
