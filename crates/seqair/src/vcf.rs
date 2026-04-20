@@ -116,7 +116,6 @@ pub(crate) mod bcf_encoding;
 pub(crate) mod encoder;
 pub mod error;
 pub mod header;
-pub mod index_builder;
 pub mod record;
 pub mod record_encoder;
 pub mod unified;

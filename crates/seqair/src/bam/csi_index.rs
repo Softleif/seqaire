@@ -539,7 +539,7 @@ fn csi_pseudo_bin(depth: u32) -> u32 {
 #[allow(clippy::type_complexity, reason = "tests")]
 mod tests {
     use super::*;
-    use crate::vcf::index_builder::reg2bin;
+    use crate::io::reg2bin;
 
     // --- csi_reg2bins tests ---
 

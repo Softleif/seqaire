@@ -3,9 +3,7 @@
 
 use super::bcf_encoding::*;
 use super::error::VcfError;
-use super::index_builder::IndexBuilder;
-use crate::bam::bgzf::VirtualOffset;
-use crate::bam::bgzf_writer::BgzfWriter;
+use crate::io::{BgzfWriter, IndexBuilder, VirtualOffset};
 use std::io::Write;
 
 // ── BcfValue trait ──────────────────────────────────────────────────────
@@ -132,19 +130,19 @@ pub(crate) trait BgzfWrite {
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
     fn virtual_offset(&self) -> VirtualOffset;
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
-    fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::bam::bgzf::BgzfError>;
+    fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::io::BgzfError>;
     #[allow(dead_code, reason = "called through dyn BgzfWrite in unified.rs")]
-    fn write_all(&mut self, data: &[u8]) -> Result<(), crate::bam::bgzf::BgzfError>;
+    fn write_all(&mut self, data: &[u8]) -> Result<(), crate::io::BgzfError>;
 }
 
 impl<W: Write> BgzfWrite for BgzfWriter<W> {
     fn virtual_offset(&self) -> VirtualOffset {
         self.virtual_offset()
     }
-    fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::bam::bgzf::BgzfError> {
+    fn flush_if_needed(&mut self, upcoming: usize) -> Result<(), crate::io::BgzfError> {
         self.flush_if_needed(upcoming)
     }
-    fn write_all(&mut self, data: &[u8]) -> Result<(), crate::bam::bgzf::BgzfError> {
+    fn write_all(&mut self, data: &[u8]) -> Result<(), crate::io::BgzfError> {
         self.write_all(data)
     }
 }
@@ -347,10 +345,10 @@ mod tests {
         fn virtual_offset(&self) -> VirtualOffset {
             VirtualOffset(self.data.len() as u64)
         }
-        fn flush_if_needed(&mut self, _upcoming: usize) -> Result<(), crate::bam::bgzf::BgzfError> {
+        fn flush_if_needed(&mut self, _upcoming: usize) -> Result<(), crate::io::BgzfError> {
             Ok(())
         }
-        fn write_all(&mut self, data: &[u8]) -> Result<(), crate::bam::bgzf::BgzfError> {
+        fn write_all(&mut self, data: &[u8]) -> Result<(), crate::io::BgzfError> {
             self.data.extend_from_slice(data);
             Ok(())
         }

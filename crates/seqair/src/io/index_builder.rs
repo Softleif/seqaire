@@ -1,7 +1,7 @@
 //! Single-pass index builder for TBI/CSI. Mirrors htslib's `hts_idx_push`
 //! algorithm: accumulates bin/chunk/linear index data during writing.
 
-use crate::bam::bgzf::VirtualOffset;
+use crate::io::VirtualOffset;
 use seqair_types::SmolStr;
 use std::collections::BTreeMap;
 
@@ -22,7 +22,7 @@ pub enum IndexError {
     Io(#[from] std::io::Error),
 
     #[error("BGZF error writing index")]
-    Bgzf(#[from] crate::bam::bgzf::BgzfError),
+    Bgzf(#[from] crate::io::BgzfError),
 
     #[error("finish() must be called before writing the index")]
     NotFinished,
@@ -281,7 +281,7 @@ impl IndexBuilder {
         writer: W,
         contig_names: &[SmolStr],
     ) -> Result<(), IndexError> {
-        use crate::bam::bgzf_writer::BgzfWriter;
+        use crate::io::BgzfWriter;
 
         // r[impl index_builder.tbi_empty_refs]
         // Collect only references that have data (non-empty bins)
@@ -386,7 +386,7 @@ impl IndexBuilder {
         if !self.finished {
             return Err(IndexError::NotFinished);
         }
-        use crate::bam::bgzf_writer::BgzfWriter;
+        use crate::io::BgzfWriter;
 
         let mut buf = Vec::new();
 
@@ -424,7 +424,7 @@ impl IndexBuilder {
         if !self.finished {
             return Err(IndexError::NotFinished);
         }
-        use crate::bam::bgzf_writer::BgzfWriter;
+        use crate::io::BgzfWriter;
 
         // Build tabix aux block
         let mut aux = Vec::new();

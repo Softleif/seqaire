@@ -1,6 +1,6 @@
 //! VCF/BCF error types. Typed fields only, no `String` payloads.
 
-use crate::{bam::bgzf::BgzfError, vcf::writer::WriteError};
+use crate::{io::BgzfError, vcf::writer::WriteError};
 use seqair_types::SmolStr;
 use std::path::PathBuf;
 
@@ -106,7 +106,7 @@ pub enum VcfError {
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
-    Index(#[from] super::index_builder::IndexError),
+    Index(#[from] crate::io::IndexError),
 
     #[error("write_header() must be called before write_record()")]
     HeaderNotWritten,

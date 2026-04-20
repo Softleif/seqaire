@@ -66,7 +66,7 @@ fn make_index_setup() -> IndexSetup {
 /// Write a .vcf.gz file with multiple sorted records and return the co-produced TBI index.
 fn write_vcf_gz_with_index(
     dir: &std::path::Path,
-) -> (std::path::PathBuf, seqair::vcf::index_builder::IndexBuilder) {
+) -> (std::path::PathBuf, seqair::io::IndexBuilder) {
     let setup = make_index_setup();
     let vcf_path = dir.join("test.vcf.gz");
     let file = std::fs::File::create(&vcf_path).unwrap();
@@ -101,13 +101,14 @@ fn write_vcf_gz_with_index(
     setup.gt_fmt.encode(&mut enc, &[Genotype::unphased(1, 1)]).unwrap();
     enc.emit().unwrap();
 
-    let index = writer.finish().unwrap().expect("VcfGz writer should produce TBI index");
+    let (_inner, index) = writer.finish().unwrap();
+    let index = index.expect("VcfGz writer should produce TBI index");
     (vcf_path, index)
 }
 
 /// Write seqair's TBI index to a file.
 fn write_seqair_tbi(
-    index: &seqair::vcf::index_builder::IndexBuilder,
+    index: &seqair::io::IndexBuilder,
     tbi_path: &std::path::Path,
     header: &VcfHeader,
 ) {
@@ -362,7 +363,8 @@ fn write_proptest_vcf(
         enc.emit().unwrap();
     }
 
-    let index = writer.finish().unwrap().expect("should produce index");
+    let (_inner, index) = writer.finish().unwrap();
+    let index = index.expect("should produce index");
     let tbi_path = vcf_path.with_extension("gz.tbi");
     use seqair_types::SmolStr;
     let names: Vec<SmolStr> = header.contigs().keys().cloned().collect();
