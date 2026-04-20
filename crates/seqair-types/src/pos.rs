@@ -168,6 +168,7 @@ impl Pos<One> {
 
 impl<S> Pos<S> {
     // r[impl pos.as_i32]
+    // r[impl pos.must_use]
     /// Raw value as `i32`. Infallible because all valid positions are `<= i32::MAX`.
     #[inline]
     #[must_use]
@@ -643,14 +644,14 @@ mod tests {
         assert_eq!(format!("{o:?}"), "Pos1(43)");
     }
 
-    // r[verify pos.niche]
+    // r[verify pos.zero_new]
     #[test]
     fn max_value_zero() {
         let m = Pos0::max_value();
         assert_eq!(*m, I32_MAX_U32);
     }
 
-    // r[verify pos.niche]
+    // r[verify pos.one_new]
     #[test]
     fn max_value_one() {
         let m = Pos1::max_value();

@@ -15,6 +15,7 @@ use std::fmt;
 /// see `r[types.base_quality.no_ord]`.
 // r[impl types.base_quality.type]
 // r[impl types.base_quality.copy]
+// r[impl types.base_quality.no_ord]
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BaseQuality(u8);
@@ -36,6 +37,7 @@ impl BaseQuality {
 
     /// Wrap a raw wire byte. All 256 values are valid.
     // r[impl types.base_quality.from_byte]
+    // r[impl types.base_quality.roundtrip]
     #[inline]
     pub const fn from_byte(b: u8) -> Self {
         Self(b)

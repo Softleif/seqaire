@@ -27,3 +27,11 @@ r[vcf_record.allele_count]
 
 r[vcf_record.pos_one_based]
 Positions are 1-based, matching VCF text format convention. The BCF encoder MUST subtract 1 to produce the 0-based BCF POS.
+
+## Validation
+
+r[vcf_record.sample_count]
+The encoder MUST validate that the number of samples provided for each FORMAT field matches the sample count declared in the VCF header. A mismatch MUST be reported as a typed error.
+
+r[vcf_record.format_gt_first]
+When a GT (genotype) FORMAT field is present, it MUST be the first FORMAT key. If GT appears at any other position, the encoder MUST reject the record with a typed error.

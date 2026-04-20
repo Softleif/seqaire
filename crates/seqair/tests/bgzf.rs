@@ -128,7 +128,8 @@ fn bam_flag_constants_match_sam_spec() {
     assert_eq!(FLAG_SUPPLEMENTARY, 0x800);
 }
 
-// r[verify io.typed_flags]
+// r[verify flags.type]
+// r[verify flags.predicates]
 #[test]
 fn bam_flags_newtype_predicate_methods() {
     // 0x53 = paired(0x1) + proper_pair(0x2) + reverse(0x10) + first_in_template(0x40)
