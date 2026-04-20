@@ -6,11 +6,11 @@ use super::bcf_encoding::*;
 use super::encoder::{BcfRecordEncoder, BcfValue, BgzfWrite, ContigHandle};
 use super::error::VcfError;
 use super::header::VcfHeader;
-use super::index_builder::IndexBuilder;
 use super::record::Genotype;
 use super::record_encoder::{ContigId, FieldId, FilterId, FormatEncoder, InfoEncoder};
 use super::writer::{percent_encode_into, write_float_g};
-use crate::bam::bgzf_writer::BgzfWriter;
+use crate::io::BgzfWriter;
+use crate::io::IndexBuilder;
 use seqair_types::{Pos1, SmallVec, SmolStr};
 use std::io::Write;
 use std::marker::PhantomData;
@@ -230,12 +230,17 @@ impl<W: Write> Writer<W, Ready> {
     }
 
     // r[impl record_encoder.finish]
-    /// Finalize the writer. Returns the index builder if one was co-produced.
-    pub fn finish(self) -> Result<Option<IndexBuilder>, VcfError> {
+    /// Finalize the writer, returning the inner writer and optional index builder.
+    ///
+    /// For VCF.gz and BCF, all buffered data is flushed and the BGZF EOF marker
+    /// is written before this returns — the caller does not need to flush `W`.
+    /// The index builder is `Some` for `VcfGz` (TBI) and `Bcf` (CSI), `None`
+    /// for plain VCF. This signature matches [`crate::bam::BamWriter::finish`].
+    pub fn finish(self) -> Result<(W, Option<IndexBuilder>), VcfError> {
         match self.inner {
             WriterInner::Vcf { mut output, .. } => {
                 output.flush().map_err(VcfError::Io)?;
-                Ok(None)
+                Ok((output, None))
             }
             WriterInner::VcfGz { bgzf, mut index, .. } => {
                 // r[impl vcf_writer.finish]
@@ -243,8 +248,8 @@ impl<W: Write> Writer<W, Ready> {
                 if let Some(ref mut idx) = index {
                     idx.finish(voff)?;
                 }
-                bgzf.finish()?;
-                Ok(index)
+                let inner = bgzf.finish()?;
+                Ok((inner, index))
             }
             WriterInner::Bcf { bgzf, mut index, .. } => {
                 // r[impl bcf_writer.finish]
@@ -252,8 +257,8 @@ impl<W: Write> Writer<W, Ready> {
                 if let Some(ref mut idx) = index {
                     idx.finish(voff)?;
                 }
-                bgzf.finish()?;
-                Ok(index)
+                let inner = bgzf.finish()?;
+                Ok((inner, index))
             }
         }
     }

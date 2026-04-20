@@ -7,7 +7,7 @@
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
 use super::seq;
-use crate::vcf::index_builder::reg2bin;
+use crate::io::reg2bin;
 use seqair_types::{BamFlags, Base, BaseQuality};
 use thiserror::Error;
 

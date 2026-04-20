@@ -11,6 +11,7 @@
 pub mod bam;
 pub mod cram;
 pub mod fasta;
+pub mod io;
 pub mod reader;
 pub mod sam;
 pub(crate) mod utils;

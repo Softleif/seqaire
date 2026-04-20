@@ -309,7 +309,7 @@ fn poisoned_writer_partial_output_is_readable() {
     };
     assert!(writer.write(&bad_rec).is_err());
 
-    // Writer is now poisoned
+    // BamWriter is now poisoned
     let good_rec = OwnedBamRecord::builder(0, 300, b"after".to_vec())
         .mapq(60)
         .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])

@@ -3,11 +3,9 @@
 //! [`BamWriter`] serializes [`OwnedBamRecord`] values
 //! into BGZF-compressed BAM format and optionally co-produces a BAI index during writing.
 
-use super::bgzf::BgzfError;
-use super::bgzf_writer::BgzfWriter;
 use super::header::{BamHeader, BamHeaderError, TargetInfoAccess};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
-use crate::vcf::index_builder::{IndexBuilder, IndexError};
+use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
@@ -290,7 +288,7 @@ impl<W: Write> BamWriter<W> {
         // Compute BAI bin from pos and end_pos
         let beg = rec.pos.as_u64();
         let end = rec.end_pos.as_u64().max(beg.saturating_add(1));
-        let bin = crate::vcf::index_builder::reg2bin(beg, end, 14, 5) as u16;
+        let bin = crate::io::reg2bin(beg, end, 14, 5) as u16;
 
         // Build the 32-byte fixed header + variable data into self.buf
         self.buf.clear();

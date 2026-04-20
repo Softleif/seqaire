@@ -9,7 +9,7 @@
     reason = "test code"
 )]
 
-use seqair::bam::bgzf_writer::BgzfWriter;
+use seqair::io::BgzfWriter;
 use std::process::Command;
 
 /// Write BGZF data, decompress with bgzip -d, verify content matches.

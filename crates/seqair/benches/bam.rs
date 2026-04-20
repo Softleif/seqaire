@@ -206,9 +206,9 @@ fn bam_roundtrip(c: &mut Criterion) {
     group.bench_function("seqair", |b| {
         b.iter(|| {
             use seqair::bam::BamHeader;
-            use seqair::bam::bgzf_writer::BgzfWriter;
             use seqair::bam::owned_record::OwnedBamRecord;
             use seqair::bam::writer::BamWriter;
+            use seqair::io::BgzfWriter;
 
             let path = std::path::Path::new(BAM_PATH);
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
