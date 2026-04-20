@@ -9,9 +9,9 @@ Genomic positions appear throughout the codebase in multiple integer types (`i64
 
 A phantom-typed newtype `Pos<S>` solves both: the type system distinguishes coordinate systems at compile time, and a single internal integer type (`u32`) eliminates gratuitous casts.
 
-### Why `u32` and not `i64`?
+### Why `u32` capped at `i32::MAX`?
 
-The SAM spec caps reference sequence length (`@SQ LN`) at `[1, 2^31-1]` (~2.1 billion) [SAM1 §1.3], and the BAM binary `l_ref` field is `uint32_t` with the same `< 2^31` constraint [SAM1 §4.2]. BAM binary `pos` is `int32_t`, giving a valid position range of `[0, 2^31-1]`. All current SAM/BAM positions therefore fit in `u32` (max ~4.3 billion) with room to spare. Using `u32`:
+The SAM spec caps reference sequence length (`@SQ LN`) at `[1, 2^31-1]` (~2.1 billion) [SAM1 §1.3], and the BAM binary `l_ref` field is `uint32_t` with the same `< 2^31` constraint [SAM1 §4.2]. BAM binary `pos` is `int32_t`, giving a valid position range of `[0, 2^31-1]`. All current SAM/BAM positions therefore fit in `u32` (max ~4.3 billion) with room to spare, and capping at `i32::MAX` makes `as_i32()` infallible. Using `u32`:
 
 - Halves position storage (4 bytes vs 8), improving cache density in hot structs (`SlimRecord`, `PileupAlignment`, `CompactOp`)
 - Eliminates the i64↔i32 casts currently scattered through cigar.rs
@@ -41,24 +41,25 @@ r[pos.incompatible]
 ## Construction
 
 r[pos.zero_new]
-`Pos::<Zero>::new(u32)` MUST be an infallible constructor accepting any `u32` value. All `u32` values are valid 0-based positions.
+`Pos::<Zero>::new(u32) -> Option<Self>` MUST return `None` if the value exceeds `i32::MAX`. All values in `0..=i32::MAX` are valid 0-based positions.
 
 r[pos.one_new]
-`Pos::<One>::new(u32)` MUST reject 0. In debug builds, it MUST panic. The value 0 is not a valid 1-based position.
+`Pos::<One>::new(u32) -> Option<Self>` MUST return `None` if the value is 0 or exceeds `i32::MAX`. The value 0 is not a valid 1-based position.
 
 r[pos.try_from]
-Fallible constructors MUST be provided for wider integer types:
+Fallible `TryFrom` trait impls MUST be provided for common integer types, all returning `Result<Self, PosOverflow>`:
 
-- `try_from_i64(i64) -> Option<Self>`: rejects negative values (for `Zero`) or values < 1 (for `One`), and values exceeding `u32::MAX`.
-- `try_from_u64(u64) -> Option<Self>`: rejects values exceeding `u32::MAX`.
-- `try_from_i32(i32) -> Option<Self>` (for `One`): rejects values < 1.
+- `TryFrom<i32>`: rejects negative values (for `Zero`) or values < 1 (for `One`).
+- `TryFrom<u32>`: delegates to `new()`.
+- `TryFrom<i64>`: rejects negative values (for `Zero`) or values < 1 (for `One`), and values exceeding `i32::MAX`.
+- `TryFrom<u64>`: rejects values exceeding `i32::MAX` (and 0 for `One`).
 
-These are the ONLY entry points for external integer values. Raw `as` casts from integers to `Pos` MUST NOT be possible outside the module.
+These and `new()` are the ONLY entry points for external integer values. Raw `as` casts from integers to `Pos` MUST NOT be possible outside the module.
 
 ## Conversion
 
 r[pos.to_one_based]
-`Pos<Zero>::to_one_based()` MUST return `Pos<One>` by adding 1 to the raw value. This is infallible because the maximum valid BAM position (`i32::MAX` ≈ 2.1B) plus 1 fits in `u32` (max ≈ 4.3B).
+`Pos<Zero>::to_one_based()` MUST return `Result<Pos<One>, PosOverflow>` by adding 1 to the raw value. This is fallible: a 0-based position of `i32::MAX` would require a 1-based value of `i32::MAX + 1`, which exceeds the valid range for `Pos<One>`.
 
 r[pos.to_zero_based]
 `Pos<One>::to_zero_based()` MUST return `Pos<Zero>` by subtracting 1 from the raw value. This is infallible because the minimum 1-based value is 1, yielding 0-based 0.
@@ -86,10 +87,10 @@ r[pos.sub_pos]
 `Pos<S> - Pos<S> = Offset`: subtracting two positions of the same system MUST produce an `Offset`. Subtracting positions of different systems MUST be a compile error.
 
 r[pos.add_offset]
-`Pos<S> + Offset = Pos<S>`: adding an offset to a position MUST produce a position in the same system. The operation MUST `debug_assert!` that the result is non-negative and fits in `u32`.
+`Pos<S>::checked_add_offset(Offset) -> Option<Pos<S>>`: adding an offset to a position MUST produce a position in the same system. MUST return `None` if the result is negative or exceeds `i32::MAX`.
 
 r[pos.sub_offset]
-`Pos<S> - Offset = Pos<S>`: subtracting an offset from a position MUST produce a position in the same system. Same bounds checking as `add_offset`.
+`Pos<S>::checked_sub_offset(Offset) -> Option<Pos<S>>`: subtracting an offset from a position MUST produce a position in the same system. Same bounds checking as `checked_add_offset`.
 
 r[pos.no_add_pos]
 Adding two positions (`Pos<S> + Pos<S>`) MUST be a compile error. Adding positions is not a meaningful operation.
@@ -105,4 +106,4 @@ All accessor methods and conversion methods MUST be `#[must_use]`.
 ## Niche optimization
 
 r[pos.niche]
-`Pos<S>` SHOULD use a niche-optimized inner type so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). This is acceptable because the SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3, §4.2], well below `u32::MAX` (~4.3B).
+`Pos<S>` SHOULD use a niche-optimized inner type so that `Option<Pos<S>>` has the same size as `Pos<S>` (4 bytes). This is acceptable because the SAM/BAM spec caps reference sequence length at `2^31-1` (~2.1B) [SAM1 §1.3, §4.2], well below `u32::MAX` (~4.3B). **Status:** not yet implemented — currently `Option<Pos<S>>` is 8 bytes.

@@ -21,8 +21,7 @@ BAM files are full of magic numbers: flag bits (0x4 = unmapped, 0x10 = reverse s
 r[io.named_constants]
 Magic numbers (bit flags, format constants, operation codes) MUST be defined as named constants, not used as raw literals. BAM flags MUST use named constants (e.g., `FLAG_UNMAPPED` instead of `0x4`). CIGAR operation types MUST use named constants (e.g., `CIGAR_M` instead of `0`).
 
-r[io.typed_flags]
-BAM flags MUST have a `BamFlags` newtype wrapping `u16` with named predicate methods (e.g., `is_unmapped()`, `is_reverse()`). The public API (`RecordRef`) MUST expose `BamFlags` rather than raw `u16` where appropriate.
+BAM flags have a strongly-typed `BamFlags` newtype — see [BAM Flags](./0-1-bam-flags.md) for the full specification (`r[flags.type]`, `r[flags.field_type]`).
 
 r[io.typed_cigar_ops]
 CIGAR operations MUST have a `CigarOpType` enum with variants for all 9 SAM-spec operations (M, I, D, N, S, H, P, =, X). The enum MUST provide `consumes_ref()` and `consumes_query()` methods. Invalid operation codes MUST be represented as `None` via `from_bam(u8) -> Option<CigarOpType>`.

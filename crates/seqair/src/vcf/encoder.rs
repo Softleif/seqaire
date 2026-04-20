@@ -107,7 +107,6 @@ impl ContigHandle {
 
 // ── BcfRecordEncoder ────────────────────────────────────────────────────
 
-// r[impl bcf_encoder.encoder]
 /// Zero-allocation BCF record encoder. Borrows the writer's buffers.
 pub struct BcfRecordEncoder<'a> {
     pub(crate) shared_buf: &'a mut Vec<u8>,

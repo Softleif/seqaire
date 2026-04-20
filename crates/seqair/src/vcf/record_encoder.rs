@@ -653,7 +653,7 @@ mod tests {
     // r[verify record_encoder.info_methods]
     // r[verify record_encoder.format_methods]
     // r[verify record_encoder.key_encode]
-    // r[verify record_encoder.bcf_impl]
+    // r[verify record_encoder.bcf_encoding]
     #[test]
     fn typestate_api_bcf() {
         let setup = TestSetup::new();
@@ -677,7 +677,7 @@ mod tests {
         assert!(!buf.is_empty());
     }
 
-    // r[verify record_encoder.vcf_text_encoder]
+    // r[verify record_encoder.vcf_encoding]
     #[test]
     fn typestate_emit_without_samples() {
         let setup = TestSetup::new();
@@ -725,7 +725,7 @@ mod tests {
         assert_eq!(filter_col, "lowDp");
     }
 
-    // r[verify record_encoder.vcf_text_encoder]
+    // r[verify record_encoder.vcf_encoding]
     #[test]
     fn typestate_no_filter() {
         let setup = TestSetup::new();
@@ -768,8 +768,8 @@ mod tests {
         writer.finish().unwrap();
     }
 
-    // r[verify record_encoder.bcf_impl]
-    // r[verify record_encoder.vcf_text_encoder]
+    // r[verify record_encoder.bcf_encoding]
+    // r[verify record_encoder.vcf_encoding]
     #[test]
     fn typestate_multiple_records() {
         let setup = TestSetup::new();
