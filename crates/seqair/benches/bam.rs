@@ -8,7 +8,7 @@
 #![allow(clippy::cast_possible_wrap, reason = "benches")]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use seqair_types::Pos0;
+use seqair_types::{Base, Pos0};
 use std::hint::black_box;
 use std::io::Read;
 
@@ -138,9 +138,8 @@ fn bam_record_decode(c: &mut Criterion) {
             let mut record = bam::Record::new();
             let mut total_bases = 0usize;
             while reader.read(&mut record) == Some(Ok(())) {
-                let bases: Vec<seqair_types::Base> = (0..record.seq_len())
-                    .map(|i| seqair_types::Base::from(record.seq()[i]))
-                    .collect();
+                let bases: Vec<Base> =
+                    (0..record.seq_len()).map(|i| Base::from(record.seq()[i])).collect();
                 total_bases += bases.len();
             }
             black_box(total_bases)
@@ -322,6 +321,31 @@ fn bam_roundtrip(c: &mut Criterion) {
 // Shows how all design choices compound.
 // ---------------------------------------------------------------------------
 
+struct Counter {
+    a: u32,
+    c: u32,
+    g: u32,
+    t: u32,
+    n: u32,
+}
+
+impl Counter {
+    fn new() -> Self {
+        Self { a: 0, c: 0, g: 0, t: 0, n: 0 }
+    }
+
+    fn count(&mut self, base: Base) {
+        match base {
+            Base::A => self.a += 1,
+            Base::C => self.c += 1,
+            Base::G => self.g += 1,
+            Base::T => self.t += 1,
+            Base::Unknown => self.n += 1,
+        }
+    }
+}
+
+/// Construct pileup, count depth and all bases
 fn pileup_e2e(c: &mut Criterion) {
     use noodles::bam as nbam;
     use noodles::sam;
@@ -342,9 +366,11 @@ fn pileup_e2e(c: &mut Criterion) {
             let engine = seqair::bam::PileupEngine::new(store, START, END);
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
+            let mut counter = Counter::new();
             for col in engine {
                 total_depth += col.depth() as u64;
                 columns += 1;
+                col.alignments().for_each(|aln| counter.count(aln.base().unwrap_or_default()));
             }
             black_box((columns, total_depth))
         });
@@ -361,6 +387,8 @@ fn pileup_e2e(c: &mut Criterion) {
 
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
+            let mut counter = Counter::new();
+
             for p in reader.pileup() {
                 let p = p.unwrap();
                 let pos = u64::from(p.pos());
@@ -369,13 +397,18 @@ fn pileup_e2e(c: &mut Criterion) {
                 }
                 total_depth += u64::from(p.depth());
                 columns += 1;
+                p.alignments().for_each(|aln| {
+                    if let Some(b) = aln.record_view().seq().get(p.pos() as usize).map(Base::from) {
+                        counter.count(b)
+                    }
+                });
             }
             black_box((columns, total_depth))
         });
     });
 
     // noodles: sequential BAM read → noodles-util Pileup iterator
-    group.bench_function("noodles", |b| {
+    group.bench_function("noodles-no-counter", |b| {
         b.iter(|| {
             let file = std::fs::File::open(BAM_PATH).unwrap();
             let mut reader = nbam::io::Reader::new(file);
@@ -406,8 +439,12 @@ fn pileup_e2e(c: &mut Criterion) {
             let pileup = Depth::new(&header, records.into_iter());
             let mut total_depth: u64 = 0;
             let mut columns: u64 = 0;
+            let mut counter = Counter::new();
+
             for result in pileup {
-                let (_pos, depth): (noodles::core::Position, u64) = result.unwrap();
+                let Ok((pos, depth)) = result else {
+                    continue;
+                };
                 total_depth += depth;
                 columns += 1;
             }
