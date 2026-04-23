@@ -59,8 +59,9 @@ type RecordFilter = Box<dyn Fn(BamFlags, &[u8]) -> bool>;
 // r[impl perf.avoid_redundant_arena_get+2]
 // r[impl perf.cigar_no_to_vec]
 // r[impl perf.reuse_alignment_vec+2]
-pub struct PileupEngine {
-    store: RecordStore,
+// r[impl pileup.extras.generic_param]
+pub struct PileupEngine<U = ()> {
+    store: RecordStore<U>,
     current_pos: Pos0,
     region_end: Pos0,
     next_entry: usize,
@@ -271,9 +272,9 @@ impl PileupAlignment {
     }
 }
 
-impl PileupEngine {
+impl<U> PileupEngine<U> {
     /// Create a pileup engine that owns the record store.
-    pub fn new(store: RecordStore, region_start: Pos0, region_end: Pos0) -> Self {
+    pub fn new(store: RecordStore<U>, region_start: Pos0, region_end: Pos0) -> Self {
         PileupEngine {
             store,
             current_pos: region_start,
@@ -322,7 +323,7 @@ impl PileupEngine {
     }
 
     /// Borrow the underlying `RecordStore` for qname lookups during iteration.
-    pub fn store(&self) -> &RecordStore {
+    pub fn store(&self) -> &RecordStore<U> {
         &self.store
     }
 
@@ -330,17 +331,17 @@ impl PileupEngine {
     ///
     /// Call this after iteration is complete. The returned store retains its
     /// allocated capacity but is cleared.
-    pub fn take_store(&mut self) -> Option<RecordStore> {
+    pub fn take_store(&mut self) -> Option<RecordStore<U>> {
         if self.store.is_empty() && self.store.records_capacity() == 0 {
             return None;
         }
-        let mut store = std::mem::take(&mut self.store);
+        let mut store = self.store.take_contents();
         store.clear();
         Some(store)
     }
 }
 
-impl std::fmt::Debug for PileupEngine {
+impl<U> std::fmt::Debug for PileupEngine<U> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PileupEngine")
             .field("current_pos", &self.current_pos)
@@ -354,14 +355,9 @@ impl std::fmt::Debug for PileupEngine {
 }
 
 // r[impl pileup.position_iteration]
-impl Iterator for PileupEngine {
-    type Item = PileupColumn;
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        (0, Some(self.remaining_positions()))
-    }
-
-    fn next(&mut self) -> Option<PileupColumn> {
+impl<U> PileupEngine<U> {
+    /// Core iteration logic shared by `Iterator::next()` and `ColumnsWithStore::next_column()`.
+    fn advance(&mut self) -> Option<PileupColumn> {
         loop {
             if self.current_pos > self.region_end {
                 return None;
@@ -536,9 +532,72 @@ impl Iterator for PileupEngine {
             }
         }
     }
+
+    // r[impl pileup.extras.columns_with_store]
+    /// Lending iterator that yields `(PileupColumn, &RecordStore<U>)` per position.
+    ///
+    /// Unlike the `Iterator` impl, this gives access to the store during iteration,
+    /// allowing callers to read per-record extras, qnames, and aux tags without
+    /// pre-extracting them.
+    pub fn columns_with_store(&mut self) -> ColumnsWithStore<'_, U> {
+        ColumnsWithStore { engine: self }
+    }
 }
 
-impl Drop for PileupEngine {
+// r[impl pileup.extras.with_extras]
+impl PileupEngine {
+    /// Compute per-record extras, consuming this `PileupEngine<()>` and returning
+    /// a `PileupEngine<V>`. All settings (filter, `ref_seq`, `max_depth`) are preserved.
+    pub fn with_extras<V>(self, f: impl FnMut(u32, &RecordStore) -> V) -> PileupEngine<V> {
+        // Use ManuallyDrop to move fields out of a Drop type without running the
+        // destructor (the profiling log in Drop is harmless to skip here — no
+        // columns have been produced yet on the source engine).
+        let mut me = std::mem::ManuallyDrop::new(self);
+        PileupEngine {
+            store: std::mem::take(&mut me.store).with_extras(f),
+            current_pos: me.current_pos,
+            region_end: me.region_end,
+            next_entry: me.next_entry,
+            active_end_pos: std::mem::take(&mut me.active_end_pos),
+            active: std::mem::take(&mut me.active),
+            max_depth: me.max_depth,
+            filter: me.filter.take(),
+            ref_seq: me.ref_seq.take(),
+            columns_produced: me.columns_produced,
+            max_active_depth: me.max_active_depth,
+        }
+    }
+}
+
+/// Lending iterator over pileup columns with store access.
+///
+/// See [`PileupEngine::columns_with_store`].
+pub struct ColumnsWithStore<'a, U = ()> {
+    engine: &'a mut PileupEngine<U>,
+}
+
+impl<U> ColumnsWithStore<'_, U> {
+    /// Advance to the next column. Returns the owned column and an immutable
+    /// reference to the store, valid until the next call.
+    pub fn next_column(&mut self) -> Option<(PileupColumn, &RecordStore<U>)> {
+        let col = self.engine.advance()?;
+        Some((col, &self.engine.store))
+    }
+}
+
+impl<U> Iterator for PileupEngine<U> {
+    type Item = PileupColumn;
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (0, Some(self.remaining_positions()))
+    }
+
+    fn next(&mut self) -> Option<PileupColumn> {
+        self.advance()
+    }
+}
+
+impl<U> Drop for PileupEngine<U> {
     fn drop(&mut self) {
         if self.columns_produced > 0 {
             tracing::debug!(
