@@ -5,6 +5,7 @@
 
 use super::header::{BamHeader, BamHeaderError, TargetInfoAccess};
 use super::owned_record::{OwnedBamRecord, OwnedRecordError};
+use super::record_store::RecordStore;
 use crate::io::{BgzfError, BgzfWriter, IndexBuilder, IndexError};
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -240,7 +241,7 @@ impl<W: Write> BamWriter<W> {
     /// in the store's slabs and are copied directly.
     pub fn write_store_record(
         &mut self,
-        store: &super::record_store::RecordStore,
+        store: &RecordStore,
         idx: u32,
     ) -> Result<(), BamWriteError> {
         if self.poisoned {
@@ -263,7 +264,7 @@ impl<W: Write> BamWriter<W> {
     )]
     fn write_store_record_inner(
         &mut self,
-        store: &super::record_store::RecordStore,
+        store: &RecordStore,
         idx: u32,
     ) -> Result<(), BamWriteError> {
         let rec = store.record(idx);

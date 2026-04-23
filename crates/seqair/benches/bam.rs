@@ -441,7 +441,7 @@ fn pileup_e2e(c: &mut Criterion) {
             let mut columns: u64 = 0;
 
             for result in pileup {
-                let Ok((pos, depth)) = result else {
+                let Ok((_pos, depth)) = result else {
                     continue;
                 };
                 total_depth += depth;
