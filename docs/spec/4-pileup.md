@@ -59,6 +59,20 @@ Reads with zero reference-consuming CIGAR operations (pure soft-clip, insertion-
 r[pileup.soft_clip_at_position]
 When a reference position falls within the soft-clipped portion of a read's alignment, the read is NOT active at that position (soft clips do not consume reference). The read only becomes active at its first reference-consuming position.
 
+## Per-record extras in pileup
+
+r[pileup.extras.generic_param]
+`PileupEngine` MUST accept a type parameter `U` (default `()`) matching its `RecordStore<U>`. When `U` is `()`, the engine MUST behave identically to the non-generic version — the `Iterator` impl, column construction, and all existing APIs MUST be unchanged.
+
+r[pileup.extras.with_extras]
+`PileupEngine<()>` MUST provide `with_extras<V>(self, f) -> PileupEngine<V>` that transforms the engine's store via `RecordStore::with_extras` while preserving all settings (filter, reference sequence, max depth). The engine MUST NOT have started iteration yet (no columns produced).
+
+r[pileup.extras.columns_with_store]
+`PileupEngine<U>` MUST provide `columns_with_store(&mut self) -> ColumnsWithStore<'_, U>`. `ColumnsWithStore` MUST provide `next_column(&mut self) -> Option<(PileupColumn, &RecordStore<U>)>` that yields the same columns as the `Iterator` impl but additionally provides an immutable reference to the store. This allows callers to access per-record extras (and other slab data like qnames and aux) during iteration without pre-extraction.
+
+r[pileup.extras.recover_store]
+`Readers::recover_store` MUST accept `PileupEngine<U>` for any `U`. It MUST strip extras via `RecordStore::strip_extras` before storing the recovered `RecordStore<()>` for reuse.
+
 ## Compatibility
 
 r[pileup.htslib_compat]

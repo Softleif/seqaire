@@ -160,13 +160,15 @@ impl Readers {
         Ok(PileupEngine::new(store, start, end))
     }
 
+    // r[impl pileup.extras.recover_store]
     /// Recover the [`RecordStore`] from a consumed [`PileupEngine`] for reuse.
     ///
     /// Call this after iteration is complete. The store retains its allocated
     /// capacity, avoiding ~39 MB of re-allocation on the next `pileup()` call.
-    pub fn recover_store(&mut self, engine: &mut PileupEngine) {
+    /// Accepts `PileupEngine<U>` for any `U` — extras are stripped during recovery.
+    pub fn recover_store<U>(&mut self, engine: &mut PileupEngine<U>) {
         if let Some(store) = engine.take_store() {
-            self.store = store;
+            self.store = store.strip_extras();
         }
     }
 

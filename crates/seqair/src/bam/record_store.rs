@@ -78,9 +78,9 @@ const _: () =
 // r[impl record_store.no_rc]
 // r[impl base_decode.slab]
 // r[related pileup.qpos]
-/// Slab-based storage for BAM records.
+/// Slab-based storage for BAM records with optional per-record extras.
 ///
-/// Six contiguous buffers hold all data for a region:
+/// Six contiguous buffers hold all data for a region, plus an extras slab:
 /// - `records`: compact fixed-size structs
 /// - `names`: packed qnames (for dedup)
 /// - `bases`: decoded `Base` values per record (for per-position base lookup)
@@ -88,13 +88,18 @@ const _: () =
 /// - `qual`: raw Phred bytes per record (dense, hot in pileup)
 /// - `aux`: auxiliary tag bytes per record (rarely read in pileup; isolated so it
 ///   does not pollute the cache when scanning qual)
-pub struct RecordStore {
+/// - `extras`: per-record user data of type `U` (default `()`, zero-cost)
+///
+/// Use [`with_extras`](RecordStore::with_extras) to compute per-record data after loading.
+// r[impl record_store.extras.generic_param]
+pub struct RecordStore<U = ()> {
     records: Vec<SlimRecord>,
     names: Vec<u8>,
     bases: Vec<Base>,
     cigar: Vec<u8>,
     qual: Vec<u8>,
     aux: Vec<u8>,
+    extras: Vec<U>,
 }
 
 impl RecordStore {
@@ -106,6 +111,7 @@ impl RecordStore {
             cigar: Vec::new(),
             qual: Vec::new(),
             aux: Vec::new(),
+            extras: Vec::new(),
         }
     }
 
@@ -140,9 +146,11 @@ impl RecordStore {
             cigar: Vec::with_capacity(cigar_est),
             qual: Vec::with_capacity(qual_est),
             aux: Vec::with_capacity(aux_est),
+            extras: Vec::new(),
         }
     }
 
+    // r[impl record_store.extras.push_unit]
     /// Decode a raw BAM record and append to the store.
     ///
     /// Variable-length data is written directly into the slabs.
@@ -242,10 +250,12 @@ impl RecordStore {
             )]
             aux_len: aux_slice.len() as u32,
         });
+        self.extras.push(());
 
         Ok(idx)
     }
 
+    // r[impl record_store.extras.sort_dedup_unit_only]
     /// Sort records by reference position.
     ///
     /// The pileup engine iterates records in store order and assumes they
@@ -383,10 +393,87 @@ impl RecordStore {
             )]
             aux_len: aux.len() as u32,
         });
+        self.extras.push(());
 
         Ok(idx)
     }
 
+    // r[impl record_store.extras.with_extras]
+    /// Compute per-record extras in a single pass, consuming this `RecordStore<()>`.
+    ///
+    /// The closure receives `(record_index, &RecordStore<()>)` so it can access
+    /// any slab (record fields, aux, seq, qname, etc.). All existing slabs are
+    /// moved, not copied.
+    ///
+    /// # Example
+    ///
+    /// Attach per-record metadata and access it during pileup iteration:
+    ///
+    /// ```
+    /// use seqair::bam::{Pos0, RecordStore};
+    /// use seqair::bam::pileup::PileupEngine;
+    /// use seqair_types::{BamFlags, Base};
+    ///
+    /// // Per-record data computed at load time.
+    /// struct ReadInfo {
+    ///     is_reverse: bool,
+    ///     qname_len: usize,
+    /// }
+    ///
+    /// // After loading records into a RecordStore<()>...
+    /// let mut store = RecordStore::new();
+    /// # let cigar = (4u32 << 4).to_le_bytes(); // 4M
+    /// # store.push_fields(
+    /// #     Pos0::new(100).unwrap(), Pos0::new(103).unwrap(),
+    /// #     BamFlags::from(0x10), 60, 4, 0, b"read1", &cigar,
+    /// #     &[Base::A, Base::C, Base::G, Base::T], &[30; 4], &[], 0, -1, 0, 0,
+    /// # ).unwrap();
+    ///
+    /// // Compute extras from record fields:
+    /// let store = store.with_extras(|idx, store| {
+    ///     let rec = store.record(idx);
+    ///     ReadInfo {
+    ///         is_reverse: rec.flags.is_reverse(),
+    ///         qname_len: store.qname(idx).len(),
+    ///     }
+    /// });
+    ///
+    /// // Build a pileup engine with the extras-bearing store:
+    /// let mut engine = PileupEngine::new(
+    ///     store,
+    ///     Pos0::new(100).unwrap(),
+    ///     Pos0::new(103).unwrap(),
+    /// );
+    ///
+    /// // Use columns_with_store to access extras during iteration:
+    /// let mut cols = engine.columns_with_store();
+    /// while let Some((column, store)) = cols.next_column() {
+    ///     for aln in column.alignments() {
+    ///         let info = store.extra(aln.record_idx());
+    ///         assert!(info.is_reverse);
+    ///         assert_eq!(info.qname_len, 5);
+    ///     }
+    /// }
+    /// ```
+    pub fn with_extras<V>(self, mut f: impl FnMut(u32, &Self) -> V) -> RecordStore<V> {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
+        )]
+        let extras: Vec<V> = (0..self.records.len()).map(|i| f(i as u32, &self)).collect();
+        RecordStore {
+            records: self.records,
+            names: self.names,
+            bases: self.bases,
+            cigar: self.cigar,
+            qual: self.qual,
+            aux: self.aux,
+            extras,
+        }
+    }
+}
+
+impl<U> RecordStore<U> {
     // --- Accessors ---
 
     pub fn len(&self) -> usize {
@@ -541,6 +628,45 @@ impl RecordStore {
         Ok(())
     }
 
+    // r[impl record_store.extras.access]
+    /// Access the per-record extra for `idx`.
+    #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
+    pub fn extra(&self, idx: u32) -> &U {
+        debug_assert!(
+            (idx as usize) < self.extras.len(),
+            "extra idx {idx} out of bounds (len={})",
+            self.extras.len()
+        );
+        &self.extras[idx as usize]
+    }
+
+    // r[impl record_store.extras.access]
+    /// Mutably access the per-record extra for `idx`.
+    #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
+    pub fn extra_mut(&mut self, idx: u32) -> &mut U {
+        debug_assert!(
+            (idx as usize) < self.extras.len(),
+            "extra_mut idx {idx} out of bounds (len={})",
+            self.extras.len()
+        );
+        &mut self.extras[idx as usize]
+    }
+
+    /// Take all contents out, leaving an empty store with no capacity.
+    /// Used by `PileupEngine::take_store` to avoid requiring `Default`.
+    pub(crate) fn take_contents(&mut self) -> Self {
+        RecordStore {
+            records: std::mem::take(&mut self.records),
+            names: std::mem::take(&mut self.names),
+            bases: std::mem::take(&mut self.bases),
+            cigar: std::mem::take(&mut self.cigar),
+            qual: std::mem::take(&mut self.qual),
+            aux: std::mem::take(&mut self.aux),
+            extras: std::mem::take(&mut self.extras),
+        }
+    }
+
+    // r[impl record_store.extras.clear]
     pub fn clear(&mut self) {
         self.records.clear();
         self.names.clear();
@@ -548,6 +674,22 @@ impl RecordStore {
         self.cigar.clear();
         self.qual.clear();
         self.aux.clear();
+        self.extras.clear();
+    }
+
+    // r[impl record_store.extras.strip]
+    /// Discard the extras slab, returning a `RecordStore<()>` that preserves
+    /// all other slab data and capacity. Used by `Readers::recover_store`.
+    pub fn strip_extras(self) -> RecordStore {
+        RecordStore {
+            records: self.records,
+            names: self.names,
+            bases: self.bases,
+            cigar: self.cigar,
+            qual: self.qual,
+            aux: self.aux,
+            extras: Vec::new(),
+        }
     }
 
     pub fn records_capacity(&self) -> usize {
@@ -572,6 +714,10 @@ impl RecordStore {
 
     pub fn aux_capacity(&self) -> usize {
         self.aux.capacity()
+    }
+
+    pub fn extras_capacity(&self) -> usize {
+        self.extras.capacity()
     }
 }
 
