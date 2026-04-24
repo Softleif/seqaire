@@ -86,7 +86,7 @@ fn extra_mut_allows_modification() {
 fn with_extras_closure_can_read_aux() {
     // Build a record with aux data and verify the closure can access it.
     let aux = b"NMCd"; // NM:C:100 (tag NM, type C=u8, value 100)
-    let raw = helpers_make_test_record_with_aux(0, 100, 99, 60, 10, aux);
+    let raw = helpers::make_record_with_aux(0, 100, 99, 60, 10, aux);
 
     let mut store = RecordStore::new();
     store.push_raw(&raw).unwrap();
@@ -150,10 +150,9 @@ fn unit_extras_is_zero_cost() {
     assert_eq!(store.record(0).pos, Pos0::new(100).unwrap());
 }
 
-// r[verify record_store.extras.sort_dedup_unit_only]
+// r[verify record_store.extras.sort_dedup_generic]
 #[test]
 fn sort_and_dedup_work_on_unit_store() {
-    // These methods are only on RecordStore<()> — this is a compile-time check.
     let mut store = RecordStore::new();
     // Push records out of order.
     store.push_raw(&make_record(0, 200, 99, 60, 10)).unwrap();
@@ -164,17 +163,88 @@ fn sort_and_dedup_work_on_unit_store() {
     assert_eq!(store.record(1).pos, Pos0::new(200).unwrap());
 }
 
+// r[verify record_store.extras.sort_dedup_generic]
+#[test]
+fn sort_by_pos_preserves_extras_mapping() {
+    let mut store = RecordStore::new();
+    // Push records out of order: pos 300, 100, 200
+    store.push_raw(&make_record(0, 300, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10)).unwrap();
+
+    // Compute extras BEFORE sorting — extras carry the original position.
+    let mut store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
+
+    // Now sort — records reorder, but extras_idx preserves the mapping.
+    store.sort_by_pos();
+
+    // After sort, records are at positions 100, 200, 300.
+    assert_eq!(store.record(0).pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(1).pos, Pos0::new(200).unwrap());
+    assert_eq!(store.record(2).pos, Pos0::new(300).unwrap());
+
+    // Extras must still match the record they were computed from.
+    assert_eq!(*store.extra(0), 100);
+    assert_eq!(*store.extra(1), 200);
+    assert_eq!(*store.extra(2), 300);
+}
+
+// r[verify record_store.extras.sort_dedup_generic]
+#[test]
+fn dedup_on_typed_store_preserves_extras() {
+    let mut store = RecordStore::new();
+    // Push duplicate records at same position with same flags/name.
+    store.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap(); // dup
+    store.push_raw(&make_record(0, 200, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 200, 99, 60, 10)).unwrap(); // dup
+
+    // Tag each record with a unique ID before dedup.
+    let mut store = store.with_extras(|idx, _| idx);
+
+    store.sort_by_pos();
+    store.dedup();
+
+    // Should have 2 records after dedup (one per position).
+    assert_eq!(store.len(), 2);
+    assert_eq!(store.record(0).pos, Pos0::new(100).unwrap());
+    assert_eq!(store.record(1).pos, Pos0::new(200).unwrap());
+
+    // Extras should still be accessible and correspond to the surviving records.
+    // The exact idx values depend on which duplicate survives (dedup_by keeps the first).
+    let e0 = *store.extra(0);
+    let e1 = *store.extra(1);
+    assert_ne!(e0, e1, "surviving records should have distinct extras");
+}
+
+// r[verify record_store.extras.sort_dedup_generic]
+#[test]
+fn set_alignment_then_sort_on_typed_store() {
+    let mut store = RecordStore::new();
+    store.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 50, 99, 60, 10)).unwrap();
+
+    // Compute extras with original positions.
+    let mut store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
+
+    // Sort — now record at pos=50 comes first.
+    store.sort_by_pos();
+    assert_eq!(store.record(0).pos, Pos0::new(50).unwrap());
+    assert_eq!(store.record(1).pos, Pos0::new(100).unwrap());
+    assert_eq!(*store.extra(0), 50);
+    assert_eq!(*store.extra(1), 100);
+}
+
 // ---- PileupEngine extras ----
 
-// r[verify pileup.extras.with_extras]
+// r[verify pileup.extras.constructor_accepts_any_u]
 #[test]
-fn engine_with_extras_preserves_settings() {
+fn engine_accepts_typed_store() {
     let store = store_with_n_records(5);
+    let store = store.with_extras(|idx, s| s.record(idx).mapq);
     let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(109).unwrap());
     engine.set_max_depth(10);
     engine.set_filter(|flags, _aux| !flags.is_duplicate());
-
-    let engine = engine.with_extras(|idx, s| s.record(idx).mapq);
 
     // Verify the engine still works — iterate and check columns are produced.
     let columns: Vec<_> = engine.collect();
@@ -244,50 +314,130 @@ fn recover_store_works_with_extras_engine() {
     assert!(store.records_capacity() > 0);
 }
 
-// ---- helpers ----
+// ---- Proptests ----
 
-/// Build a BAM record with aux data for testing aux access in with_extras.
-fn helpers_make_test_record_with_aux(
-    tid: i32,
-    pos: i32,
-    flags: u16,
-    mapq: u8,
-    seq_len: u32,
-    aux: &[u8],
-) -> Vec<u8> {
-    let name = b"read\0";
-    let name_len = name.len();
-    let cigar_op = seq_len << 4; // N x M
-    let seq_bytes = (seq_len as usize).div_ceil(2);
+use proptest::prelude::*;
 
-    let total = 32 + name_len + 4 + seq_bytes + seq_len as usize + aux.len();
-    let mut raw = vec![0u8; total];
+proptest! {
+    // r[verify record_store.extras.sort_dedup_generic]
+    #[test]
+    fn proptest_sort_preserves_extras_mapping(
+        positions in proptest::collection::vec(0i32..1000, 2..50),
+    ) {
+        let mut store = RecordStore::new();
+        for &pos in &positions {
+            store.push_raw(&make_record(0, pos, 99, 60, 10)).unwrap();
+        }
 
-    raw[0..4].copy_from_slice(&tid.to_le_bytes());
-    raw[4..8].copy_from_slice(&pos.to_le_bytes());
-    raw[8] = name_len as u8;
-    raw[9] = mapq;
-    raw[12..14].copy_from_slice(&1u16.to_le_bytes()); // 1 cigar op
-    raw[14..16].copy_from_slice(&flags.to_le_bytes());
-    raw[16..20].copy_from_slice(&seq_len.to_le_bytes());
-    raw[20..32].fill(0);
+        // Tag each record with its original position before sorting.
+        let mut store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
 
-    raw[32..32 + name_len].copy_from_slice(name);
-    let cigar_start = 32 + name_len;
-    raw[cigar_start..cigar_start + 4].copy_from_slice(&cigar_op.to_le_bytes());
+        store.sort_by_pos();
 
-    let seq_start = cigar_start + 4;
-    for i in 0..seq_bytes {
-        raw[seq_start + i] = 0x11; // A,A
+        // After sorting, each record's extra must still equal its position
+        // (proving the extras_idx indirection survived reordering).
+        for i in 0..store.len() as u32 {
+            let pos = store.record(i).pos.as_i32();
+            let extra = *store.extra(i);
+            prop_assert_eq!(pos, extra, "extras_idx broken at record {}", i);
+        }
+
+        // Records must be sorted.
+        for i in 1..store.len() as u32 {
+            prop_assert!(
+                store.record(i).pos >= store.record(i - 1).pos,
+                "not sorted at {}", i
+            );
+        }
     }
 
-    let qual_start = seq_start + seq_bytes;
-    for i in 0..seq_len as usize {
-        raw[qual_start + i] = 30;
+    // r[verify record_store.extras.sort_dedup_generic]
+    #[test]
+    fn proptest_dedup_preserves_extras_on_typed_store(
+        positions in proptest::collection::vec(0i32..20, 2..30),
+    ) {
+        let mut store = RecordStore::new();
+        for &pos in &positions {
+            // Same flags/mapq/seq_len so duplicates at same pos are detected.
+            store.push_raw(&make_record(0, pos, 99, 60, 10)).unwrap();
+        }
+
+        // Compute extras (original position) before sort+dedup.
+        let mut store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
+
+        store.sort_by_pos();
+        store.dedup();
+
+        // After dedup, each surviving record's extra must equal its position.
+        for i in 0..store.len() as u32 {
+            let pos = store.record(i).pos.as_i32();
+            let extra = *store.extra(i);
+            prop_assert_eq!(pos, extra, "extras_idx broken after dedup at record {}", i);
+        }
+
+        // No consecutive duplicates.
+        for i in 1..store.len() as u32 {
+            let a = store.record(i - 1);
+            let b = store.record(i);
+            if a.pos == b.pos {
+                // Same position is OK if flags differ (different records).
+                // Our test uses identical flags, so this shouldn't happen.
+                prop_assert!(a.flags != b.flags, "dedup missed a duplicate at pos {}", a.pos.as_i32());
+            }
+        }
     }
 
-    let aux_start = qual_start + seq_len as usize;
-    raw[aux_start..aux_start + aux.len()].copy_from_slice(aux);
+    // r[verify record_store.extras.with_extras]
+    #[test]
+    fn proptest_with_extras_after_sort_produces_correct_mapping(
+        positions in proptest::collection::vec(0i32..500, 2..30),
+    ) {
+        let mut store = RecordStore::new();
+        for &pos in &positions {
+            store.push_raw(&make_record(0, pos, 99, 60, 10)).unwrap();
+        }
 
-    raw
+        // Sort first (on unit store), then compute extras.
+        store.sort_by_pos();
+
+        let store = store.with_extras(|idx, s| s.record(idx).pos.as_i32());
+
+        // After with_extras on a sorted store, extras_idx is reset to sequential.
+        for i in 0..store.len() as u32 {
+            let pos = store.record(i).pos.as_i32();
+            let extra = *store.extra(i);
+            prop_assert_eq!(pos, extra, "with_extras mapping wrong at record {}", i);
+        }
+    }
+}
+
+// r[verify pileup.extras.constructor_accepts_any_u]
+#[test]
+fn pileup_with_sorted_typed_store() {
+    // End-to-end: load out of order, compute extras, sort, pileup.
+    let mut store = RecordStore::new();
+    store.push_raw(&make_record(0, 105, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 100, 99, 60, 10)).unwrap();
+    store.push_raw(&make_record(0, 102, 99, 60, 10)).unwrap();
+
+    // Compute extras before sorting — each extra is the original push index.
+    let mut store = store.with_extras(|idx, _| idx);
+
+    // Sort — records reorder, extras follow via extras_idx.
+    store.sort_by_pos();
+    assert_eq!(store.record(0).pos, Pos0::new(100).unwrap());
+    assert_eq!(*store.extra(0), 1); // originally the second record pushed
+
+    // Build engine with the sorted typed store.
+    let mut engine = PileupEngine::new(store, Pos0::new(100).unwrap(), Pos0::new(114).unwrap());
+    let mut cols = engine.columns_with_store();
+    let mut column_count = 0;
+    while let Some((col, store)) = cols.next_column() {
+        for aln in col.alignments() {
+            // extras should be accessible and valid
+            let _extra = store.extra(aln.record_idx());
+        }
+        column_count += 1;
+    }
+    assert!(column_count > 0, "should have produced at least one column");
 }

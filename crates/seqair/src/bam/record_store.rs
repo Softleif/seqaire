@@ -56,6 +56,10 @@ pub struct SlimRecord {
     aux_off: u32,
     /// Length of aux data in the aux slab.
     aux_len: u32,
+    /// Index into the extras slab. Follows the same slab-offset pattern as
+    /// other fields — survives record reordering (sort/dedup) without
+    /// requiring the extras Vec to be reordered in lockstep.
+    extras_idx: u32,
 }
 
 impl SlimRecord {
@@ -64,11 +68,11 @@ impl SlimRecord {
     }
 }
 
-// Compile-time size guard: 15 u32 (incl. next_ref_id) + 3 u16 + 1 u8 + padding
-// = 68 bytes. If this ever grows, revisit the layout before accepting the hit —
+// Compile-time size guard: 16 u32 (incl. next_ref_id, extras_idx) + 3 u16 + 1 u8 + padding
+// = 72 bytes. If this ever grows, revisit the layout before accepting the hit —
 // see `docs/spec/3-record_store.md` "Layout".
 const _: () =
-    assert!(std::mem::size_of::<SlimRecord>() <= 68, "SlimRecord grew unexpectedly large");
+    assert!(std::mem::size_of::<SlimRecord>() <= 72, "SlimRecord grew unexpectedly large");
 
 // r[impl record_store.push_raw+2]
 // r[impl record_store.field_access]
@@ -249,45 +253,11 @@ impl RecordStore {
                 reason = "aux data is bounded by slab limits (u32); slab overflow checked above via SlabOverflow"
             )]
             aux_len: aux_slice.len() as u32,
+            extras_idx: idx,
         });
         self.extras.push(());
 
         Ok(idx)
-    }
-
-    // r[impl record_store.extras.sort_dedup_unit_only]
-    /// Sort records by reference position.
-    ///
-    /// The pileup engine iterates records in store order and assumes they
-    /// are sorted by position. After injecting chunk-cache records (which
-    /// may have earlier positions), this must be called to restore the
-    /// invariant.
-    pub fn sort_by_pos(&mut self) {
-        self.records.sort_by_key(|r| r.pos);
-    }
-
-    /// Remove consecutive duplicate records (same position, flags, and read
-    /// name). Must be called after `sort_by_pos` so duplicates are adjacent.
-    ///
-    /// Nearby and distant BAM index chunks can cover overlapping byte ranges,
-    /// causing the same record to be loaded from both sources.
-    /// Slab data for removed records is left in place (minor waste).
-    pub fn dedup(&mut self) {
-        let names = &self.names;
-        self.records.dedup_by(|a, b| {
-            a.pos == b.pos && a.flags == b.flags && a.name_len == b.name_len && {
-                let a_start = a.name_off as usize;
-                let b_start = b.name_off as usize;
-                let len = a.name_len as usize;
-                debug_assert!(a_start.saturating_add(len) <= names.len(), "name slice OOB");
-                debug_assert!(b_start.saturating_add(len) <= names.len(), "name slice OOB");
-                #[allow(clippy::indexing_slicing, reason = "offsets validated at push time")]
-                {
-                    names[a_start..a_start.saturating_add(len)]
-                        == names[b_start..b_start.saturating_add(len)]
-                }
-            }
-        });
     }
 
     // r[impl unified.record_store_push]
@@ -392,6 +362,7 @@ impl RecordStore {
                 reason = "aux data bounded by slab limits (u32); slab overflow checked via SlabOverflow"
             )]
             aux_len: aux.len() as u32,
+            extras_idx: idx,
         });
         self.extras.push(());
 
@@ -461,8 +432,18 @@ impl RecordStore {
             reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
         )]
         let extras: Vec<V> = (0..self.records.len()).map(|i| f(i as u32, &self)).collect();
+        let mut records = self.records;
+        // Reset extras_idx to sequential — the new extras Vec was built in
+        // current record order, so extras[i] corresponds to records[i].
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
+        )]
+        for (i, rec) in records.iter_mut().enumerate() {
+            rec.extras_idx = i as u32;
+        }
         RecordStore {
-            records: self.records,
+            records,
             names: self.names,
             bases: self.bases,
             cigar: self.cigar,
@@ -474,6 +455,47 @@ impl RecordStore {
 }
 
 impl<U> RecordStore<U> {
+    // --- Ordering ---
+
+    // r[impl record_store.extras.sort_dedup_generic]
+    /// Sort records by reference position.
+    ///
+    /// The pileup engine iterates records in store order and assumes they
+    /// are sorted by position. After injecting chunk-cache records (which
+    /// may have earlier positions), this must be called to restore the
+    /// invariant.
+    ///
+    /// Safe for any `U` because each record carries its own `extras_idx`,
+    /// so reordering the records Vec does not invalidate the extras mapping.
+    pub fn sort_by_pos(&mut self) {
+        self.records.sort_by_key(|r| r.pos);
+    }
+
+    /// Remove consecutive duplicate records (same position, flags, and read
+    /// name). Must be called after `sort_by_pos` so duplicates are adjacent.
+    ///
+    /// Nearby and distant BAM index chunks can cover overlapping byte ranges,
+    /// causing the same record to be loaded from both sources.
+    /// Slab data (including extras) for removed records is left in place (minor waste),
+    /// same as dead name/cigar bytes from removed records.
+    pub fn dedup(&mut self) {
+        let names = &self.names;
+        self.records.dedup_by(|a, b| {
+            a.pos == b.pos && a.flags == b.flags && a.name_len == b.name_len && {
+                let a_start = a.name_off as usize;
+                let b_start = b.name_off as usize;
+                let len = a.name_len as usize;
+                debug_assert!(a_start.saturating_add(len) <= names.len(), "name slice OOB");
+                debug_assert!(b_start.saturating_add(len) <= names.len(), "name slice OOB");
+                #[allow(clippy::indexing_slicing, reason = "offsets validated at push time")]
+                {
+                    names[a_start..a_start.saturating_add(len)]
+                        == names[b_start..b_start.saturating_add(len)]
+                }
+            }
+        });
+    }
+
     // --- Accessors ---
 
     pub fn len(&self) -> usize {
@@ -632,24 +654,27 @@ impl<U> RecordStore<U> {
     /// Access the per-record extra for `idx`.
     #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
     pub fn extra(&self, idx: u32) -> &U {
+        let rec = self.record(idx);
+        let ei = rec.extras_idx as usize;
         debug_assert!(
-            (idx as usize) < self.extras.len(),
-            "extra idx {idx} out of bounds (len={})",
+            ei < self.extras.len(),
+            "extras_idx {ei} out of bounds (len={})",
             self.extras.len()
         );
-        &self.extras[idx as usize]
+        &self.extras[ei]
     }
 
     // r[impl record_store.extras.access]
     /// Mutably access the per-record extra for `idx`.
     #[allow(clippy::indexing_slicing, reason = "idx is always a valid index returned by push_raw")]
     pub fn extra_mut(&mut self, idx: u32) -> &mut U {
+        let ei = self.record(idx).extras_idx as usize;
         debug_assert!(
-            (idx as usize) < self.extras.len(),
-            "extra_mut idx {idx} out of bounds (len={})",
+            ei < self.extras.len(),
+            "extras_idx {ei} out of bounds (len={})",
             self.extras.len()
         );
-        &mut self.extras[idx as usize]
+        &mut self.extras[ei]
     }
 
     /// Take all contents out, leaving an empty store with no capacity.

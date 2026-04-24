@@ -544,31 +544,6 @@ impl<U> PileupEngine<U> {
     }
 }
 
-// r[impl pileup.extras.with_extras]
-impl PileupEngine {
-    /// Compute per-record extras, consuming this `PileupEngine<()>` and returning
-    /// a `PileupEngine<V>`. All settings (filter, `ref_seq`, `max_depth`) are preserved.
-    pub fn with_extras<V>(self, f: impl FnMut(u32, &RecordStore) -> V) -> PileupEngine<V> {
-        // Use ManuallyDrop to move fields out of a Drop type without running the
-        // destructor (the profiling log in Drop is harmless to skip here — no
-        // columns have been produced yet on the source engine).
-        let mut me = std::mem::ManuallyDrop::new(self);
-        PileupEngine {
-            store: std::mem::take(&mut me.store).with_extras(f),
-            current_pos: me.current_pos,
-            region_end: me.region_end,
-            next_entry: me.next_entry,
-            active_end_pos: std::mem::take(&mut me.active_end_pos),
-            active: std::mem::take(&mut me.active),
-            max_depth: me.max_depth,
-            filter: me.filter.take(),
-            ref_seq: me.ref_seq.take(),
-            columns_produced: me.columns_produced,
-            max_active_depth: me.max_active_depth,
-        }
-    }
-}
-
 /// Lending iterator over pileup columns with store access.
 ///
 /// See [`PileupEngine::columns_with_store`].

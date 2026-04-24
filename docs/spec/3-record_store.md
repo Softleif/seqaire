@@ -85,7 +85,7 @@ r[record_store.extras.with_extras]
 `RecordStore<()>` MUST provide `with_extras<V>(self, f) -> RecordStore<V>` that consumes the store and computes one `V` per record in a single pass. The closure MUST receive `(record_index, &RecordStore<()>)` so it can access any slab (record fields, aux, seq, qname). All existing slabs MUST be moved, not copied.
 
 r[record_store.extras.access]
-`RecordStore<U>` MUST provide `extra(idx) -> &U` and `extra_mut(idx) -> &mut U` to access the per-record extra by record index. The index MUST be the same `u32` returned by `push_raw`/`push_fields`.
+`RecordStore<U>` MUST provide `extra(idx) -> &U` and `extra_mut(idx) -> &mut U` to access the per-record extra by record index. Access MUST go through the record's `extras_idx` field (indirection into the extras slab), so that extras remain valid after `sort_by_pos` or `dedup` reorder/remove records.
 
 r[record_store.extras.clear]
 `clear()` on `RecordStore<U>` MUST also clear the extras slab, retaining its allocated capacity.
@@ -93,8 +93,8 @@ r[record_store.extras.clear]
 r[record_store.extras.strip]
 `RecordStore<U>` MUST provide `strip_extras(self) -> RecordStore<()>` that discards the extras slab while preserving all other slab capacity. This is used by `Readers::recover_store` to recycle a `RecordStore<U>` back to `RecordStore<()>`.
 
-r[record_store.extras.sort_dedup_unit_only]
-`sort_by_pos` and `dedup` MUST be available only on `RecordStore<()>`. These methods reorder or remove records without syncing the extras slab. Callers MUST sort and dedup before calling `with_extras`.
+r[record_store.extras.sort_dedup_generic]
+`sort_by_pos` and `dedup` MUST be available on `RecordStore<U>` for any `U`. Each `SlimRecord` carries an `extras_idx` field that indexes into the extras slab, so reordering or removing records does not invalidate the extras mapping. Dead extras entries from `dedup` are left in place (minor waste, same as dead slab data for names, cigar, etc.).
 
 ## Integration
 

@@ -64,8 +64,8 @@ When a reference position falls within the soft-clipped portion of a read's alig
 r[pileup.extras.generic_param]
 `PileupEngine` MUST accept a type parameter `U` (default `()`) matching its `RecordStore<U>`. When `U` is `()`, the engine MUST behave identically to the non-generic version — the `Iterator` impl, column construction, and all existing APIs MUST be unchanged.
 
-r[pileup.extras.with_extras]
-`PileupEngine<()>` MUST provide `with_extras<V>(self, f) -> PileupEngine<V>` that transforms the engine's store via `RecordStore::with_extras` while preserving all settings (filter, reference sequence, max depth). The engine MUST NOT have started iteration yet (no columns produced).
+r[pileup.extras.constructor_accepts_any_u]
+`PileupEngine::new` MUST accept `RecordStore<U>` for any `U`. Callers MUST compute extras on the store (via `RecordStore::with_extras`) before constructing the engine. There is no engine-level `with_extras` method — the constructor is the only entry point.
 
 r[pileup.extras.columns_with_store]
 `PileupEngine<U>` MUST provide `columns_with_store(&mut self) -> ColumnsWithStore<'_, U>`. `ColumnsWithStore` MUST provide `next_column(&mut self) -> Option<(PileupColumn, &RecordStore<U>)>` that yields the same columns as the `Iterator` impl but additionally provides an immutable reference to the store. This allows callers to access per-record extras (and other slab data like qnames and aux) during iteration without pre-extraction.
