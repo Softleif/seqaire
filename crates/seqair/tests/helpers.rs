@@ -74,6 +74,20 @@ pub fn make_record_with_cigar(
     raw
 }
 
+/// Build a synthetic BAM record with a simple N×M CIGAR and appended aux data.
+pub fn make_record_with_aux(
+    tid: i32,
+    pos: i32,
+    flags: u16,
+    mapq: u8,
+    seq_len: u32,
+    aux: &[u8],
+) -> Vec<u8> {
+    let mut raw = make_record(tid, pos, flags, mapq, seq_len);
+    raw.extend_from_slice(aux);
+    raw
+}
+
 /// Build a BAM record with a custom qname and packed sequence bytes.
 /// `seq_packed` is the 4-bit packed sequence. `seq_len` is the number of bases.
 pub fn make_named_record(
