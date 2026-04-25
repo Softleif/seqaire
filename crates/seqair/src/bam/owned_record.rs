@@ -202,7 +202,7 @@ impl OwnedBamRecord {
         let qname_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
         let qname = qname_raw.get(..qname_len).unwrap_or(qname_raw).to_vec();
 
-        // Convert packed CIGAR u32s to Vec<CigarOp>
+        // CIGAR ops are packed u32s; CigarOp wraps that layout transparently.
         #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
         let cigar_bytes = &raw[h.var_start..h.cigar_end];
         let mut cigar = Vec::with_capacity(h.n_cigar_ops as usize);
@@ -210,19 +210,11 @@ impl OwnedBamRecord {
             let offset = i
                 .checked_mul(4)
                 .ok_or(OwnedRecordError::Decode { reason: "CIGAR offset overflow" })?;
-            let b0 = *cigar_bytes
-                .get(offset)
+            let chunk: [u8; 4] = cigar_bytes
+                .get(offset..offset.saturating_add(4))
+                .and_then(|s| s.try_into().ok())
                 .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            let b1 = *cigar_bytes
-                .get(offset.saturating_add(1))
-                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            let b2 = *cigar_bytes
-                .get(offset.saturating_add(2))
-                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            let b3 = *cigar_bytes
-                .get(offset.saturating_add(3))
-                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            let packed = u32::from_le_bytes([b0, b1, b2, b3]);
+            let packed = u32::from_le_bytes(chunk);
             let op = CigarOp::from_bam_u32(packed)
                 .ok_or(OwnedRecordError::InvalidCigarOp { index: i })?;
             cigar.push(op);
@@ -294,7 +286,7 @@ impl OwnedBamRecord {
     /// Compute the 0-based exclusive end position from pos + reference-consuming CIGAR ops.
     pub fn end_pos(&self) -> i64 {
         let ref_len: u64 =
-            self.cigar.iter().filter(|op| op.op.consumes_ref()).map(|op| u64::from(op.len)).sum();
+            self.cigar.iter().filter(|op| op.consumes_ref()).map(|op| u64::from(op.len())).sum();
         self.pos.saturating_add(ref_len.cast_signed())
     }
 
@@ -336,7 +328,7 @@ impl OwnedBamRecord {
 
     /// Query-consuming length of the CIGAR.
     pub fn cigar_query_len(&self) -> u64 {
-        self.cigar.iter().filter(|op| op.op.consumes_query()).map(|op| u64::from(op.len)).sum()
+        self.cigar.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum()
     }
 
     // r[impl bam.owned_record.set_alignment]
@@ -348,7 +340,7 @@ impl OwnedBamRecord {
         // For mapped reads, validate CIGAR query length matches seq length
         if !self.is_unmapped() && !self.seq.is_empty() {
             let query_len: u64 =
-                cigar.iter().filter(|op| op.op.consumes_query()).map(|op| u64::from(op.len)).sum();
+                cigar.iter().filter(|op| op.consumes_query()).map(|op| u64::from(op.len())).sum();
             if query_len != self.seq.len() as u64 {
                 return Err(OwnedRecordError::CigarSeqLengthMismatch {
                     cigar_query_len: query_len,
@@ -514,14 +506,14 @@ impl<'a> Iterator for AlignedPairsIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             let op = self.cigar.get(self.op_idx)?;
-            if self.op_offset >= op.len {
+            if self.op_offset >= op.len() {
                 self.op_idx = self.op_idx.checked_add(1)?;
                 self.op_offset = 0;
                 continue;
             }
 
-            let consumes_q = op.op.consumes_query();
-            let consumes_r = op.op.consumes_ref();
+            let consumes_q = op.consumes_query();
+            let consumes_r = op.consumes_ref();
 
             // S/H/P: skip entirely
             if !consumes_q && !consumes_r {
@@ -531,7 +523,7 @@ impl<'a> Iterator for AlignedPairsIter<'a> {
             }
 
             // Soft clip: advance query but don't yield
-            if matches!(op.op, super::cigar::CigarOpType::SoftClip) {
+            if matches!(op.op_type(), super::cigar::CigarOpType::SoftClip) {
                 self.query_pos = self.query_pos.saturating_add(1);
                 self.op_offset = self.op_offset.saturating_add(1);
                 continue;

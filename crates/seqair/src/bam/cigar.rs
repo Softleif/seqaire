@@ -81,32 +81,64 @@ impl CigarOpType {
 }
 
 // r[impl bam.owned_record.cigar_op]
-/// A single CIGAR operation with its operation type and length.
-///
-/// In BAM binary format, each op is packed as a u32: `len << 4 | op_code`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CigarOp {
-    pub op: CigarOpType,
-    pub len: u32,
-}
+/// A single CIGAR operation, stored in the same packed u32 layout BAM uses
+/// on disk: `len << 4 | op_code`. Decoding the op type is a single shift+mask;
+/// re-encoding for BAM output is a no-op.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CigarOp(u32);
+
+const _: () = assert!(size_of::<CigarOp>() == 4, "CigarOp must stay 4 bytes");
 
 impl CigarOp {
     /// BAM packs length into the upper 28 bits, so max length is 2^28-1 = `268_435_455`.
     pub const fn new(op: CigarOpType, len: u32) -> Self {
         debug_assert!(len < (1 << 28), "CIGAR op length exceeds 28-bit BAM limit");
-        Self { op, len }
+        Self((len << 4) | op.to_bam_code() as u32)
     }
 
-    /// Decode from BAM packed u32 format (`len << 4 | op_code`).
+    /// Decode from BAM packed u32 format (`len << 4 | op_code`). Returns `None`
+    /// if the lower 4 bits don't match a known CIGAR op.
     pub fn from_bam_u32(packed: u32) -> Option<Self> {
-        let op = CigarOpType::from_bam((packed & 0xF) as u8)?;
-        let len = packed >> 4;
-        Some(Self { op, len })
+        // Validate the op code at construction so subsequent `op_type()` calls are infallible.
+        CigarOpType::from_bam((packed & 0xF) as u8)?;
+        Some(Self(packed))
     }
 
     /// Encode to BAM packed u32 format (`len << 4 | op_code`).
     pub const fn to_bam_u32(self) -> u32 {
-        (self.len << 4) | self.op.to_bam_code() as u32
+        self.0
+    }
+
+    /// Length of the operation (upper 28 bits).
+    #[allow(clippy::len_without_is_empty, reason = "len is the CIGAR op span, not a collection")]
+    pub const fn len(self) -> u32 {
+        self.0 >> 4
+    }
+
+    /// Raw BAM op code (lower 4 bits).
+    pub const fn op_code(self) -> u8 {
+        (self.0 & 0xF) as u8
+    }
+
+    /// Decoded op type. Always succeeds because the op code is validated at construction.
+    pub fn op_type(self) -> CigarOpType {
+        CigarOpType::from_bam(self.op_code())
+            .expect("op code validated at construction; CigarOp invariant violated")
+    }
+
+    pub fn consumes_ref(self) -> bool {
+        consumes_ref(self.op_code())
+    }
+
+    pub fn consumes_query(self) -> bool {
+        consumes_query(self.op_code())
+    }
+}
+
+impl std::fmt::Debug for CigarOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CigarOp").field("op", &self.op_type()).field("len", &self.len()).finish()
     }
 }
 
@@ -500,8 +532,8 @@ mod tests {
         let op = CigarOp::new(CigarOpType::Match, max_len);
         let packed = op.to_bam_u32();
         let decoded = CigarOp::from_bam_u32(packed).unwrap();
-        assert_eq!(decoded.len, max_len);
-        assert_eq!(decoded.op, CigarOpType::Match);
+        assert_eq!(decoded.len(), max_len);
+        assert_eq!(decoded.op_type(), CigarOpType::Match);
     }
 
     #[test]
