@@ -9,6 +9,8 @@
 
 use seqair_types::{BamFlags, Base, BaseQuality, Pos0};
 
+use crate::utils::TraceErr;
+
 use super::{
     cigar,
     record::{self, DecodeError},
@@ -66,6 +68,89 @@ impl SlimRecord {
     fn cigar_len(&self) -> usize {
         (self.n_cigar_ops as usize).checked_mul(4).expect("cigar_len overflow")
     }
+
+    /// Get the qname for this record from the store
+    pub fn seq<'store, U>(
+        &self,
+        store: &'store RecordStore<()>,
+    ) -> Result<&'store [Base], RecordAccessError> {
+        let start = self.bases_off as usize;
+        let end =
+            start.checked_add(self.seq_len as usize).ok_or(RecordAccessError::OffsetOverflow {
+                slab: Slab::Bases,
+                offset: self.bases_off,
+                len: self.seq_len as usize,
+            })?;
+        store.bases.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Bases,
+            offset: self.bases_off,
+        })
+    }
+
+    /// Get the `qname` for this record from the store
+    pub fn qual<'store, U>(
+        &self,
+        store: &'store RecordStore<()>,
+    ) -> Result<&'store [BaseQuality], RecordAccessError> {
+        let start = self.qual_off as usize;
+        let end =
+            start.checked_add(self.seq_len as usize).ok_or(RecordAccessError::OffsetOverflow {
+                slab: Slab::Qual,
+                offset: self.qual_off,
+                len: self.seq_len as usize,
+            })?;
+        let q = store.qual.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Qual,
+            offset: self.qual_off,
+        })?;
+        Ok(BaseQuality::slice_from_bytes(q))
+    }
+
+    /// Get the CIGAR ops for this record from the store (packed u32 format).
+    pub fn cigar<'store, U>(
+        &self,
+        store: &'store RecordStore<()>,
+    ) -> Result<&'store [u8], RecordAccessError> {
+        let start = self.cigar_off as usize;
+        let end = start.checked_add(self.cigar_len()).ok_or(RecordAccessError::OffsetOverflow {
+            slab: Slab::Cigar,
+            offset: self.cigar_off,
+            len: self.cigar_len(),
+        })?;
+        store.cigar.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Cigar,
+            offset: self.cigar_off,
+        })
+    }
+
+    /// Get the auxiliary tag bytes for this record from the store (BAM binary format).
+    pub fn aux<'store, U>(
+        &self,
+        store: &'store RecordStore<()>,
+    ) -> Result<&'store [u8], RecordAccessError> {
+        let start = self.aux_off as usize;
+        let end =
+            start.checked_add(self.aux_len as usize).ok_or(RecordAccessError::OffsetOverflow {
+                slab: Slab::Aux,
+                offset: self.aux_off,
+                len: self.aux_len as usize,
+            })?;
+        store.aux.get(start..end).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Aux,
+            offset: self.aux_off,
+        })
+    }
+
+    /// Get the extras for this record from the store.
+    pub fn extra<'store, U>(
+        &self,
+        store: &'store RecordStore<U>,
+    ) -> Result<&'store U, RecordAccessError> {
+        store.extras.get(self.extras_idx as usize).ok_or(RecordAccessError::SlabOffsetOutOfRange {
+            slab: Slab::Extras,
+            offset: self.extras_idx,
+        })
+    }
 }
 
 // Compile-time size guard: 16 u32 (incl. next_ref_id, extras_idx) + 3 u16 + 1 u8 + padding
@@ -73,6 +158,29 @@ impl SlimRecord {
 // see `docs/spec/3-record_store.md` "Layout".
 const _: () =
     assert!(std::mem::size_of::<SlimRecord>() <= 72, "SlimRecord grew unexpectedly large");
+
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum RecordAccessError {
+    #[error("Cannot get {slab:?} entry for record: offset {offset} out of range")]
+    SlabOffsetOutOfRange { slab: Slab, offset: u32 },
+    #[error(
+        "Cannot get {slab:?} entry for record: offset {offset} + length {len} overflows slab limits"
+    )]
+    OffsetOverflow { slab: Slab, offset: u32, len: usize },
+}
+
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Slab {
+    Records,
+    Names,
+    Bases,
+    Cigar,
+    Qual,
+    Aux,
+    Extras,
+}
 
 // r[impl record_store.push_raw+2]
 // r[impl record_store.field_access]
@@ -483,7 +591,7 @@ impl RecordStore {
     ///     }
     /// }
     /// ```
-    pub fn apply_extras<E: RecordStoreExtras>(self, provider: &mut E) -> RecordStore<E::Extra> {
+    pub fn apply_extras<E: CustomizeRecordStore>(self, provider: &mut E) -> RecordStore<E::Extra> {
         #[expect(
             clippy::cast_possible_truncation,
             reason = "RecordStore capacity is bounded by SlabOverflow (u32)"
@@ -538,7 +646,7 @@ impl RecordStore {
 ///     }
 /// }
 /// ```
-pub trait RecordStoreExtras: Clone {
+pub trait CustomizeRecordStore: Clone {
     /// The per-record data produced by this provider.
     type Extra;
 
@@ -547,15 +655,15 @@ pub trait RecordStoreExtras: Clone {
     /// computed. Returning `false` rolls back the slab writes for this
     /// record — it is as if the record was never fetched.
     ///
-    /// Default: keep every record.
+    /// Default: keep mapped records, filter out unmapped.
     ///
     /// The filter sees the pushed [`SlimRecord`] (with its `pos`, `flags`,
     /// `mapq`, etc.) and the `&RecordStore<()>` for reading slab-backed
     /// data like qname, aux, and sequence bytes. The freshly-pushed record
     /// is at the tail of each slab, so all of its bytes are accessible.
     #[inline]
-    fn keep_record(&mut self, _rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
-        true
+    fn keep_record(&mut self, rec: &SlimRecord, _store: &RecordStore<()>) -> bool {
+        !rec.flags.is_unmapped()
     }
 
     /// Compute the extra for record `idx` in `store`.
@@ -569,7 +677,7 @@ pub trait RecordStoreExtras: Clone {
 /// `apply_extras` pass entirely when there is nothing to compute. The default
 /// `keep_record` from the trait (always `true`) means `Readers<()>` never
 /// filters either.
-impl RecordStoreExtras for () {
+impl CustomizeRecordStore for () {
     type Extra = ();
     #[inline]
     fn compute(&mut self, _idx: u32, _store: &RecordStore<()>) {}

@@ -20,7 +20,7 @@ mod helpers;
 use helpers::{collect_columns, make_record};
 use seqair::bam::Pos0;
 use seqair::bam::pileup::PileupEngine;
-use seqair::bam::record_store::{RecordStore, RecordStoreExtras};
+use seqair::bam::record_store::{RecordStore, CustomizeRecordStore};
 
 /// Helper: push N synthetic records at positions 100, 101, ... with 10M CIGAR.
 fn store_with_n_records(n: u32) -> RecordStore {
@@ -42,7 +42,7 @@ fn with_extras_computes_per_record_data() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -68,7 +68,7 @@ fn with_extras_preserves_slab_data() {
 
     #[derive(Clone, Default)]
     struct ExtractMapqScaled;
-    impl RecordStoreExtras for ExtractMapqScaled {
+    impl CustomizeRecordStore for ExtractMapqScaled {
         type Extra = u16;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u16 {
             s.record(idx).mapq as u16 * 10
@@ -95,7 +95,7 @@ fn extra_mut_allows_modification() {
 
     #[derive(Clone, Default)]
     struct ZeroExtra;
-    impl RecordStoreExtras for ZeroExtra {
+    impl CustomizeRecordStore for ZeroExtra {
         type Extra = u32;
         fn compute(&mut self, _idx: u32, _s: &RecordStore<()>) -> u32 {
             0
@@ -123,7 +123,7 @@ fn with_extras_closure_can_read_aux() {
 
     #[derive(Clone, Default)]
     struct AuxLen;
-    impl RecordStoreExtras for AuxLen {
+    impl CustomizeRecordStore for AuxLen {
         type Extra = usize;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> usize {
             s.aux(idx).len()
@@ -142,7 +142,7 @@ fn clear_clears_extras_and_retains_capacity() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -170,7 +170,7 @@ fn strip_extras_preserves_slab_capacity() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -230,7 +230,7 @@ fn sort_by_pos_preserves_extras_mapping() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -266,7 +266,7 @@ fn dedup_on_typed_store_preserves_extras() {
 
     #[derive(Clone, Default)]
     struct RecordIdx;
-    impl RecordStoreExtras for RecordIdx {
+    impl CustomizeRecordStore for RecordIdx {
         type Extra = u32;
         fn compute(&mut self, idx: u32, _s: &RecordStore<()>) -> u32 {
             idx
@@ -300,7 +300,7 @@ fn set_alignment_then_sort_on_typed_store() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -327,7 +327,7 @@ fn engine_accepts_typed_store() {
 
     #[derive(Clone, Default)]
     struct ExtractMapq;
-    impl RecordStoreExtras for ExtractMapq {
+    impl CustomizeRecordStore for ExtractMapq {
         type Extra = u8;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u8 {
             s.record(idx).mapq
@@ -375,7 +375,7 @@ fn pileups_column_exposes_store_access_via_alignment_view() {
 
     #[derive(Clone, Default)]
     struct ExtractPos;
-    impl RecordStoreExtras for ExtractPos {
+    impl CustomizeRecordStore for ExtractPos {
         type Extra = i32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
             s.record(idx).pos.as_i32()
@@ -405,7 +405,7 @@ fn recover_store_works_with_extras_engine() {
 
     #[derive(Clone, Default)]
     struct ExtractMapqU32;
-    impl RecordStoreExtras for ExtractMapqU32 {
+    impl CustomizeRecordStore for ExtractMapqU32 {
         type Extra = u32;
         fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> u32 {
             s.record(idx).mapq as u32
@@ -444,7 +444,7 @@ proptest! {
 
         #[derive(Clone, Default)]
         struct ExtractPos;
-        impl RecordStoreExtras for ExtractPos {
+        impl CustomizeRecordStore for ExtractPos {
             type Extra = i32;
             fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
                 s.record(idx).pos.as_i32()
@@ -486,7 +486,7 @@ proptest! {
 
         #[derive(Clone, Default)]
         struct ExtractPos;
-        impl RecordStoreExtras for ExtractPos {
+        impl CustomizeRecordStore for ExtractPos {
             type Extra = i32;
             fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
                 s.record(idx).pos.as_i32()
@@ -530,7 +530,7 @@ proptest! {
 
         #[derive(Clone, Default)]
         struct ExtractPos;
-        impl RecordStoreExtras for ExtractPos {
+        impl CustomizeRecordStore for ExtractPos {
             type Extra = i32;
             fn compute(&mut self, idx: u32, s: &RecordStore<()>) -> i32 {
                 s.record(idx).pos.as_i32()
@@ -562,7 +562,7 @@ fn pileup_with_sorted_typed_store() {
 
     #[derive(Clone, Default)]
     struct RecordIdx;
-    impl RecordStoreExtras for RecordIdx {
+    impl CustomizeRecordStore for RecordIdx {
         type Extra = u32;
         fn compute(&mut self, idx: u32, _s: &RecordStore<()>) -> u32 {
             idx

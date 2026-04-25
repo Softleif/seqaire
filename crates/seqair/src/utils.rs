@@ -1,3 +1,5 @@
+use tracing::Level;
+
 pub trait TraceErr<T> {
     /// Like [`Option::and`], but traces a message when the value is `None`.
     fn trace_err(self, message: &'static str) -> Option<T>;
@@ -7,7 +9,7 @@ impl<T> TraceErr<T> for Option<T> {
     #[track_caller]
     #[inline(always)]
     fn trace_err(self, message: &'static str) -> Option<T> {
-        if self.is_none() {
+        if tracing::enabled!(Level::TRACE) && self.is_none() {
             tracing::trace!("{message}");
         }
         self
@@ -26,7 +28,9 @@ impl<T, E: std::fmt::Display> TraceOk<T> for Result<T, E> {
         match self {
             Ok(v) => Some(v),
             Err(error) => {
-                tracing::trace!(%error, "{message}");
+                if tracing::enabled!(Level::TRACE) {
+                    tracing::trace!(%error, "{message}");
+                }
                 None
             }
         }
