@@ -26,7 +26,7 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::record_store::{RecordStore, RecordStoreExtras};
+use seqair::bam::record_store::{CustomizeRecordStore, RecordStore};
 use seqair::reader::Readers;
 use seqair_types::RegionString;
 use std::path::PathBuf;
@@ -68,7 +68,7 @@ struct ReadInfo {
 #[derive(Debug, Clone, Default)]
 struct ReadInfoBuilder;
 
-impl RecordStoreExtras for ReadInfoBuilder {
+impl CustomizeRecordStore for ReadInfoBuilder {
     type Extra = ReadInfo;
 
     fn compute(&mut self, idx: u32, store: &RecordStore<()>) -> ReadInfo {

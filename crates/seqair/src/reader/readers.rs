@@ -7,7 +7,7 @@ use crate::{
     bam::{
         BamHeader,
         pileup::{PileupEngine, RefSeq},
-        record_store::{RecordStore, RecordStoreExtras},
+        record_store::{CustomizeRecordStore, RecordStore},
     },
     fasta::{FastaError, IndexedFastaReader},
 };
@@ -101,7 +101,7 @@ use tracing::instrument;
 /// # }
 /// ```
 // r[impl unified.readers_struct]
-pub struct Readers<E: RecordStoreExtras = ()> {
+pub struct Readers<E: CustomizeRecordStore = ()> {
     pub(crate) alignment: IndexedReader,
     pub(crate) fasta: IndexedFastaReader,
     pub(crate) store: RecordStore<()>,
@@ -109,7 +109,7 @@ pub struct Readers<E: RecordStoreExtras = ()> {
     pub(crate) extras_provider: E,
 }
 
-impl<E: RecordStoreExtras> std::fmt::Debug for Readers<E> {
+impl<E: CustomizeRecordStore> std::fmt::Debug for Readers<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Readers").field("alignment", &self.alignment).finish()
     }
@@ -127,7 +127,7 @@ impl Readers<()> {
     }
 }
 
-impl<E: RecordStoreExtras> Readers<E> {
+impl<E: CustomizeRecordStore> Readers<E> {
     // r[impl unified.readers_open_with_extras]
     /// Open like [`open`](Readers::open) but attach a [`RecordStoreExtras`]
     /// provider so per-record extras are computed every time records are loaded.
