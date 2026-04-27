@@ -128,7 +128,10 @@ A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()`
 > - `set_string(tag, value)` — add or replace a Z-type string tag
 > - `set_int(tag, value: i64)` — add or replace an integer tag
 > - `set_float(tag, value)` — add or replace an f-type float tag
+> - `set_char(tag, value)` — add or replace an A-type character tag
+> - `set_double(tag, value)` — add or replace a d-type double-precision float tag
 > - `set_array_u8(tag, values)` — add or replace a B:C array tag
+> - `set_array_i16(tag, values)`, `set_array_u16`, `set_array_i32`, `set_array_u32`, `set_array_f32` — typed B-array setters
 > - `remove(tag)` — remove a tag if present
 > - `as_bytes() -> &[u8]` — raw bytes for serialization
 
@@ -145,6 +148,9 @@ Tag names MUST be unique within a record (per [SAM1] §1.5). `set_*` methods MUS
 
 r[bam.owned_record.aux_array_encoding]
 `set_array_u8(tag, values)` MUST encode the tag in BAM B-type array format: 2-byte tag name, type byte `B`, subtype byte `C`, 4-byte little-endian element count, followed by the raw u8 values. This is used for the ML (modification likelihood) tag in SAM 4.5 methylation annotations.
+
+r[bam.owned_record.aux_array_setters]
+All B-type array setters MUST produce the correct BAM binary format with the corresponding subtype byte. The element count MUST be validated via `u32::try_from` to catch impossibly-large arrays on 64-bit platforms, returning `AuxDataError::IntegerOutOfRange`. Each setter MUST round-trip through `get()` producing the correct `AuxValue::Array*` variant.
 
 r[bam.owned_record.aux_replace_semantics]
 When `set_*` is called for a tag that already exists, the tag MUST be removed and re-appended with the new value. Implementations MAY optimize the case where the new encoded byte length (including tag name and type byte) matches the old length by replacing in-place, but this is not required.

@@ -163,7 +163,7 @@ impl<'a> AuxIter<'a> {
                 let v = if typ == b'Z' { AuxValue::String(slice) } else { AuxValue::Hex(slice) };
                 Some(v)
             }
-            // r[impl bam.record.aux_array_unsupported]
+            // r[impl bam.record.aux_parse]
             b'B' => {
                 let elem_type = *self.data.get(self.pos)?;
                 let count_bytes =
@@ -445,6 +445,28 @@ mod tests {
     }
 
     #[test]
+    fn unknown_type_code_stops_iteration() {
+        // Build: valid NM:C:5, then garbage "tag" with type 0x00, then valid RG:Z:grp
+        let valid_after = z_tag(b"grp");
+        let mut raw = Vec::new();
+        // NM:C:5
+        raw.extend_from_slice(b"NM");
+        raw.push(b'C');
+        raw.push(5);
+        // Garbage: tag XX with unknown type 0x00
+        raw.extend_from_slice(b"XX");
+        raw.push(0x00);
+        // RG:Z:grp
+        raw.extend_from_slice(b"RG");
+        raw.extend_from_slice(&valid_after);
+
+        // Only NM should be found; RG is unreachable because unknown type code
+        // stops iteration.
+        assert_eq!(find_tag(&raw, *b"NM"), Some(AuxValue::U8(5)));
+        assert_eq!(find_tag(&raw, *b"RG"), None);
+    }
+
+    #[test]
     fn array_with_unknown_element_type_stops_iteration() {
         let mut arr = vec![b'B', b'x']; // invalid element type
         arr.extend_from_slice(&1u32.to_le_bytes());
@@ -452,6 +474,7 @@ mod tests {
 
         let target = z_tag(b"after");
         let aux = build_aux(&[(b"AR", &arr), (b"ZZ", &target)]);
+        // Unknown B-array element type stops iteration; subsequent tags unreachable
         assert_eq!(find_tag(&aux, *b"ZZ"), None);
     }
 }

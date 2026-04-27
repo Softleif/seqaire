@@ -48,6 +48,12 @@ name = "fuzz_bam_index"
 path = "fuzz_targets/fuzz_bam_index.rs"
 doc = false
 
+# BAM auxiliary tag parsing and round-trip
+[[bin]]
+name = "fuzz_bam_aux"
+path = "fuzz_targets/fuzz_bam_aux.rs"
+doc = false
+
 # CSI index parsing
 [[bin]]
 name = "fuzz_csi_index"

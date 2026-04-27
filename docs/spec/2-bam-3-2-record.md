@@ -68,10 +68,10 @@ r[bam.record.flag_unmapped]
 BAM records can carry optional key-value tags (e.g. `XR:Z:CT` for bismark strand, `MD:Z:...` for mismatch string). Tags are stored as a flat byte array at the end of the record, each prefixed by a 2-byte name and a 1-byte type code.
 
 r[bam.record.aux_parse]
-The record MUST support looking up auxiliary tags by their 2-byte name. Tag types A, c, C, s, S, i, I, f, d, Z, H, and B (typed array) MUST be supported.
+The record MUST support looking up auxiliary tags by their 2-byte name. Tag types A, c, C, s, S, i, I, f, d, Z, H, and B (typed array) MUST be supported. B-type arrays are parsed into typed `Array*` variants of `AuxValue` (ArrayI8, ArrayU8, ArrayI16, ArrayU16, ArrayI32, ArrayU32, ArrayFloat).
 
-r[bam.record.aux_array_unsupported]
-B-type (array) auxiliary tags are not yet parsed into `AuxValue`. `find_tag` returns `None` for array tags. The tag bytes MUST be correctly skipped so that all subsequent tags in the record remain accessible.
+r[bam.record.aux_truncated]
+Unknown type codes and truncated/malformed tag values MUST stop iteration — `AuxIter` returns `None` entirely. This matches htslib behavior: unknown type codes imply corrupted data, and skipping them would require guessing value lengths, which can create false tag matches.
 
 r[bam.record.raw_aux]
 The record MUST provide access to raw auxiliary data bytes for efficient filtering without full tag parsing.
