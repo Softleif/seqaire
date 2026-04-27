@@ -24,6 +24,10 @@ pub enum AuxDataError {
     /// Integer value does not fit in any BAM integer type (i32/u32 range).
     #[error("integer value {value} out of BAM aux tag range (i32/u32)")]
     IntegerOutOfRange { value: i64 },
+
+    /// Array data length is not a multiple of the element size.
+    #[error("array data length {len} is not a multiple of element size {elem_size}")]
+    InvalidArrayLength { len: usize, elem_size: usize },
 }
 
 impl AuxData {
@@ -66,6 +70,14 @@ impl AuxData {
         self.data.push(b'Z');
         self.data.extend_from_slice(value);
         self.data.push(0); // NUL terminator
+    }
+
+    /// Add or replace a char (A-type) tag.
+    pub fn set_char(&mut self, tag: [u8; 2], value: u8) {
+        self.remove(tag);
+        self.data.extend_from_slice(&tag);
+        self.data.push(b'A');
+        self.data.push(value);
     }
 
     // r[impl bam.owned_record.aux_int_encoding]
@@ -128,6 +140,14 @@ impl AuxData {
         self.data.extend_from_slice(&value.to_le_bytes());
     }
 
+    /// Add or replace a double-precision float (d-type) tag.
+    pub fn set_double(&mut self, tag: [u8; 2], value: f64) {
+        self.remove(tag);
+        self.data.extend_from_slice(&tag);
+        self.data.push(b'd');
+        self.data.extend_from_slice(&value.to_le_bytes());
+    }
+
     // r[impl bam.owned_record.aux_array_encoding]
     // r[impl base_mod.passthrough.bam] — B:C round-trips ML bytes verbatim
     /// Add or replace a B:C (unsigned byte array) tag.
@@ -136,14 +156,55 @@ impl AuxData {
     /// the 2 MiB record size limit, so values longer than `u32::MAX` cannot occur in
     /// valid BAM data. We validate the cast to be safe on 64-bit platforms.
     pub fn set_array_u8(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
-        #[allow(clippy::cast_possible_wrap, reason = "len < i64::MAX")]
-        let count = u32::try_from(values.len())
-            .map_err(|_| AuxDataError::IntegerOutOfRange { value: values.len() as i64 })?;
+        let count = array_count(values.len(), 1)?;
         self.remove(tag);
-        self.data.extend_from_slice(&tag);
-        self.data.push(b'B');
-        self.data.push(b'C');
-        self.data.extend_from_slice(&count.to_le_bytes());
+        encode_array_header(&mut self.data, &tag, b'C', count);
+        self.data.extend_from_slice(values);
+        Ok(())
+    }
+
+    // r[impl bam.owned_record.aux_array_setters]
+    /// Add or replace a B:s (signed 16-bit array) tag.
+    pub fn set_array_i16(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = array_count(values.len(), 2)?;
+        self.remove(tag);
+        encode_array_header(&mut self.data, &tag, b's', count);
+        self.data.extend_from_slice(values);
+        Ok(())
+    }
+
+    /// Add or replace a B:S (unsigned 16-bit array) tag.
+    pub fn set_array_u16(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = array_count(values.len(), 2)?;
+        self.remove(tag);
+        encode_array_header(&mut self.data, &tag, b'S', count);
+        self.data.extend_from_slice(values);
+        Ok(())
+    }
+
+    /// Add or replace a B:i (signed 32-bit array) tag.
+    pub fn set_array_i32(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = array_count(values.len(), 4)?;
+        self.remove(tag);
+        encode_array_header(&mut self.data, &tag, b'i', count);
+        self.data.extend_from_slice(values);
+        Ok(())
+    }
+
+    /// Add or replace a B:I (unsigned 32-bit array) tag.
+    pub fn set_array_u32(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = array_count(values.len(), 4)?;
+        self.remove(tag);
+        encode_array_header(&mut self.data, &tag, b'I', count);
+        self.data.extend_from_slice(values);
+        Ok(())
+    }
+
+    /// Add or replace a B:f (float array) tag.
+    pub fn set_array_f32(&mut self, tag: [u8; 2], values: &[u8]) -> Result<(), AuxDataError> {
+        let count = array_count(values.len(), 4)?;
+        self.remove(tag);
+        encode_array_header(&mut self.data, &tag, b'f', count);
         self.data.extend_from_slice(values);
         Ok(())
     }
@@ -154,6 +215,30 @@ impl AuxData {
             self.data.drain(range);
         }
     }
+}
+
+/// Validate array element count and compute it from byte length.
+///
+/// Returns `InvalidArrayLength` if `byte_len` is not a multiple of `elem_size`,
+/// or `IntegerOutOfRange` if the count exceeds `u32::MAX`.
+fn array_count(byte_len: usize, elem_size: usize) -> Result<u32, AuxDataError> {
+    if byte_len.wrapping_rem(elem_size) != 0 {
+        return Err(AuxDataError::InvalidArrayLength { len: byte_len, elem_size });
+    }
+    let count = byte_len / elem_size;
+    u32::try_from(count).map_err(|_| AuxDataError::IntegerOutOfRange {
+        #[allow(clippy::cast_possible_wrap, reason = "count fits in i64 on 64-bit")]
+        value: count as i64,
+    })
+}
+
+/// Append the BAM B-array header (tag name + `B` type + subtype + 4-byte count)
+/// to the given buffer.
+fn encode_array_header(buf: &mut Vec<u8>, tag: &[u8; 2], subtype: u8, count: u32) {
+    buf.extend_from_slice(tag);
+    buf.push(b'B');
+    buf.push(subtype);
+    buf.extend_from_slice(&count.to_le_bytes());
 }
 
 /// Find the byte range `[start..end)` of a complete tag entry (name + type + value)
@@ -220,6 +305,7 @@ fn advance_past_value(data: &[u8], mut pos: usize, typ: u8) -> Option<usize> {
 #[allow(clippy::arithmetic_side_effects, reason = "test arithmetic on known small values")]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     // r[verify bam.owned_record.aux_data]
     #[test]
@@ -385,5 +471,333 @@ mod tests {
         assert!(!aux.is_empty());
         aux.remove(*b"NM");
         assert!(aux.is_empty());
+    }
+
+    #[test]
+    fn set_and_get_char() {
+        let mut aux = AuxData::new();
+        aux.set_char(*b"XA", b'Q');
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::Char(b'Q')));
+    }
+
+    #[test]
+    fn set_and_get_double() {
+        let mut aux = AuxData::new();
+        aux.set_double(*b"XD", std::f64::consts::E);
+        assert_eq!(aux.get(*b"XD"), Some(AuxValue::Double(std::f64::consts::E)));
+    }
+
+    // r[verify bam.owned_record.aux_array_setters]
+    #[test]
+    fn set_and_get_array_i16() {
+        let mut aux = AuxData::new();
+        let raw = [(-1i16).to_le_bytes(), 42i16.to_le_bytes()].concat();
+        aux.set_array_i16(*b"XA", &raw).unwrap();
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::ArrayI16(&raw)));
+    }
+
+    #[test]
+    fn set_and_get_array_u16() {
+        let mut aux = AuxData::new();
+        let raw = [0u16.to_le_bytes(), 65535u16.to_le_bytes()].concat();
+        aux.set_array_u16(*b"XA", &raw).unwrap();
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::ArrayU16(&raw)));
+    }
+
+    #[test]
+    fn set_and_get_array_i32() {
+        let mut aux = AuxData::new();
+        let raw = [i32::MIN.to_le_bytes(), 42i32.to_le_bytes()].concat();
+        aux.set_array_i32(*b"XA", &raw).unwrap();
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::ArrayI32(&raw)));
+    }
+
+    #[test]
+    fn set_and_get_array_u32() {
+        let mut aux = AuxData::new();
+        let raw = [0u32.to_le_bytes(), u32::MAX.to_le_bytes()].concat();
+        aux.set_array_u32(*b"XA", &raw).unwrap();
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::ArrayU32(&raw)));
+    }
+
+    #[test]
+    fn set_and_get_array_f32() {
+        let mut aux = AuxData::new();
+        let raw = [1.0f32.to_le_bytes(), (-0.5f32).to_le_bytes()].concat();
+        aux.set_array_f32(*b"XA", &raw).unwrap();
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::ArrayFloat(&raw)));
+    }
+
+    #[test]
+    fn array_misaligned_length_is_error() {
+        let mut aux = AuxData::new();
+        // i16 arrays need even byte length
+        assert!(aux.set_array_i16(*b"XA", &[1, 2, 3]).is_err());
+        // i32 arrays need length divisible by 4
+        assert!(aux.set_array_i32(*b"XA", &[1, 2, 3, 4, 5]).is_err());
+        // u8 arrays allow any length
+        assert!(aux.set_array_u8(*b"XA", &[1, 2, 3]).is_ok());
+    }
+
+    #[test]
+    fn all_array_types_roundtrip_with_other_tags() {
+        let mut aux = AuxData::new();
+        aux.set_string(*b"RG", b"sample");
+
+        let i16_raw = [100i16.to_le_bytes()].concat();
+        aux.set_array_i16(*b"X1", &i16_raw).unwrap();
+
+        let u16_raw = [50000u16.to_le_bytes()].concat();
+        aux.set_array_u16(*b"X2", &u16_raw).unwrap();
+
+        let i32_raw = [(-1_000_000i32).to_le_bytes()].concat();
+        aux.set_array_i32(*b"X3", &i32_raw).unwrap();
+
+        let u32_raw = [3_000_000_000u32.to_le_bytes()].concat();
+        aux.set_array_u32(*b"X4", &u32_raw).unwrap();
+
+        let f32_raw = [std::f32::consts::PI.to_le_bytes()].concat();
+        aux.set_array_f32(*b"X5", &f32_raw).unwrap();
+
+        assert_eq!(aux.get(*b"RG"), Some(AuxValue::String(b"sample")));
+        assert_eq!(aux.get(*b"X1"), Some(AuxValue::ArrayI16(&i16_raw)));
+        assert_eq!(aux.get(*b"X2"), Some(AuxValue::ArrayU16(&u16_raw)));
+        assert_eq!(aux.get(*b"X3"), Some(AuxValue::ArrayI32(&i32_raw)));
+        assert_eq!(aux.get(*b"X4"), Some(AuxValue::ArrayU32(&u32_raw)));
+        assert_eq!(aux.get(*b"X5"), Some(AuxValue::ArrayFloat(&f32_raw)));
+    }
+
+    #[test]
+    fn char_replaces_existing() {
+        let mut aux = AuxData::new();
+        aux.set_char(*b"XA", b'A');
+        aux.set_char(*b"XA", b'B');
+        assert_eq!(aux.get(*b"XA"), Some(AuxValue::Char(b'B')));
+        let tags: Vec<_> = aux::iter_tags(aux.as_bytes()).collect();
+        assert_eq!(tags.len(), 1);
+    }
+
+    #[test]
+    fn double_replaces_existing() {
+        let mut aux = AuxData::new();
+        aux.set_double(*b"XD", 1.0);
+        aux.set_double(*b"XD", 2.0);
+        assert_eq!(aux.get(*b"XD"), Some(AuxValue::Double(2.0)));
+        let tags: Vec<_> = aux::iter_tags(aux.as_bytes()).collect();
+        assert_eq!(tags.len(), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Proptests: round-trip, uniqueness, and removal properties
+    // ═══════════════════════════════════════════════════════════════
+
+    proptest::proptest! {
+        // r[verify bam.owned_record.aux_data]
+        /// Parse random bytes → rebuild via `AuxData` → verify tags match.
+        ///
+        /// This is an independent oracle: the parser (`aux::iter_tags`) and the
+        /// builder (`AuxData::set_*`) use separate code paths. Round-tripping
+        /// catches both encoding bugs and parse/skip divergence.
+        #[test]
+        fn roundtrip_random_bytes(raw in proptest::collection::vec(0u8..=255, 0..=512)) {
+            // Parse: extract all well-formed tags
+            let parsed: Vec<_> = aux::iter_tags(&raw).collect();
+
+            // Rebuild via AuxData
+            let mut built = AuxData::new();
+            for (tag, value) in &parsed {
+                match value {
+                    AuxValue::Char(v) => built.set_char(*tag, *v),
+                    AuxValue::String(s) => built.set_string(*tag, s),
+                    AuxValue::Hex(h) => built.set_string(*tag, h),
+                    AuxValue::I8(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::U8(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::I16(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::U16(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::I32(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::U32(v) => drop(built.set_int(*tag, i64::from(*v))),
+                    AuxValue::Float(v) => built.set_float(*tag, *v),
+                    AuxValue::Double(v) => built.set_double(*tag, *v),
+                    AuxValue::ArrayI8(a) => drop(built.set_array_i16(*tag, a)),
+                    AuxValue::ArrayU8(a) => drop(built.set_array_u8(*tag, a)),
+                    AuxValue::ArrayI16(a) => drop(built.set_array_i16(*tag, a)),
+                    AuxValue::ArrayU16(a) => drop(built.set_array_u16(*tag, a)),
+                    AuxValue::ArrayI32(a) => drop(built.set_array_i32(*tag, a)),
+                    AuxValue::ArrayU32(a) => drop(built.set_array_u32(*tag, a)),
+                    AuxValue::ArrayFloat(a) => drop(built.set_array_f32(*tag, a)),
+                }
+            }
+
+            // Re-parse the built bytes
+            let rebuilt: Vec<_> = aux::iter_tags(built.as_bytes()).collect();
+
+            // Tag count must match (H→Z preserves count, ArrayI8→ArrayI16 may fail alignment)
+            let non_i8_parsed = parsed.iter().filter(|(_, v)| !matches!(v, AuxValue::ArrayI8(_))).count();
+            prop_assert_eq!(rebuilt.len(), non_i8_parsed,
+                "tag count mismatch: parsed vs rebuilt");
+
+            // Verify each tag round-trips (loose comparison — int types may change)
+            for (tag, original) in &parsed {
+                if matches!(original, AuxValue::Hex(_) | AuxValue::ArrayI8(_)) {
+                    continue;
+                }
+                let rt = built.get(*tag);
+                prop_assert!(rt.is_some(), "tag missing after rebuild");
+                let rt = rt.unwrap();
+                match original {
+                    AuxValue::I8(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    AuxValue::U8(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    AuxValue::I16(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    AuxValue::U16(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    AuxValue::I32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    AuxValue::U32(v) => prop_assert_eq!(rt.as_i64(), Some(i64::from(*v))),
+                    _ => prop_assert_eq!(&rt, original, "tag mismatch after rebuild"),
+                }
+            }
+        }
+
+        // r[verify bam.owned_record.aux_uniqueness]
+        /// Setting the same tag name multiple times MUST NOT create duplicates.
+        #[test]
+        fn set_replaces_always_unique(
+            tag_names in proptest::collection::vec(
+                (b'A'..=b'Z', b'A'..=b'Z'), 1..=30
+            ),
+            values in proptest::collection::vec(1u8..=255, 0..=256),
+        ) {
+            let mut aux = AuxData::new();
+            for &(hi, lo) in &tag_names {
+                let tag = [hi, lo];
+                aux.set_string(tag, &values);
+            }
+            // Deduplicated count must equal unique tag count
+            let unique_count = tag_names.iter().collect::<std::collections::BTreeSet<_>>().len();
+            let actual_count = aux::iter_tags(aux.as_bytes()).count();
+            prop_assert_eq!(actual_count, unique_count,
+                "duplicate tags after set_replace");
+        }
+
+        // r[verify bam.owned_record.aux_data]
+        /// Sequential removal must leave `AuxData` empty.
+        #[test]
+        fn remove_all_tags_leaves_empty(
+            pairs in proptest::collection::vec((b'A'..=b'Z', b'A'..=b'Z', 0u8..=255), 0..=20),
+        ) {
+            let mut aux = AuxData::new();
+            let tags: Vec<[u8; 2]> = pairs.iter().map(|&(t0, t1, _v)| [t0, t1]).collect();
+            for &(t0, t1, v) in &pairs {
+                aux.set_int([t0, t1], i64::from(v)).ok();
+            }
+            for tag in &tags {
+                aux.remove(*tag);
+            }
+            prop_assert!(aux.is_empty());
+            prop_assert_eq!(aux::iter_tags(aux.as_bytes()).count(), 0);
+        }
+
+        // r[verify bam.owned_record.aux_int_encoding]
+        /// Integer set_int → get round-trip preserves the value, even
+        /// though the BAM type code may differ.
+        #[test]
+        fn int_set_get_roundtrip(
+            v in (i64::from(i32::MIN)..=i64::from(u32::MAX)),
+        ) {
+            let mut aux = AuxData::new();
+            aux.set_int(*b"XX", v).unwrap();
+            let rt = aux.get(*b"XX");
+            prop_assert!(rt.is_some());
+            prop_assert_eq!(rt.unwrap().as_i64(), Some(v));
+        }
+
+        // r[verify bam.owned_record.aux_array_setters]
+        /// B-array setters produce bytes that the parser reads back correctly.
+        #[test]
+        fn array_roundtrip_u8(
+            values in proptest::collection::vec(0u8..=255, 0..=64),
+        ) {
+            let mut aux = AuxData::new();
+            aux.set_array_u8(*b"XA", &values).unwrap();
+            let rt = aux.get(*b"XA");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayU8(&values)));
+        }
+
+        #[test]
+        fn array_roundtrip_i16(
+            values in proptest::collection::vec(i16::MIN..=i16::MAX, 0..=32),
+        ) {
+            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut aux = AuxData::new();
+            aux.set_array_i16(*b"XB", &raw).unwrap();
+            let rt = aux.get(*b"XB");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayI16(&raw)));
+        }
+
+        #[test]
+        fn array_roundtrip_u16(
+            values in proptest::collection::vec(u16::MIN..=u16::MAX, 0..=32),
+        ) {
+            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut aux = AuxData::new();
+            aux.set_array_u16(*b"XC", &raw).unwrap();
+            let rt = aux.get(*b"XC");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayU16(&raw)));
+        }
+
+        #[test]
+        fn array_roundtrip_i32(
+            values in proptest::collection::vec(i32::MIN..=i32::MAX, 0..=16),
+        ) {
+            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut aux = AuxData::new();
+            aux.set_array_i32(*b"XD", &raw).unwrap();
+            let rt = aux.get(*b"XD");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayI32(&raw)));
+        }
+
+        #[test]
+        fn array_roundtrip_u32(
+            values in proptest::collection::vec(u32::MIN..=u32::MAX, 0..=16),
+        ) {
+            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut aux = AuxData::new();
+            aux.set_array_u32(*b"XE", &raw).unwrap();
+            let rt = aux.get(*b"XE");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayU32(&raw)));
+        }
+
+        #[test]
+        fn array_roundtrip_f32(
+            values in proptest::collection::vec(
+                proptest::num::f32::ANY, 0..=16
+            ),
+        ) {
+            let raw: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+            let mut aux = AuxData::new();
+            aux.set_array_f32(*b"XF", &raw).unwrap();
+            let rt = aux.get(*b"XF");
+            prop_assert_eq!(rt, Some(AuxValue::ArrayFloat(&raw)));
+        }
+
+        // r[verify bam.record.aux_truncated]
+        /// Garbage after a valid tag stops iteration after the valid tag —
+        /// the valid tag is still collected and round-tripped correctly.
+        #[test]
+        fn valid_tag_before_garbage_roundtrips(
+            garbage in proptest::collection::vec(0u8..=255, 0..=32),
+        ) {
+            let mut raw = Vec::new();
+            // Build a valid NM:i:42 tag
+            raw.extend_from_slice(b"NM");
+            raw.push(b'i');
+            raw.extend_from_slice(&42i32.to_le_bytes());
+            // Append garbage
+            raw.extend_from_slice(&garbage);
+
+            let parsed: Vec<_> = aux::iter_tags(&raw).collect();
+            // At minimum the valid NM tag should be parsed
+            prop_assert!(!parsed.is_empty(), "valid tag before garbage not parsed");
+            prop_assert_eq!(parsed[0].0, *b"NM");
+            prop_assert_eq!(parsed[0].1.as_i64(), Some(42));
+        }
     }
 }

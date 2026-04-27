@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 3799f96d16d2146f4c6fde28df84b7071de8fe3d1260f1724a646ed42a45801a # shrinks to tag_names = [(0, 0), (0, 0)], values = [0, 0, 0, 0]
