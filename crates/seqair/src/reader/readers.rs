@@ -2,6 +2,7 @@ use super::{
     ReaderError,
     indexed::IndexedReader,
     resolve::{ResolveTid, Tid},
+    segment::{IntoSegmentTarget, Segment, SegmentOptions, Segments},
 };
 use crate::{
     bam::{
@@ -11,7 +12,7 @@ use crate::{
     },
     fasta::{FastaError, IndexedFastaReader},
 };
-use seqair_types::{Base, Pos0, RegionString, SmolStr};
+use seqair_types::{Base, Pos0, RegionString};
 use std::path::Path;
 use std::rc::Rc;
 use tracing::instrument;
@@ -32,44 +33,55 @@ use tracing::instrument;
 ///
 /// # Quick start: pileup at a genomic region
 ///
+/// `pileup()` only takes a [`Segment`], which you obtain from
+/// [`segments`](Self::segments). Pick a `max_len` that bounds the per-tile
+/// memory footprint, iterate the plan, and pile up each segment.
+///
 /// ```no_run
-/// use seqair::reader::Readers;
+/// use seqair::reader::{Readers, SegmentOptions};
 /// use seqair::bam::pileup::PileupOp;
+/// use seqair_types::RegionString;
+/// use std::num::NonZeroU32;
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Open BAM + FASTA — auto-detects BAM/SAM/CRAM
 /// let mut readers = Readers::open(Path::new("sample.bam"), Path::new("reference.fa"))?;
 ///
-/// // Resolve "chr19:6_100_000-6_200_000" against the header.
-/// let region = "chr19:6100000-6200000".parse()?;
-/// let (tid, start, end) = readers.resolve_region(&region)?;
+/// // 100 kb tiles, no overlap.
+/// let opts = SegmentOptions::new(NonZeroU32::new(100_000).unwrap());
 ///
-/// // `pileup()` fetches records AND the reference sequence for the region.
-/// let mut pileup = readers.pileup(tid, start, end)?;
+/// // Plan a pileup over a parsed region. The iterator borrows `&self` only.
+/// let region: RegionString = "chr19:6100000-6200000".parse()?;
+/// let plan: Vec<_> = readers.segments(&region, opts)?.collect();
 ///
-/// while let Some(column) = pileup.pileups() {
-///     let _pos      = column.pos();
-///     let _ref_base = column.reference_base();
-///     let _depth    = column.depth();
+/// for segment in &plan {
+///     // `pileup()` fetches records AND the reference sequence for the segment.
+///     let mut pileup = readers.pileup(segment)?;
 ///
-///     for aln in column.alignments() {
-///         match &aln.op {
-///             PileupOp::Match { base, qual, .. } => { let _ = (base, qual); }
-///             PileupOp::Insertion { base, qual, insert_len, .. } => {
-///                 let _ = (base, qual, insert_len);
+///     while let Some(column) = pileup.pileups() {
+///         let _pos      = column.pos();
+///         let _ref_base = column.reference_base();
+///         let _depth    = column.depth();
+///
+///         for aln in column.alignments() {
+///             match &aln.op {
+///                 PileupOp::Match { base, qual, .. } => { let _ = (base, qual); }
+///                 PileupOp::Insertion { base, qual, insert_len, .. } => {
+///                     let _ = (base, qual, insert_len);
+///                 }
+///                 PileupOp::Deletion { del_len } => { let _ = del_len; }
+///                 PileupOp::ComplexIndel { del_len, insert_len, .. } => {
+///                     let _ = (del_len, insert_len);
+///                 }
+///                 PileupOp::RefSkip => {}
 ///             }
-///             PileupOp::Deletion { del_len } => { let _ = del_len; }
-///             PileupOp::ComplexIndel { del_len, insert_len, .. } => {
-///                 let _ = (del_len, insert_len);
-///             }
-///             PileupOp::RefSkip => {}
 ///         }
 ///     }
-/// }
 ///
-/// // Return the RecordStore to Readers for reuse on the next region
-/// readers.recover_store(&mut pileup);
+///     // Return the RecordStore to Readers for reuse on the next segment
+///     readers.recover_store(&mut pileup);
+/// }
 /// # Ok(())
 /// # }
 /// ```
@@ -77,25 +89,28 @@ use tracing::instrument;
 /// # Multi-threaded pileup
 ///
 /// [`fork`](Readers::fork) gives each thread a fresh file handle while sharing
-/// the parsed index and header via `Arc` — no locking, no re-parsing.
+/// the parsed index and header via `Arc` — no locking, no re-parsing. Build
+/// the segment plan once on the orchestrator, then ship segments to workers.
 ///
 /// ```no_run
-/// # use seqair::reader::Readers;
-/// # use seqair_types::Pos0;
+/// # use seqair::reader::{Readers, SegmentOptions};
+/// # use std::num::NonZeroU32;
 /// # use std::path::Path;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let readers = Readers::open(Path::new("sample.bam"), Path::new("ref.fa"))?;
+/// let opts = SegmentOptions::new(NonZeroU32::new(100_000).unwrap());
+/// let segments: Vec<_> = readers.segments("chr1", opts)?.collect();
 ///
 /// std::thread::scope(|s| {
-///     for _ in 0..4 {
+///     for chunk in segments.chunks(segments.len().max(1).div_ceil(4)) {
 ///         let mut forked = readers.fork().unwrap();
+///         let chunk = chunk.to_vec();
 ///         s.spawn(move || {
-///             let mut pileup = forked.pileup(
-///                 0u32,
-///                 Pos0::new(0).unwrap(),
-///                 Pos0::new(100_000).unwrap(),
-///             ).unwrap();
-///             while let Some(_col) = pileup.pileups() { /* process */ }
+///             for seg in &chunk {
+///                 let mut pileup = forked.pileup(seg).unwrap();
+///                 while let Some(_col) = pileup.pileups() { /* process */ }
+///                 forked.recover_store(&mut pileup);
+///             }
 ///         });
 ///     }
 /// });
@@ -222,30 +237,64 @@ impl<E: CustomizeRecordStore> Readers<E> {
         Ok((tid, start_pos0, end_pos0))
     }
 
+    // r[impl unified.readers_segments]
+    /// Plan a pileup pass: produce an iterator of [`Segment`]s covering
+    /// `target` according to `opts`.
+    ///
+    /// `target` is anything that implements [`IntoSegmentTarget`] — a contig
+    /// name (`&str`), a pre-resolved [`Tid`], a parsed [`RegionString`], an
+    /// explicit `(resolver, start, end)` tuple, or `()` for a whole-genome
+    /// scan. Each yielded `Segment` is at most `opts.max_len()` bases long
+    /// and carries the requested overlap with neighbors.
+    ///
+    /// The returned iterator borrows `&self` only — feed each segment to
+    /// [`pileup`](Self::pileup) which needs `&mut self`.
+    ///
+    /// ```no_run
+    /// # use seqair::reader::{Readers, SegmentOptions};
+    /// # use std::num::NonZeroU32;
+    /// # use std::path::Path;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut readers = Readers::open(Path::new("sample.bam"), Path::new("ref.fa"))?;
+    /// let opts = SegmentOptions::new(NonZeroU32::new(100_000).unwrap()).with_overlap(200)?;
+    /// let plan: Vec<_> = readers.segments("chr19", opts)?.collect();
+    /// for seg in plan {
+    ///     let mut p = readers.pileup(&seg)?;
+    ///     while let Some(_col) = p.pileups() { /* ... */ }
+    ///     readers.recover_store(&mut p);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn segments(
+        &self,
+        target: impl IntoSegmentTarget,
+        opts: SegmentOptions,
+    ) -> Result<Segments, ReaderError> {
+        let ranges = super::segment::resolve_target(target, self.header())?;
+        Ok(Segments::new(ranges, opts))
+    }
+
     // r[impl unified.readers_pileup]
-    /// Fetch records for a region and return a [`PileupEngine`] ready for iteration.
+    /// Fetch records and reference sequence for `segment`, returning a
+    /// [`PileupEngine`] ready for iteration.
     ///
-    /// Accepts any [`ResolveTid`] value (a `u32`, a contig name `&str`, or a
-    /// pre-resolved [`Tid`]). Always fetches the reference sequence for
-    /// `[start, end]` and attaches it to the engine, so [`PileupColumn::reference_base`]
-    /// returns real bases instead of `Unknown`.
+    /// `segment` must come from [`segments`](Self::segments) — there is no
+    /// other way to construct one. The segment's `tid`, `start`, `end`, and
+    /// `contig` name are used directly; no header lookup happens here.
     ///
-    /// When `E != ()`, the extras provider is run once per record after the
-    /// records are loaded, before the engine is constructed.
+    /// When `E != ()`, the extras provider runs once per record at fetch
+    /// time, before the engine is constructed.
     ///
-    /// Uses an internal [`RecordStore`] whose capacity is retained across calls.
-    /// After iterating the engine, call [`recover_store`](Self::recover_store) to
-    /// return the store for reuse. If not called, the next `pileup()` call
-    /// allocates a fresh store (small perf hit, not a correctness issue).
+    /// Uses an internal [`RecordStore`] whose capacity is retained across
+    /// calls. After iterating the engine, call
+    /// [`recover_store`](Self::recover_store) to return the store for reuse.
     ///
     /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
-    pub fn pileup(
-        &mut self,
-        tid: impl ResolveTid,
-        start: Pos0,
-        end: Pos0,
-    ) -> Result<PileupEngine<E::Extra>, ReaderError> {
-        let tid = tid.resolve_tid(self.header())?;
+    pub fn pileup(&mut self, segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError> {
+        let tid = segment.tid();
+        let start = segment.start();
+        let end = segment.end();
 
         // Split borrows: fetch writes into `store` while customize is consulted
         // for keep_record. Three disjoint &mut borrows of self.
@@ -254,20 +303,12 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let customize = &mut self.customize;
         alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
 
-        let contig = self
-            .header()
-            .target_name(tid.as_u32())
-            .ok_or_else(|| super::resolve::TidError::TidOutOfRange {
-                tid: tid.as_u32(),
-                n_targets: u32::try_from(self.header().target_count()).unwrap_or(u32::MAX),
-            })?
-            .to_owned();
         // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop),
         // so stop = end + 1; clamp at i32::MAX.
         let stop =
             end.checked_add_offset(seqair_types::Offset::new(1)).unwrap_or_else(Pos0::max_value);
-        let contig_name: SmolStr = contig.into();
-        self.fasta.fetch_seq_into(&contig_name, start, stop, &mut self.fasta_buf).map_err(
+        let contig_name = segment.contig();
+        self.fasta.fetch_seq_into(contig_name, start, stop, &mut self.fasta_buf).map_err(
             |source| ReaderError::FastaFetch {
                 contig: contig_name.clone(),
                 start: u32::try_from(start.as_i64().max(0)).unwrap_or(0),

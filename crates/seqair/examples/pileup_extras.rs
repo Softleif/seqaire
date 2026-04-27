@@ -18,20 +18,22 @@
 //!    computes one `Extra` value per record (and optionally filters records
 //!    via `keep_record`).
 //! 2. Open the readers with `Readers::open_customized(bam, fasta, customize)`.
-//! 3. Resolve the region string against the header with `readers.resolve_region`.
-//! 4. Call `readers.pileup(tid, start, end)` — this fetches records (running
-//!    `keep_record` at push time), then `compute` once per kept record,
-//!    fetches the reference sequence, and returns a `PileupEngine<E::Extra>`
-//!    ready for iteration.
+//! 3. Plan the pass with `readers.segments(target, opts)` — pick a `max_len`
+//!    that bounds memory per tile.
+//! 4. For each [`Segment`], call `readers.pileup(&segment)` — this fetches
+//!    records (running `keep_record` at push time), then `compute` once per
+//!    kept record, fetches the reference sequence, and returns a
+//!    `PileupEngine<E::Extra>` ready for iteration.
 //! 5. Iterate with `while let Some(col) = engine.pileups()`. Each alignment
 //!    view exposes `aln.extra()` alongside the usual fields.
 
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
-use seqair::reader::Readers;
+use seqair::reader::{Readers, SegmentOptions};
 use seqair_types::RegionString;
 use seqair_types::SmolStr;
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 
 /// seqair pileup-extras — demonstrate per-record extras in pileup
@@ -96,73 +98,79 @@ fn main() -> anyhow::Result<()> {
     let mut readers = Readers::open_customized(&args.input, &args.reference, ReadInfoBuilder)
         .context("could not open BAM + FASTA")?;
 
-    // Resolve region string against the header — fills in default start/end
-    // when missing and validates the contig name.
-    let (tid, start, end) = readers.resolve_region(&args.region)?;
-
-    // Unmapped/secondary records are already dropped at push time by
-    // `ReadInfoBuilder::keep_record`, so the pileup engine never sees them.
+    // Tile the requested region into 100 kb segments. Unmapped/secondary
+    // records are already dropped at push time by `ReadInfoBuilder::keep_record`,
+    // so the pileup engine never sees them.
     let min_mapq = args.min_mapq;
-    let mut engine = readers.pileup(tid, start, end).context("could not build pileup")?;
+    let max_len = NonZeroU32::new(100_000).expect("non-zero literal");
+    let plan: Vec<_> = readers.segments(&args.region, SegmentOptions::new(max_len))?.collect();
 
     eprintln!(
-        "Loaded pileup for {region} ({start}..={end})",
+        "Loaded pileup for {region} as {n} segment(s)",
+        n = plan.len(),
         region = args.region.chromosome,
-        start = *start,
-        end = *end,
     );
 
     println!("pos\tdepth\tref\tread_groups\tmean_aligned_frac");
 
-    while let Some(column) = engine.pileups() {
-        let depth = column.depth();
-        if depth == 0 {
-            continue;
-        }
+    for segment in &plan {
+        let mut engine = readers.pileup(segment).context("could not build pileup")?;
+        let core = segment.core_range();
 
-        let mut rg_counts: Vec<(&str, u32)> = Vec::new();
-        let mut aligned_sum = 0.0;
-        let mut counted = 0u32;
-
-        for aln in column.alignments() {
-            if aln.mapq < min_mapq {
+        while let Some(column) = engine.pileups() {
+            // Skip overlap regions so neighboring segments don't double-print.
+            if !core.contains(&column.pos()) {
+                continue;
+            }
+            let depth = column.depth();
+            if depth == 0 {
                 continue;
             }
 
-            // Access per-record extras via the alignment view.
-            let info = aln.extra();
+            let mut rg_counts: Vec<(&str, u32)> = Vec::new();
+            let mut aligned_sum = 0.0;
+            let mut counted = 0u32;
 
-            aligned_sum += info.aligned_fraction;
-            counted += 1;
+            for aln in column.alignments() {
+                if aln.mapq < min_mapq {
+                    continue;
+                }
 
-            // Tally read groups.
-            let rg = info.read_group.as_deref().unwrap_or(".");
-            if let Some(entry) = rg_counts.iter_mut().find(|(name, _)| *name == rg) {
-                entry.1 += 1;
-            } else {
-                rg_counts.push((rg, 1));
+                // Access per-record extras via the alignment view.
+                let info = aln.extra();
+
+                aligned_sum += info.aligned_fraction;
+                counted += 1;
+
+                // Tally read groups.
+                let rg = info.read_group.as_deref().unwrap_or(".");
+                if let Some(entry) = rg_counts.iter_mut().find(|(name, _)| *name == rg) {
+                    entry.1 += 1;
+                } else {
+                    rg_counts.push((rg, 1));
+                }
             }
+
+            if counted == 0 {
+                continue;
+            }
+
+            // Format read group summary: "RG1:5,RG2:3" or ".:10"
+            rg_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
+            let rg_summary: Vec<String> =
+                rg_counts.iter().map(|(name, count)| format!("{name}:{count}")).collect();
+
+            println!(
+                "{pos}\t{depth}\t{ref_base}\t{rgs}\t{mean:.3}",
+                pos = *column.pos() + 1,
+                ref_base = column.reference_base() as u8 as char,
+                rgs = rg_summary.join(","),
+                mean = aligned_sum / counted as f64,
+            );
         }
 
-        if counted == 0 {
-            continue;
-        }
-
-        // Format read group summary: "RG1:5,RG2:3" or ".:10"
-        rg_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
-        let rg_summary: Vec<String> =
-            rg_counts.iter().map(|(name, count)| format!("{name}:{count}")).collect();
-
-        println!(
-            "{pos}\t{depth}\t{ref_base}\t{rgs}\t{mean:.3}",
-            pos = *column.pos() + 1,
-            ref_base = column.reference_base() as u8 as char,
-            rgs = rg_summary.join(","),
-            mean = aligned_sum / counted as f64,
-        );
+        readers.recover_store(&mut engine);
     }
-
-    readers.recover_store(&mut engine);
 
     Ok(())
 }
