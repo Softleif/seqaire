@@ -387,9 +387,9 @@ fn pileup_e2e(c: &mut Criterion) {
                 total_depth += u64::from(p.depth());
                 columns += 1;
                 p.alignments().for_each(|aln| {
-                    if let Some(b) = aln.record_view().seq().get(p.pos() as usize).map(Base::from) {
-                        counter.count(b)
-                    }
+                    let Some(qpos) = aln.qpos() else { return };
+                    let record = aln.record();
+                    counter.count(Base::from(record.seq()[qpos]))
                 });
             }
             black_box((columns, total_depth, counter))

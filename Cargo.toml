@@ -8,9 +8,9 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
 thiserror = "2.0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
-insta = { version = "1.46.3", features = ["filters"] }
+insta = { version = "1.47.2", features = ["filters"] }
 proptest = "1.11.0"
-rust-htslib = { version = "1.0.0", git = "https://github.com/Softleif/rust-htslib", default-features = false }
+rust-htslib = { version = "1.0.0", default-features = false }
 
 [workspace.lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = [
