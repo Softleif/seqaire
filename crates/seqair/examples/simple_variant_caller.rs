@@ -29,7 +29,7 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::pileup::PileupOp;
-use seqair::reader::Readers;
+use seqair::reader::{Readers, SegmentOptions};
 use seqair::vcf::{
     Alleles, FormatGt, FormatInt, Genotype, InfoInt, Number, OutputFormat, ValueType,
     VcfHeaderBuilder, Writer,
@@ -206,72 +206,88 @@ fn main() -> anyhow::Result<()> {
     let end_pos = Pos0::new(end).context("invalid end position")?;
     let min_mapq = args.min_mapq;
 
-    let mut pileup = readers.pileup(tid, start_pos, end_pos)?;
+    // Tile the requested region into 100 kb segments. This example processes
+    // them sequentially; a real caller would parallelize across forks.
+    let max_len = std::num::NonZeroU32::new(100_000).expect("non-zero literal");
+    let opts = SegmentOptions::new(max_len);
+    let plan: Vec<_> = readers.segments((tid, start_pos, end_pos), opts)?.collect();
     let mut n_calls = 0u32;
 
-    while let Some(column) = pileup.pileups() {
-        let ref_base = column.reference_base();
-        // Skip positions where the reference is unknown (N).
-        if ref_base == Base::Unknown {
-            continue;
-        }
+    for segment in &plan {
+        let mut pileup = readers.pileup(segment)?;
 
-        // Count bases, filtering by mapping quality.
-        let mut bc = BaseCounts::new();
-        for aln in column.alignments() {
-            if aln.mapq < min_mapq {
+        while let Some(column) = pileup.pileups() {
+            // Restrict emission to the segment's "owned" core range so that
+            // adjacent overlapping segments don't double-call the same site.
+            let core = segment.core_range();
+            if !core.contains(&column.pos()) {
                 continue;
             }
-            if let PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } = &aln.op {
-                bc.add(*base);
+            let ref_base = column.reference_base();
+            // Skip positions where the reference is unknown (N).
+            if ref_base == Base::Unknown {
+                continue;
             }
+
+            // Count bases, filtering by mapping quality.
+            let mut bc = BaseCounts::new();
+            for aln in column.alignments() {
+                if aln.mapq < min_mapq {
+                    continue;
+                }
+                if let PileupOp::Match { base, .. } | PileupOp::Insertion { base, .. } = &aln.op {
+                    bc.add(*base);
+                }
+            }
+
+            // Apply depth threshold.
+            if bc.total < args.min_depth as i32 {
+                continue;
+            }
+
+            // Find the best alt allele.
+            let Some((alt_base, alt_count)) = bc.best_alt(ref_base) else {
+                continue;
+            };
+            let af = alt_count as f64 / bc.total as f64;
+            if af < args.min_af {
+                continue;
+            }
+
+            // Convert 0-based pileup position to 1-based VCF position.
+            let pos1 = Pos1::new(*column.pos() + 1).context("position overflow")?;
+
+            // Build alleles — seqair enforces ref != alt at construction time.
+            let alleles = Alleles::snv(ref_base, alt_base)?;
+
+            // Encode through the typestate chain:
+            //   begin_record → filter_pass (INFO) → begin_samples (FORMAT) → emit
+            let enc =
+                vcf_writer.begin_record(&from_bam.contigs[tid as usize], pos1, &alleles, None)?;
+            let mut enc = enc.filter_pass();
+            dp_info.encode(&mut enc, bc.total);
+            af_info.encode(&mut enc, &[af as f32]);
+            let mut enc = enc.begin_samples();
+
+            // Simple genotype: 0/1 (het) if AF < 0.8, 1/1 (hom-alt) otherwise.
+            let ref_count = bc.counts[ref_base.known_index().unwrap_or(0)];
+            let gt = if af >= 0.8 { Genotype::unphased(1, 1) } else { Genotype::unphased(0, 1) };
+            gt_fmt.encode(&mut enc, &[gt])?;
+            dp_fmt.encode(&mut enc, &[bc.total])?;
+
+            // AD: ref depth, alt depth — but we only registered DP and GT here,
+            // so we skip AD to keep the example focused.
+            _ = ref_count;
+
+            enc.emit()?;
+            n_calls += 1;
         }
 
-        // Apply depth threshold.
-        if bc.total < args.min_depth as i32 {
-            continue;
-        }
-
-        // Find the best alt allele.
-        let Some((alt_base, alt_count)) = bc.best_alt(ref_base) else {
-            continue;
-        };
-        let af = alt_count as f64 / bc.total as f64;
-        if af < args.min_af {
-            continue;
-        }
-
-        // Convert 0-based pileup position to 1-based VCF position.
-        let pos1 = Pos1::new(*column.pos() + 1).context("position overflow")?;
-
-        // Build alleles — seqair enforces ref != alt at construction time.
-        let alleles = Alleles::snv(ref_base, alt_base)?;
-
-        // Encode through the typestate chain:
-        //   begin_record → filter_pass (INFO) → begin_samples (FORMAT) → emit
-        let enc = vcf_writer.begin_record(&from_bam.contigs[tid as usize], pos1, &alleles, None)?;
-        let mut enc = enc.filter_pass();
-        dp_info.encode(&mut enc, bc.total);
-        af_info.encode(&mut enc, &[af as f32]);
-        let mut enc = enc.begin_samples();
-
-        // Simple genotype: 0/1 (het) if AF < 0.8, 1/1 (hom-alt) otherwise.
-        let ref_count = bc.counts[ref_base.known_index().unwrap_or(0)];
-        let gt = if af >= 0.8 { Genotype::unphased(1, 1) } else { Genotype::unphased(0, 1) };
-        gt_fmt.encode(&mut enc, &[gt])?;
-        dp_fmt.encode(&mut enc, &[bc.total])?;
-
-        // AD: ref depth, alt depth — but we only registered DP and GT here,
-        // so we skip AD to keep the example focused.
-        _ = ref_count;
-
-        enc.emit()?;
-        n_calls += 1;
+        readers.recover_store(&mut pileup);
     }
 
     vcf_writer.finish()?;
     output.flush()?;
-    readers.recover_store(&mut pileup);
 
     eprintln!(
         "called {n_calls} SNV(s) in {contig_name}:{start}-{end} (min_depth={}, min_af={:.2})",

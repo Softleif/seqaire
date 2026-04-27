@@ -11,6 +11,7 @@ mod formats;
 mod indexed;
 mod readers;
 mod resolve;
+mod segment;
 
 #[cfg(feature = "fuzz")]
 mod fuzz;
@@ -19,6 +20,7 @@ pub use formats::FormatDetectionError;
 pub use indexed::{FetchCounts, IndexedReader};
 pub use readers::Readers;
 pub use resolve::{ResolveTid, Tid, TidError};
+pub use segment::{IntoSegmentTarget, Segment, SegmentOptions, SegmentOptionsError, Segments};
 
 #[cfg(feature = "fuzz")]
 pub use fuzz::FuzzReaders;
@@ -74,4 +76,7 @@ pub enum ReaderError {
 
     #[error("region end {end} exceeds i32::MAX; not representable as Pos0")]
     RegionEndTooLarge { end: u64 },
+
+    #[error("region start {start} > end {end} on contig '{contig}'")]
+    RegionStartAfterEnd { contig: SmolStr, start: u64, end: u64 },
 }
