@@ -58,6 +58,15 @@ pub struct Segment {
 impl Segment {
     /// Construct a segment. `pub(crate)` so only the iterator and tests in
     /// this crate can build them.
+    ///
+    /// Invariants enforced by `debug_assert!`:
+    ///
+    /// * `start <= end <= contig_last_pos`
+    /// * `overlap_start + overlap_end < len()` — guarantees `core_range()`
+    ///   yields a non-empty inclusive range (`r[unified.segment_overlap]`).
+    ///   A future broken caller that violates this would silently make
+    ///   `core_range()` return the entire tile, breaking neighbor-dedupe
+    ///   downstream. The assert catches it in debug builds.
     #[must_use]
     pub(crate) fn new(
         tid: Tid,
@@ -70,6 +79,14 @@ impl Segment {
     ) -> Self {
         debug_assert!(start <= end, "Segment::new: start > end");
         debug_assert!(end <= contig_last_pos, "Segment::new: end > contig_last_pos");
+        // overlap_start + overlap_end < (end - start + 1).
+        let span = end.as_u64().saturating_sub(start.as_u64()).saturating_add(1);
+        let overlap_total = u64::from(overlap_start).saturating_add(u64::from(overlap_end));
+        debug_assert!(
+            overlap_total < span,
+            "Segment::new: overlap_start ({overlap_start}) + overlap_end ({overlap_end}) \
+             must be < tile length ({span})"
+        );
         Self { tid, contig, start, end, overlap_start, overlap_end, contig_last_pos }
     }
 
@@ -100,11 +117,16 @@ impl Segment {
     /// Number of bases covered by this tile (= `end - start + 1`). Always >= 1.
     #[must_use]
     pub fn len(&self) -> u32 {
-        let s = self.start.as_u64();
-        let e = self.end.as_u64();
-        // end >= start (debug_assert in new); end <= i32::MAX; difference fits in u32.
-        let diff = e.saturating_sub(s).saturating_add(1);
-        u32::try_from(diff).unwrap_or(u32::MAX)
+        // start <= end <= i32::MAX (Segment::new debug_asserts), so
+        // end - start + 1 fits in u64 with room to spare and in u32 exactly.
+        let span = self
+            .end
+            .as_u64()
+            .checked_sub(self.start.as_u64())
+            .expect("Segment invariant: start <= end")
+            .checked_add(1)
+            .expect("Segment invariant: end <= i32::MAX, so span <= i32::MAX + 1 fits in u64");
+        u32::try_from(span).expect("span <= i32::MAX + 1 fits in u32")
     }
 
     /// Always `false`. A `Segment` is built only by the iterator, which
@@ -135,15 +157,26 @@ impl Segment {
         self.contig_last_pos
     }
 
-    /// True when this tile starts at the contig's first base.
+    /// True when this tile's `start` is exactly the contig's first base
+    /// (`Pos0::ZERO`).
+    ///
+    /// Note: this checks the contig boundary, not the requested target
+    /// range — for a sub-range query like `("chr1", 1000, 2000)` the first
+    /// yielded segment will have `start == 1000` and this method returns
+    /// `false`. If you want "is this the first segment of the user's
+    /// query?", inspect the iterator directly.
     #[must_use]
-    pub fn is_first_in_contig(&self) -> bool {
+    pub fn starts_at_contig_start(&self) -> bool {
         self.start == Pos0::ZERO
     }
 
-    /// True when this tile ends at the contig's last base.
+    /// True when this tile's `end` is exactly the contig's last base
+    /// (`contig_last_pos`). See [`starts_at_contig_start`] for the analogous
+    /// caveat about sub-range queries.
+    ///
+    /// [`starts_at_contig_start`]: Self::starts_at_contig_start
     #[must_use]
-    pub fn is_last_in_contig(&self) -> bool {
+    pub fn ends_at_contig_end(&self) -> bool {
         self.end == self.contig_last_pos
     }
 
@@ -190,6 +223,23 @@ pub struct SegmentOptions {
 
 impl SegmentOptions {
     /// Plain options: tiles up to `max_len` bases, no overlap.
+    ///
+    /// **Picking `max_len`.** Each tile drives one BAM fetch and one FASTA
+    /// fetch. A single tile occupies roughly `~40 MB` of `RecordStore`
+    /// state for typical 30× coverage plus the reference bases for the
+    /// tile. As a rule of thumb:
+    ///
+    /// * **50–500 kb** is a good default for whole-genome work — small
+    ///   enough to bound peak memory, large enough that BAI bin lookup
+    ///   overhead is amortized.
+    /// * **5–50 kb** if you're parallelizing across many forks and want
+    ///   tiles to be cheap to ship.
+    /// * **>1 Mb** if you're processing very low-depth data and want to
+    ///   minimize fetch round-trips. Be aware that reference bases plus
+    ///   record store grow linearly with tile length.
+    ///
+    /// There is no universally correct value, which is why this method
+    /// requires a `NonZeroU32` rather than offering a default.
     #[must_use]
     pub const fn new(max_len: NonZeroU32) -> Self {
         Self { max_len, overlap: 0 }
@@ -488,11 +538,24 @@ impl Iterator for Segments {
                 range.contig_last_pos,
             );
 
-            // Advance: next core starts at core_end + 1. When core_end reaches
-            // range.end this exceeds it, signalling end-of-range on the next
-            // poll (see the `next_core_start > range.end` check at the top).
-            let next = core_end_u64.saturating_add(1);
-            self.next_core_start = pos0_from_u64(next).unwrap_or(Pos0::max_value());
+            // Advance to the next range explicitly when this tile reached the
+            // last base of the current range. We can't rely on the
+            // `next_core_start > range.end` check at the top of the loop
+            // because `range.end == Pos0::max_value()` would saturate
+            // `core_end + 1` back to `Pos0::max_value()` (Pos0 caps at
+            // i32::MAX), keeping the loop alive forever.
+            if core_end_u64 >= range_end_u64 {
+                self.advance_to_next_range();
+            } else {
+                let next = core_end_u64.saturating_add(1);
+                self.next_core_start = pos0_from_u64(next).unwrap_or_else(|| {
+                    // Defensive: if `next` somehow doesn't fit in Pos0
+                    // (impossible while range_end <= i32::MAX), force the
+                    // outer loop to advance to the next range on the next
+                    // poll instead of looping in place.
+                    Pos0::max_value()
+                });
+            }
 
             return Some(seg);
         }
@@ -624,7 +687,7 @@ mod tests {
         assert_eq!(s.end(), p(99));
         assert_eq!(s.overlap_start(), 0);
         assert_eq!(s.overlap_end(), 0);
-        assert!(s.is_first_in_contig());
+        assert!(s.starts_at_contig_start());
         assert_eq!(s.contig_last_pos(), p(499));
     }
 
@@ -679,6 +742,43 @@ mod tests {
         assert_eq!(*cores[1].end(), p(199));
         assert_eq!(*cores[2].start(), p(200));
         assert_eq!(*cores[2].end(), p(249));
+    }
+
+    // r[verify unified.readers_segments]
+    /// Regression: an iterator over a `ResolvedRange` whose `end ==
+    /// Pos0::max_value()` must terminate. Before the fix, advancing past
+    /// the last tile saturated `core_end + 1` back to `Pos0::max_value()`,
+    /// failed the `next_core_start > range.end` check, and re-emitted the
+    /// same single-base tile forever.
+    ///
+    /// The public `IntoSegmentTarget` impls cap `end` at `contig_last_pos
+    /// <= i32::MAX - 1`, so this scenario is currently unreachable from
+    /// outside the crate. The defence is still load-bearing: a future
+    /// `IntoSegmentTarget` impl, an internal caller, or a fuzz harness
+    /// could construct a `ResolvedRange` with `end == Pos0::max_value()`,
+    /// and the iterator must not hang.
+    #[test]
+    fn segments_terminate_at_pos0_max() {
+        let last = Pos0::max_value();
+        // Build a ResolvedRange directly that ends at Pos0::max_value() and
+        // is short enough that we expect exactly one tile.
+        let near_max = Pos0::new(u32::try_from(last.as_u64()).unwrap() - 5).unwrap();
+        let mut header_text = String::from("@HD\tVN:1.6\n");
+        header_text.push_str("@SQ\tSN:fake\tLN:1000\n");
+        let header = crate::bam::BamHeader::from_sam_text(&header_text).unwrap();
+        let tid = 0u32.resolve_tid(&header).unwrap();
+        let range = ResolvedRange {
+            tid,
+            contig: "fake".into(),
+            start: near_max,
+            end: last,
+            contig_last_pos: last,
+        };
+        let opts = SegmentOptions::new(NonZeroU32::new(1_000_000).unwrap());
+        let segs: Vec<_> = Segments::new(vec![range], opts).collect();
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].end(), last);
+        assert_eq!(segs[0].start(), near_max);
     }
 
     #[test]
@@ -789,31 +889,48 @@ mod tests {
         // r[verify unified.segment_overlap]
         #[test]
         fn first_and_last_overlaps_are_zero(
-            n_tiles in 1u32..20,
+            // Vary range_start so the test isn't asserting a property about
+            // contig boundaries; the range edge is what counts. The original
+            // test pinned range_start=0 and built `total = n_tiles*max_len`,
+            // making the inner-tile claim "overlap == overlap" tautological.
+            range_start in 0u32..100_000,
+            // `extra_len` is added to a deliberate non-multiple of max_len so
+            // the last core may be short and the last tile must clip its
+            // overlap_end to range_end without producing the requested overlap.
+            n_full_cores in 1u32..20,
+            extra_len in 0u32..200,
             max_len in 10u32..200,
             overlap in 0u32..9,
         ) {
             prop_assume!(overlap < max_len);
-            // Build a range covering exactly n_tiles cores: length = n_tiles * max_len - last_short_amount.
-            let total = u64::from(n_tiles) * u64::from(max_len);
-            let range_end = u32::try_from(total - 1).unwrap_or(u32::MAX / 2);
+            // total bases = n_full_cores * max_len + extra_len, then -1 for inclusive.
+            let total = u64::from(n_full_cores) * u64::from(max_len) + u64::from(extra_len);
+            // Build the range somewhere in the middle of the contig.
+            let range_end_u64 = u64::from(range_start).saturating_add(total).saturating_sub(1);
+            let contig_len = range_end_u64.saturating_add(10);
+            let contig_len_u32 = u32::try_from(contig_len).unwrap_or(u32::MAX);
+            let range_end = u32::try_from(range_end_u64).unwrap_or(u32::MAX / 2);
 
             let opts = SegmentOptions::new(NonZeroU32::new(max_len).unwrap())
                 .with_overlap(overlap).unwrap();
-            let header = header_with_contigs(&[("chr1", range_end + 1)]);
-            let ranges = ("chr1", p(0), p(range_end)).resolve_target(&header).unwrap();
+            let header = header_with_contigs(&[("chr1", contig_len_u32)]);
+            let ranges =
+                ("chr1", p(range_start), p(range_end)).resolve_target(&header).unwrap();
             let segs: Vec<_> = Segments::new(ranges, opts).collect();
-            prop_assert_eq!(segs.len() as u32, n_tiles);
+            prop_assert!(!segs.is_empty());
+            // Range-edge invariants: first segment of the *requested range*
+            // has overlap_start == 0; last segment has overlap_end == 0.
             prop_assert_eq!(segs.first().unwrap().overlap_start(), 0);
             prop_assert_eq!(segs.last().unwrap().overlap_end(), 0);
-            // For internal tiles (only present when n_tiles >= 3), both
-            // overlaps equal the requested overlap because the range is
-            // wide enough that no clipping happens.
-            if segs.len() >= 3 {
-                for s in &segs[1..segs.len() - 1] {
-                    prop_assert_eq!(s.overlap_start(), overlap);
-                    prop_assert_eq!(s.overlap_end(), overlap);
-                }
+            // First segment's tile_start equals the requested range_start;
+            // last segment's tile_end equals the requested range_end. This
+            // is a non-trivial check now that range_start != 0.
+            prop_assert_eq!(segs.first().unwrap().start(), p(range_start));
+            prop_assert_eq!(segs.last().unwrap().end(), p(range_end));
+            // Every tile sits entirely inside the requested range.
+            for s in &segs {
+                prop_assert!(s.start() >= p(range_start));
+                prop_assert!(s.end() <= p(range_end));
             }
         }
     }

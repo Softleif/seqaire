@@ -79,4 +79,9 @@ pub enum ReaderError {
 
     #[error("region start {start} > end {end} on contig '{contig}'")]
     RegionStartAfterEnd { contig: SmolStr, start: u64, end: u64 },
+
+    #[error(
+        "segment for contig '{contig}' (tid {expected_tid}) does not match this Readers' header"
+    )]
+    SegmentHeaderMismatch { contig: SmolStr, expected_tid: u32 },
 }

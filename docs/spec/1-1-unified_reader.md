@@ -106,9 +106,6 @@ r[unified.readers_open_customized]
 r[unified.readers_fork]
 `Readers::fork()` MUST fork both the alignment reader and the FASTA reader, returning a new `Readers` with independent I/O handles but shared immutable state (indices, headers). The CRAM fork gets its own FASTA reader via `IndexedFastaReader::fork()`. When `E ≠ ()`, `fork()` MUST clone the customize value into the new `Readers` (the `Clone` bound on `CustomizeRecordStore` guarantees this is cheap).
 
-r[unified.readers_resolve_region]
-`Readers::resolve_region(region: &RegionString) -> Result<(Tid, Pos0, Pos0), ReaderError>` MUST resolve a region string against the reader's header: look up the contig by name, convert 1-based `Pos1` start/end to 0-based `Pos0`, and default missing start to `Pos0(0)` / missing end to the contig's last base (inclusive). An empty contig (length 0) MUST return `ReaderError::EmptyContig`. The returned `Tid` is a validated newtype index (see `r[unified.tid.newtype]`). The inclusive-end convention matches `PileupEngine::region_end`.
-
 r[unified.tid.newtype]
 A validated `Tid(u32)` newtype MUST wrap BAM target ids so downstream code cannot pass an unvalidated `u32`. Construction is only through the `ResolveTid::resolve_tid(header)` method, which MUST be implemented for `u32` (range-check), `&str`/`String`/`SmolStr` (by-name lookup), and `Tid` (passthrough). `ResolveTid::resolve_tid` MUST return a typed `TidError` on failure (unknown contig name or out-of-range `u32`).
 
@@ -135,20 +132,37 @@ chromosome in one call without thinking about tile size.
 > - Expose accessors: `tid() -> Tid`, `contig() -> &SmolStr`,
 >   `start() -> Pos0`, `end() -> Pos0` (inclusive), `len() -> u32`
 >   (= `end - start + 1`), `overlap_start() -> u32`, `overlap_end() -> u32`,
->   `contig_last_pos() -> Pos0`, `is_first_in_contig() -> bool` (true iff
->   `start == Pos0::ZERO`), `is_last_in_contig() -> bool` (true iff
->   `end == contig_last_pos`).
+>   `contig_last_pos() -> Pos0`, `starts_at_contig_start() -> bool` (true
+>   iff `start == Pos0::ZERO`), `ends_at_contig_end() -> bool` (true iff
+>   `end == contig_last_pos`). The "contig" predicates check the contig
+>   boundary, not the requested target range — for a sub-range query the
+>   user's first/last segments do not necessarily satisfy them.
 
 > r[unified.segment_overlap]
 > Overlap fields on `Segment` MUST be expressed as a number of bases shared
 > with neighboring segments and default to 0 when no overlap is requested.
-> The first segment of a contig MUST have `overlap_start == 0`. The last
-> segment of a contig MUST have `overlap_end == 0`. Internal segments MUST
-> carry `overlap_start == overlap_end == requested_overlap`. `Segment` MUST
-> expose `core_range() -> RangeInclusive<Pos0>` returning the inclusive
-> sub-range of `[start, end]` excluding both overlaps — this is the part of
-> the segment a downstream tool should treat as "owned" by this tile when
-> deduplicating against neighbors.
+>
+> Overlap rules apply to the **requested target range**, not the contig:
+> if a caller asks for `("chr1", 1000, 2000)` the iterator MUST NOT extend a
+> segment to position 900 just because there are bases there — the user did
+> not ask for them.
+>
+> - The first segment of every requested target range MUST have
+>   `overlap_start == 0`.
+> - The last segment of every requested target range MUST have
+>   `overlap_end == 0`.
+> - Internal segments (segments where the previous/next core is fully inside
+>   the requested range) MUST carry `overlap_start == overlap_end ==
+>   requested_overlap`.
+> - When a tile's expanded right edge would extend past the requested
+>   range's `end`, the actual `overlap_end` MUST equal the clamped distance
+>   `tile_end - core_end`, which is `< requested_overlap`. Same on the left
+>   for `overlap_start`.
+>
+> `Segment` MUST expose `core_range() -> RangeInclusive<Pos0>` returning the
+> inclusive sub-range of `[start, end]` excluding both overlaps — this is
+> the part of the segment a downstream tool should treat as "owned" by this
+> tile when deduplicating against neighbors.
 
 > r[unified.segment_options]
 > `SegmentOptions` MUST expose:
@@ -164,9 +178,10 @@ chromosome in one call without thinking about tile size.
 > the whole point of forcing a planning step.
 
 > r[unified.into_segment_target]
-> `IntoSegmentTarget` MUST be a trait that resolves a user-supplied target
-> against the header into one or more contig ranges. Implementations MUST be
-> provided for at least:
+> `IntoSegmentTarget` MUST be a **sealed** trait (external crates cannot
+> implement it) that resolves a user-supplied target against the header
+> into one or more contig ranges. Implementations MUST be provided for at
+> least:
 >
 > - `&str` / `String` / `SmolStr` / `Tid` / `u32` — entire contig, half-open
 >   `[0, contig_len)` mapped to inclusive `[Pos0::ZERO, contig_last_pos]`.
@@ -193,8 +208,10 @@ chromosome in one call without thinking about tile size.
 > - Produce tiles of length `<= max_len`, never splitting a tile across
 >   contigs.
 > - Set `overlap_start` / `overlap_end` per `r[unified.segment_overlap]`. The
->   actual `[start, end]` of internal tiles is the core range expanded by
->   `overlap` bases on each side, clamped to `[0, contig_last_pos]`.
+>   actual `[start, end]` of every tile is its core range expanded by
+>   `overlap` bases on each side, clamped to the **requested target range**
+>   (not to the contig). At the requested range's edges this clamping
+>   reduces the corresponding overlap field to 0.
 > - When the remaining contig after a tile's core would be `<= overlap` bases
 >   long, the next tile's core MAY be shorter than `max_len - 2*overlap`; in
 >   the limiting case the last tile of a contig is one tile covering the
@@ -205,8 +222,35 @@ chromosome in one call without thinking about tile size.
 >   `Readers`, so callers can build the plan once and re-acquire `&mut self`
 >   for each `pileup(&segment)` call.
 
-r[unified.readers_pileup]
-`Readers::pileup(segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError>` is the only entry point for driving a pileup. It MUST: (1) call `fetch_into_customized` with `segment.tid().as_u32()`, `segment.start()`, `segment.end()` to load records into the internal `RecordStore<E::Extra>`, passing the customize value through — `compute` and `keep_record` both run inline during push, so rejected records are rolled back with zero slab waste and kept records already have their extras populated; (2) fetch the reference sequence for `[segment.start(), segment.end()]` inclusive via the FASTA reader, using the contig name carried by the segment (no header lookup); (3) take the store (now `RecordStore<E::Extra>` with populated extras) and construct a `PileupEngine<E::Extra>` with the fetched reference sequence pre-attached via `set_reference_seq`. No separate `apply_customize` pass is needed. The returned engine is ready for `pileups()` iteration with no further configuration required. There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting a one-shot region build a `Segment` via `Readers::segments`.
+> r[unified.readers_pileup]
+> `Readers::pileup(segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError>`
+> is the only entry point for driving a pileup. It MUST:
+>
+> 1. **Validate header consistency.** Look up `segment.contig()` against the
+>    current header. If `header.tid(segment.contig().as_str())` does not
+>    return the same numeric tid stored in `segment.tid()`, return
+>    `ReaderError::SegmentHeaderMismatch { contig, expected_tid }`. This
+>    catches the foot-gun where a `Segment` built against one [`Readers`]
+>    is fed to a different [`Readers`] whose header doesn't match.
+> 2. Call `fetch_into_customized` with `segment.tid().as_u32()`,
+>    `segment.start()`, `segment.end()` to load records into the internal
+>    `RecordStore<E::Extra>`, passing the customize value through. `compute`
+>    and `keep_record` both run inline during push: rejected records are
+>    rolled back with zero slab waste and kept records already have their
+>    extras populated.
+> 3. Fetch the reference sequence for `[segment.start(), segment.end()]`
+>    inclusive via the FASTA reader, using the contig name carried by the
+>    segment (no header lookup). The fetch MUST use a u64-bounded path so
+>    `segment.end() == Pos0::max_value()` does not silently truncate the
+>    last base.
+> 4. Take the store (now `RecordStore<E::Extra>` with populated extras) and
+>    construct a `PileupEngine<E::Extra>` with the fetched reference
+>    sequence pre-attached via `set_reference_seq`.
+>
+> No separate `apply_customize` pass is needed. The returned engine is
+> ready for `pileups()` iteration with no further configuration required.
+> There MUST NOT be a `pileup(tid, start, end)` overload — callers wanting
+> a one-shot region build a `Segment` via `Readers::segments`.
 
 r[unified.fetch_into_customized]
 Each format reader (`IndexedBamReader`, `IndexedSamReader`, `IndexedCramReader`, and the format-agnostic `IndexedReader`) MUST expose `fetch_into_customized<E: CustomizeRecordStore>(tid, start, end, store, customize) -> Result<FetchCounts>` in addition to `fetch_into`. The reader MUST forward `customize` to `RecordStore::push_raw`/`push_fields` so its `keep_record` runs at push time. `FetchCounts { fetched, kept }` reports records produced by the reader's built-in overlap/unmapped checks (`fetched`) vs those that also passed `keep_record` (`kept`). Existing `fetch_into` MUST remain a thin wrapper passing `&mut ()` (whose default `keep_record` returns `true`) so its signature and behavior are unchanged.
