@@ -250,10 +250,23 @@ impl<R: Read + Seek> IndexedFastaReader<R> {
         stop: Pos0,
         out: &mut Vec<u8>,
     ) -> Result<(), FastaError> {
-        out.clear();
+        self.fetch_seq_into_u64(name, start.as_u64(), stop.as_u64(), out)
+    }
 
-        let start = start.as_u64();
-        let stop = stop.as_u64();
+    /// Same as [`fetch_seq_into`] but accepts raw `u64` bounds so callers
+    /// can express `end + 1 == i32::MAX + 1` (one past the last representable
+    /// `Pos0`). Used by the pileup path to handle a segment whose inclusive
+    /// `end` is `Pos0::max_value()` without losing the last base.
+    ///
+    /// [`fetch_seq_into`]: Self::fetch_seq_into
+    pub fn fetch_seq_into_u64(
+        &mut self,
+        name: &str,
+        start: u64,
+        stop: u64,
+        out: &mut Vec<u8>,
+    ) -> Result<(), FastaError> {
+        out.clear();
 
         // r[impl fasta.fetch.unknown_sequence]
         let entry = self

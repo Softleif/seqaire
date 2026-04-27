@@ -1,7 +1,6 @@
 use super::{
     ReaderError,
     indexed::IndexedReader,
-    resolve::{ResolveTid, Tid},
     segment::{IntoSegmentTarget, Segment, SegmentOptions, Segments},
 };
 use crate::{
@@ -12,7 +11,7 @@ use crate::{
     },
     fasta::{FastaError, IndexedFastaReader},
 };
-use seqair_types::{Base, Pos0, RegionString};
+use seqair_types::{Base, Pos0};
 use std::path::Path;
 use std::rc::Rc;
 use tracing::instrument;
@@ -207,42 +206,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
         &mut self.customize
     }
 
-    // r[impl unified.readers_resolve_region]
-    /// Resolve a [`RegionString`] into `(tid, start, end)` for [`pileup`](Self::pileup).
-    ///
-    /// Missing start defaults to position 1 (1-based) → `Pos0(0)`. Missing end
-    /// defaults to the contig's last base (inclusive) — so a bare `chr1`
-    /// resolves to `[0, contig_len - 1]`. Returns [`ReaderError::EmptyContig`]
-    /// if the contig has zero length.
-    pub fn resolve_region(&self, region: &RegionString) -> Result<(Tid, Pos0, Pos0), ReaderError> {
-        let tid = region.chromosome.as_str().resolve_tid(self.header())?;
-        let start_pos0 = match region.start {
-            Some(p1) => p1.to_zero_based(),
-            None => Pos0::ZERO,
-        };
-        let end_pos0 = match region.end {
-            Some(p1) => p1.to_zero_based(),
-            None => {
-                // Default end: last base of the contig (inclusive).
-                let len = self.header().target_len(tid.as_u32()).unwrap_or(0);
-                if len == 0 {
-                    return Err(ReaderError::EmptyContig { name: region.chromosome.clone() });
-                }
-                let last = len.checked_sub(1).expect("len > 0 checked above");
-                let last_u32 = u32::try_from(last)
-                    .map_err(|_| ReaderError::RegionEndTooLarge { end: last })?;
-                Pos0::new(last_u32).ok_or(ReaderError::RegionEndTooLarge { end: last })?
-            }
-        };
-        Ok((tid, start_pos0, end_pos0))
-    }
-
     // r[impl unified.readers_segments]
     /// Plan a pileup pass: produce an iterator of [`Segment`]s covering
     /// `target` according to `opts`.
     ///
-    /// `target` is anything that implements [`IntoSegmentTarget`] — a contig
-    /// name (`&str`), a pre-resolved [`Tid`], a parsed [`RegionString`], an
+    /// `target` is anything that implements [`IntoSegmentTarget`] — the
+    /// trait is **sealed**, so the closed list of accepted targets is
+    /// exactly: a contig name (`&str` / `String` / `SmolStr`), a
+    /// pre-resolved [`Tid`] or `u32`, a parsed [`RegionString`], an
     /// explicit `(resolver, start, end)` tuple, or `()` for a whole-genome
     /// scan. Each yielded `Segment` is at most `opts.max_len()` bases long
     /// and carries the requested overlap with neighbors.
@@ -281,20 +252,52 @@ impl<E: CustomizeRecordStore> Readers<E> {
     ///
     /// `segment` must come from [`segments`](Self::segments) — there is no
     /// other way to construct one. The segment's `tid`, `start`, `end`, and
-    /// `contig` name are used directly; no header lookup happens here.
+    /// `contig` name are used directly.
+    ///
+    /// **Header consistency.** [`Segment`] is `Send + Clone`, so it can be
+    /// shipped between threads or across `fork()`s. To catch the foot-gun
+    /// of feeding a segment built against one [`Readers`] into a different
+    /// [`Readers`] whose header doesn't match, this method validates that
+    /// `segment.contig()` resolves to the same `tid` against the current
+    /// header. If it doesn't, returns
+    /// [`ReaderError::SegmentHeaderMismatch`].
+    ///
+    /// **FASTA contig name.** The contig name carried by the segment is
+    /// the BAM-side name; it's passed verbatim to the FASTA reader. If
+    /// your BAM uses `chr1` and your FASTA uses `1` (or vice versa), the
+    /// FASTA fetch will fail. Either pre-normalize names when building the
+    /// reference, or wrap [`Readers`] with your own translation layer.
     ///
     /// When `E != ()`, the extras provider runs once per record at fetch
     /// time, before the engine is constructed.
     ///
     /// Uses an internal [`RecordStore`] whose capacity is retained across
     /// calls. After iterating the engine, call
-    /// [`recover_store`](Self::recover_store) to return the store for reuse.
+    /// [`recover_store`](Self::recover_store) to return the store for
+    /// reuse. If you skip `recover_store` (or break out of the pileup loop
+    /// early without calling it), the next `pileup()` call allocates a
+    /// fresh ~39 MB store; correctness is unaffected.
     ///
     /// [`PileupColumn::reference_base`]: crate::bam::pileup::PileupColumn::reference_base
     pub fn pileup(&mut self, segment: &Segment) -> Result<PileupEngine<E::Extra>, ReaderError> {
         let tid = segment.tid();
         let start = segment.start();
         let end = segment.end();
+
+        // Header-consistency check: the segment's contig name MUST resolve to
+        // the same tid against this Readers' header. Cheap one-lookup defence
+        // against shipping a segment from one Readers into another with a
+        // different header (e.g. a different reference panel).
+        let header = self.alignment.header();
+        match header.tid(segment.contig().as_str()) {
+            Some(t) if t == tid.as_u32() => {}
+            _ => {
+                return Err(ReaderError::SegmentHeaderMismatch {
+                    contig: segment.contig().clone(),
+                    expected_tid: tid.as_u32(),
+                });
+            }
+        }
 
         // Split borrows: fetch writes into `store` while customize is consulted
         // for keep_record. Three disjoint &mut borrows of self.
@@ -303,19 +306,20 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let customize = &mut self.customize;
         alignment.fetch_into_customized(tid.as_u32(), start, end, store, customize)?;
 
-        // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop),
-        // so stop = end + 1; clamp at i32::MAX.
-        let stop =
-            end.checked_add_offset(seqair_types::Offset::new(1)).unwrap_or_else(Pos0::max_value);
+        // Fetch `[start, end]` (inclusive). FASTA APIs expect half-open [start, stop).
+        // Use the u64 path so `end == Pos0::max_value()` doesn't truncate the
+        // last reference base — `stop = end + 1` is i32::MAX + 1, which doesn't
+        // fit in a Pos0 but does fit comfortably in a u64.
         let contig_name = segment.contig();
-        self.fasta.fetch_seq_into(contig_name, start, stop, &mut self.fasta_buf).map_err(
-            |source| ReaderError::FastaFetch {
-                contig: contig_name.clone(),
-                start: u32::try_from(start.as_i64().max(0)).unwrap_or(0),
-                end: u32::try_from(end.as_i64().max(0)).unwrap_or(0),
-                source,
-            },
-        )?;
+        let stop_u64 = end.as_u64().saturating_add(1);
+        self.fasta
+            .fetch_seq_into_u64(contig_name, start.as_u64(), stop_u64, &mut self.fasta_buf)
+            .map_err(|source| ReaderError::FastaFetch {
+            contig: contig_name.clone(),
+            start: u32::try_from(start.as_i64().max(0)).unwrap_or(0),
+            end: u32::try_from(end.as_i64().max(0)).unwrap_or(0),
+            source,
+        })?;
         let fasta_buf = std::mem::take(&mut self.fasta_buf);
         let bases = Base::from_ascii_vec(fasta_buf);
         let ref_seq = RefSeq::new(Rc::from(bases), start);
