@@ -300,8 +300,8 @@ fn htslib_write_records(writer: &mut rust_htslib::bcf::Writer, n_records: u32, m
     use rust_htslib::bcf::record::GenotypeAllele;
 
     let rid = writer.header().name2rid(b"chr1").unwrap();
-    let pass_id = writer.header().name_to_id(cstr8::cstr8!("PASS")).unwrap();
-    let lowqual_id = writer.header().name_to_id(cstr8::cstr8!("LowQual")).unwrap();
+    let pass_id = writer.header().name_to_id(b"PASS").unwrap();
+    let lowqual_id = writer.header().name_to_id(b"LowQual").unwrap();
     let an = (N_SAMPLES * 2) as i32;
 
     for i in 0..i64::from(n_records) {
@@ -325,19 +325,17 @@ fn htslib_write_records(writer: &mut rust_htslib::bcf::Writer, n_records: u32, m
         }
 
         let dp = 30 + (i % 70) as i32;
-        record.push_info_integer(cstr8::cstr8!("DP"), &[dp]).unwrap();
+        record.push_info_integer(b"DP", &[dp]).unwrap();
 
         if !minimal {
             let ac: Vec<i32> = (0..n_alt).map(|k| 1 + ((i + k as i64) % 9) as i32).collect();
             let af: Vec<f32> = ac.iter().map(|&a| a as f32 / an as f32).collect();
-            record.push_info_integer(cstr8::cstr8!("AN"), &[an]).unwrap();
-            record.push_info_integer(cstr8::cstr8!("AC"), &ac).unwrap();
-            record.push_info_float(cstr8::cstr8!("AF"), &af).unwrap();
-            record
-                .push_info_float(cstr8::cstr8!("MQ"), &[55.0f32 + (i % 20) as f32 * 0.5])
-                .unwrap();
-            record.push_info_float(cstr8::cstr8!("QD"), &[5.0f32 + (i % 25) as f32 * 0.8]).unwrap();
-            record.push_info_float(cstr8::cstr8!("FS"), &[(i % 30) as f32 * 0.5]).unwrap();
+            record.push_info_integer(b"AN", &[an]).unwrap();
+            record.push_info_integer(b"AC", &ac).unwrap();
+            record.push_info_float(b"AF", &af).unwrap();
+            record.push_info_float(b"MQ", &[55.0f32 + (i % 20) as f32 * 0.5]).unwrap();
+            record.push_info_float(b"QD", &[5.0f32 + (i % 25) as f32 * 0.8]).unwrap();
+            record.push_info_float(b"FS", &[(i % 30) as f32 * 0.5]).unwrap();
         }
 
         let gts: Vec<GenotypeAllele> = (0..N_SAMPLES)
@@ -356,8 +354,8 @@ fn htslib_write_records(writer: &mut rust_htslib::bcf::Writer, n_records: u32, m
             let dp_vals: Vec<i32> = (0..N_SAMPLES as i32).map(|s| dp / 2 + s % 20).collect();
             let gq_vals: Vec<i32> =
                 (0..N_SAMPLES as i32).map(|s| 30 + (i as i32 + s) % 60).collect();
-            record.push_format_integer(cstr8::cstr8!("DP"), &dp_vals).unwrap();
-            record.push_format_integer(cstr8::cstr8!("GQ"), &gq_vals).unwrap();
+            record.push_format_integer(b"DP", &dp_vals).unwrap();
+            record.push_format_integer(b"GQ", &gq_vals).unwrap();
         }
 
         writer.write(&record).unwrap();

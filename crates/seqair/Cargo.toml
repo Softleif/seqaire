@@ -21,8 +21,8 @@ indexmap = "2"
 itoa = "1"
 libdeflater = "1.25.2"
 ryu = "1"
-seqair-types = { path = "../seqair-types" }
-rustc-hash = "2.1.1"
+seqair-types = { version = "0.1.0", path = "../seqair-types" }
+rustc-hash = "2.1.2"
 flate2 = "1.1.9"
 bzip2 = "0.6.1"
 xz2 = "0.1.7"
@@ -32,7 +32,7 @@ md5 = "0.8.0"
 insta = { workspace = true }
 proptest = { workspace = true }
 tempfile = "3.27.0"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # to compare with:
 bgzf = "0.3.0"
@@ -42,7 +42,16 @@ rust-htslib = { workspace = true, default-features = false, features = [
     "lzma",
     "static",
 ] }
-noodles = { version = "0.109.0", features = ["bam", "bcf", "bgzf", "core", "cram", "fasta", "sam", "vcf"] }
+noodles = { version = "0.109.0", features = [
+    "bam",
+    "bcf",
+    "bgzf",
+    "core",
+    "cram",
+    "fasta",
+    "sam",
+    "vcf",
+] }
 noodles-bgzf = { version = "0.46.0", features = ["libdeflate"] }
 noodles-util = { version = "0.78.0", features = ["alignment"] }
 cstr8 = "0.1.4"

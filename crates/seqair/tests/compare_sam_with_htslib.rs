@@ -321,7 +321,7 @@ fn sam_header_matches_htslib_header() {
 
     // Same names and lengths
     for tid in 0..hts_count {
-        let hts_name = std::str::from_utf8(hts_h.tid2name(tid).unwrap()).unwrap();
+        let hts_name = std::str::from_utf8(hts_h.tid2name(tid)).unwrap();
         let name = h.target_name(tid).unwrap();
         assert_eq!(name, hts_name, "tid {tid}: name");
 
