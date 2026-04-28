@@ -215,8 +215,10 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// exactly: a contig name (`&str` / `String` / `SmolStr`), a
     /// pre-resolved [`Tid`] or `u32`, a parsed [`RegionString`], an
     /// explicit `(resolver, start, end)` tuple, or `()` for a whole-genome
-    /// scan. Each yielded `Segment` is at most `opts.max_len()` bases long
-    /// and carries the requested overlap with neighbors.
+    /// scan. Each yielded `Segment`'s **core** is at most `opts.max_len()`
+    /// bases long; the full `[start, end]` includes `opts.overlap()` bases
+    /// of context on each side (clipped to the requested range at edges),
+    /// so internal tiles can be up to `max_len + 2 * overlap` bases.
     ///
     /// The returned iterator borrows `&self` only — feed each segment to
     /// [`pileup`](Self::pileup) which needs `&mut self`.
@@ -258,9 +260,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
     /// shipped between threads or across `fork()`s. To catch the foot-gun
     /// of feeding a segment built against one [`Readers`] into a different
     /// [`Readers`] whose header doesn't match, this method validates that
-    /// `segment.contig()` resolves to the same `tid` against the current
-    /// header. If it doesn't, returns
-    /// [`ReaderError::SegmentHeaderMismatch`].
+    /// `segment.contig()` resolves to the same `tid` *and* that the
+    /// header's contig length matches the segment's `contig_last_pos`. If
+    /// the contig name resolves to a different tid (or is absent), returns
+    /// [`ReaderError::SegmentHeaderMismatch`]; if the contig length differs
+    /// (e.g. the segment was built against a 200 Mbp panel but the current
+    /// header has the same contig at 100 Mbp), returns
+    /// [`ReaderError::SegmentContigLengthMismatch`] rather than letting the
+    /// fetch silently return zero records past the shorter contig's end.
     ///
     /// **FASTA contig name.** The contig name carried by the segment is
     /// the BAM-side name; it's passed verbatim to the FASTA reader. If
@@ -285,9 +292,16 @@ impl<E: CustomizeRecordStore> Readers<E> {
         let end = segment.end();
 
         // Header-consistency check: the segment's contig name MUST resolve to
-        // the same tid against this Readers' header. Cheap one-lookup defence
-        // against shipping a segment from one Readers into another with a
-        // different header (e.g. a different reference panel).
+        // the same tid against this Readers' header AND the segment's
+        // `contig_last_pos` MUST equal the header's last position for that
+        // contig. This catches two foot-guns:
+        //
+        // * Tid mismatch: shipping a segment from one Readers into another
+        //   whose contig order differs.
+        // * Length mismatch: shipping a segment built against one reference
+        //   panel (e.g. chr1 = 200 Mbp) into another panel (e.g. chr1 = 100
+        //   Mbp at the same tid). Without this check, fetches past the
+        //   shorter contig's end would silently return zero records.
         let header = self.alignment.header();
         match header.tid(segment.contig().as_str()) {
             Some(t) if t == tid.as_u32() => {}
@@ -297,6 +311,14 @@ impl<E: CustomizeRecordStore> Readers<E> {
                     expected_tid: tid.as_u32(),
                 });
             }
+        }
+        let header_last_pos = header.target_len(tid.as_u32()).and_then(|len| len.checked_sub(1));
+        if header_last_pos != Some(segment.contig_last_pos().as_u64()) {
+            return Err(ReaderError::SegmentContigLengthMismatch {
+                contig: segment.contig().clone(),
+                segment_last_pos: segment.contig_last_pos().as_u64(),
+                header_last_pos,
+            });
         }
 
         // Split borrows: fetch writes into `store` while customize is consulted
@@ -454,6 +476,51 @@ mod tests {
                 assert_eq!(expected_tid, real_tid.as_u32());
             }
             other => panic!("expected SegmentHeaderMismatch, got {other:?}"),
+        }
+    }
+
+    // r[verify unified.readers_pileup]
+    /// The mismatch check also catches the case where contig name and tid
+    /// resolve correctly but the segment's `contig_last_pos` does not match
+    /// the current header's contig length. This is the foot-gun of building
+    /// a `Segment` against one reference panel (e.g. `chr1` = 200 Mbp) and
+    /// feeding it to another panel (e.g. `chr1` = 100 Mbp at the same tid).
+    /// Without this check, a fetch past the shorter contig's end would
+    /// silently return zero records.
+    #[test]
+    fn pileup_rejects_segment_with_mismatched_contig_length() {
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let chr19_tid = readers.header().tid("chr19").expect("test BAM has chr19");
+        let real_tid =
+            crate::reader::ResolveTid::resolve_tid(&chr19_tid, readers.header()).unwrap();
+        let actual_last_pos =
+            Pos0::new(u32::try_from(readers.header().target_len(chr19_tid).unwrap() - 1).unwrap())
+                .unwrap();
+        // Pretend the segment was built against a shorter version of chr19.
+        let bogus_last_pos = Pos0::new(u32::from(actual_last_pos) / 2).unwrap();
+        let segment = Segment::new(
+            real_tid,
+            "chr19".into(),
+            Pos0::new(0).unwrap(),
+            Pos0::new(99).unwrap(),
+            0,
+            0,
+            bogus_last_pos,
+        )
+        .unwrap();
+
+        let err = readers.pileup(&segment).unwrap_err();
+        match err {
+            ReaderError::SegmentContigLengthMismatch {
+                contig,
+                segment_last_pos,
+                header_last_pos,
+            } => {
+                assert_eq!(contig.as_str(), "chr19");
+                assert_eq!(segment_last_pos, bogus_last_pos.as_u64());
+                assert_eq!(header_last_pos, Some(actual_last_pos.as_u64()));
+            }
+            other => panic!("expected SegmentContigLengthMismatch, got {other:?}"),
         }
     }
 
