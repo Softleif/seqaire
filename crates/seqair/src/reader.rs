@@ -85,6 +85,16 @@ pub enum ReaderError {
     )]
     SegmentHeaderMismatch { contig: SmolStr, expected_tid: u32 },
 
+    #[error(
+        "segment for contig '{contig}' carries contig_last_pos {segment_last_pos} \
+         but this Readers' header has last_pos {header_last_pos:?}"
+    )]
+    SegmentContigLengthMismatch {
+        contig: SmolStr,
+        segment_last_pos: u64,
+        header_last_pos: Option<u64>,
+    },
+
     #[error("BAM header target count {count} does not fit in u32")]
     HeaderTargetCountOverflow { count: usize },
 }

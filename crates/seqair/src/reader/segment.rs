@@ -76,6 +76,13 @@ pub struct Segment {
     contig_last_pos: Pos0,
 }
 
+// `Segment::len()` always returns `>= 1` (the constructor rejects empty
+// tiles) so a paired `is_empty()` would be a constant-`false` method. Skip
+// the noise rather than expose it.
+#[allow(
+    clippy::len_without_is_empty,
+    reason = "Segment is never empty by construction; an is_empty() method would be noise"
+)]
 impl Segment {
     /// Construct a segment. `pub(crate)` so only the iterator and tests in
     /// this crate can build them.
@@ -157,14 +164,6 @@ impl Segment {
         self.len
     }
 
-    /// Always `false`. A `Segment` is built only by the iterator, which
-    /// never yields zero-length tiles (`r[unified.readers_segments]`). Kept
-    /// to satisfy `clippy::len_without_is_empty`.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        false
-    }
-
     /// Bases shared with the previous tile of the same contig. `0` for the
     /// first tile of a contig.
     #[must_use]
@@ -217,20 +216,30 @@ impl Segment {
     /// neighboring tiles also cover.
     #[must_use]
     pub fn core_range(&self) -> std::ops::RangeInclusive<Pos0> {
-        // overlap_start <= len - 1 (validated by SegmentOptions / iterator),
-        // so checked_add_offset succeeds.
+        // The constructor enforces `overlap_start + overlap_end < len` and
+        // `end <= i32::MAX` (Pos0 invariant), so:
+        //   * `start + overlap_start <= end - overlap_end <= i32::MAX`
+        //     (so both checked_*_offset calls succeed); and
+        //   * `core_start <= core_end` (so the resulting range is
+        //     non-empty).
+        //
+        // Using `expect` rather than a silent fallback means that if a
+        // future change ever weakens those invariants the failure surfaces
+        // as a panic instead of degrading silently to "the entire tile is
+        // its own core" — which would double-count overlap regions in
+        // every downstream caller.
         let core_start = self
             .start
             .checked_add_offset(seqair_types::Offset::new(i64::from(self.overlap_start)))
-            .unwrap_or(self.end);
+            .expect("constructor invariant: start + overlap_start <= end <= i32::MAX");
         let core_end = self
             .end
             .checked_sub_offset(seqair_types::Offset::new(i64::from(self.overlap_end)))
-            .unwrap_or(self.start);
-        // core_start <= core_end always holds because the iterator guarantees
-        // overlap_start + overlap_end < len.
-        let (core_start, core_end) =
-            if core_start <= core_end { (core_start, core_end) } else { (self.start, self.end) };
+            .expect("constructor invariant: end - overlap_end >= start >= 0");
+        debug_assert!(
+            core_start <= core_end,
+            "constructor invariant: overlap_start + overlap_end < len => core_start <= core_end"
+        );
         core_start..=core_end
     }
 }
@@ -250,7 +259,16 @@ pub struct SegmentOptions {
 }
 
 impl SegmentOptions {
-    /// Plain options: tiles up to `max_len` bases, no overlap.
+    /// Plain options: tile *cores* up to `max_len` bases, no overlap.
+    ///
+    /// **What `max_len` actually bounds.** `max_len` caps the **core**
+    /// length of each tile (`Segment::core_range()`). With
+    /// [`with_overlap(o)`](Self::with_overlap), an internal tile's full
+    /// `[start, end]` is the core expanded by `o` bases on each side, so
+    /// internal tiles can be up to `max_len + 2 * o` bases. Edge tiles
+    /// clip their overlap to the requested range and are smaller. Pick
+    /// `max_len` based on the desired core length, then add `2 * overlap`
+    /// to budget peak memory.
     ///
     /// **Picking `max_len`.** Each tile drives one BAM fetch and one FASTA
     /// fetch. A single tile occupies roughly `~40 MB` of `RecordStore`
@@ -372,12 +390,20 @@ fn target_count_u32(header: &BamHeader) -> Result<u32, ReaderError> {
 /// caller already has the contig name as a [`SmolStr`] (e.g. `&SmolStr`,
 /// `&RegionString`) so we skip a redundant `target_name` + `String::to_owned`
 /// + `Into<SmolStr>` round-trip.
+///
+/// `Tid` carries no link back to the header it was resolved against (it's
+/// a passthrough impl of `ResolveTid`), so we re-validate the tid against
+/// the current header here. A stale tid surfaces as `TidOutOfRange` rather
+/// than masquerading as `EmptyContig`.
 fn whole_contig_with_name(
     header: &BamHeader,
     tid: Tid,
     name: SmolStr,
 ) -> Result<ResolvedRange, ReaderError> {
-    let len = header.target_len(tid.as_u32()).unwrap_or(0);
+    let Some(len) = header.target_len(tid.as_u32()) else {
+        let n_targets = target_count_u32(header)?;
+        return Err(super::resolve::TidError::TidOutOfRange { tid: tid.as_u32(), n_targets }.into());
+    };
     if len == 0 {
         return Err(ReaderError::EmptyContig { name });
     }
@@ -398,11 +424,17 @@ fn whole_contig_with_name(
 /// `tid`. Errors if the contig has zero length, the tid is out of range, or
 /// the header advertises more targets than fit in a `u32`.
 fn whole_contig(header: &BamHeader, tid: Tid) -> Result<ResolvedRange, ReaderError> {
-    let n_targets = target_count_u32(header)?;
-    let name = header
-        .target_name(tid.as_u32())
-        .ok_or(super::resolve::TidError::TidOutOfRange { tid: tid.as_u32(), n_targets })?
-        .to_owned();
+    // Compute `n_targets` only when needed for the error path. The hot path
+    // (tid in range) avoids a redundant `u32::try_from(usize)` per contig.
+    let name = match header.target_name(tid.as_u32()) {
+        Some(n) => n.to_owned(),
+        None => {
+            let n_targets = target_count_u32(header)?;
+            return Err(
+                super::resolve::TidError::TidOutOfRange { tid: tid.as_u32(), n_targets }.into()
+            );
+        }
+    };
     whole_contig_with_name(header, tid, name.into())
 }
 
@@ -519,8 +551,11 @@ impl private::IntoSegmentTargetSealed for () {
 ///
 /// * The union of `core_range()` over consecutive tiles equals the input
 ///   range exactly (no overlap, no gap).
-/// * Internal tiles are exactly `max_len` bases long; the last tile of a
-///   range may be shorter.
+/// * Internal tile **cores** are exactly `max_len` bases long; the last
+///   core of a range may be shorter. The full `[start, end]` of an
+///   internal tile is its core expanded by `overlap` bases on each side
+///   (so `len() == max_len + 2 * overlap`); first/last tiles of a range
+///   clip their overlap to the requested range.
 /// * `overlap_start == 0` for the first tile of each range; `overlap_end ==
 ///   0` for the last tile of each range; internal tiles carry the requested
 ///   overlap on both edges.
@@ -929,6 +964,40 @@ mod tests {
     }
 
     // r[verify unified.into_segment_target]
+    /// `whole_contig_with_name` must surface a stale (out-of-range) `Tid` as
+    /// `TidOutOfRange`, not mask it as `EmptyContig`. The bug is unreachable
+    /// from today's public API (the sealed `IntoSegmentTarget` impls always
+    /// validate the tid by name first), but it would surface the moment a
+    /// new internal caller — or a fuzz harness — passes a `Tid` resolved
+    /// against a different header.
+    #[test]
+    fn whole_contig_with_name_rejects_stale_tid() {
+        // Build header A with 5 contigs.
+        let header_a = header_with_contigs(&[
+            ("a0", 1000),
+            ("a1", 1000),
+            ("a2", 1000),
+            ("a3", 1000),
+            ("a4", 1000),
+        ]);
+        let stale_tid = 4u32.resolve_tid(&header_a).unwrap();
+
+        // Build header B with only 2 contigs. The stale `Tid(4)` is out of
+        // range against B even though it was a valid Tid against A.
+        let header_b = header_with_contigs(&[("b0", 1000), ("b1", 1000)]);
+        let err = whole_contig_with_name(&header_b, stale_tid, "b0".into()).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ReaderError::Tid {
+                    source: super::super::resolve::TidError::TidOutOfRange { tid: 4, n_targets: 2 }
+                }
+            ),
+            "expected TidOutOfRange, got {err:?}"
+        );
+    }
+
+    // r[verify unified.into_segment_target]
     #[test]
     fn into_segment_target_start_after_end_errors() {
         let header = header_with_contigs(&[("chr1", 1000)]);
@@ -1004,9 +1073,10 @@ mod tests {
                 let b_start = w[1].core_range().start().as_u64();
                 prop_assert_eq!(a_end + 1, b_start, "core ranges must be contiguous");
             }
-            // No tile exceeds max_len; no tile is empty.
+            // No tile is empty; tile length is bounded by core (≤ max_len)
+            // plus overlap on each side (so ≤ max_len + 2*overlap).
             for s in &segs {
-                prop_assert!(!s.is_empty());
+                prop_assert!(s.len() >= 1);
                 prop_assert!(s.len() <= max_len + 2 * overlap);
             }
         }

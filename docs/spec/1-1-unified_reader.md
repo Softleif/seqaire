@@ -205,8 +205,11 @@ chromosome in one call without thinking about tile size.
 > - Cover every base of every input range exactly once across `core_range()`
 >   of consecutive tiles — i.e. the union of `core_range()` of all yielded
 >   segments equals the union of input ranges, with no overlap and no gap.
-> - Produce tiles of length `<= max_len`, never splitting a tile across
->   contigs.
+> - Produce tile **cores** (`Segment::core_range()`) of length `<= max_len`,
+>   never splitting a tile across contigs. Each tile's full `[start, end]`
+>   is its core expanded by `overlap` bases on each side, clipped to the
+>   requested target range; internal tiles therefore have
+>   `len() == max_len + 2 * overlap`, while edge tiles are shorter.
 > - Set `overlap_start` / `overlap_end` per `r[unified.segment_overlap]`. The
 >   actual `[start, end]` of every tile is its core range expanded by
 >   `overlap` bases on each side, clamped to the **requested target range**
@@ -229,9 +232,15 @@ chromosome in one call without thinking about tile size.
 > 1. **Validate header consistency.** Look up `segment.contig()` against the
 >    current header. If `header.tid(segment.contig().as_str())` does not
 >    return the same numeric tid stored in `segment.tid()`, return
->    `ReaderError::SegmentHeaderMismatch { contig, expected_tid }`. This
->    catches the foot-gun where a `Segment` built against one [`Readers`]
->    is fed to a different [`Readers`] whose header doesn't match.
+>    `ReaderError::SegmentHeaderMismatch { contig, expected_tid }`.
+>    Additionally, if `header.target_len(tid) - 1` does not equal
+>    `segment.contig_last_pos().as_u64()`, return
+>    `ReaderError::SegmentContigLengthMismatch { contig, segment_last_pos,
+>    header_last_pos }`. Together these catch the foot-gun where a
+>    `Segment` built against one [`Readers`] is fed to a different
+>    [`Readers`] whose header doesn't match — both contig-order and
+>    contig-length differences across reference panels are surfaced as
+>    typed errors instead of silent zero-record fetches.
 > 2. Call `fetch_into_customized` with `segment.tid().as_u32()`,
 >    `segment.start()`, `segment.end()` to load records into the internal
 >    `RecordStore<E::Extra>`, passing the customize value through. `compute`
