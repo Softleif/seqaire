@@ -91,5 +91,6 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    readers.recover_store(&mut engine);
+    // `engine` is a PileupGuard; its Drop returns the RecordStore to
+    // `readers` for reuse on the next iteration.
 });

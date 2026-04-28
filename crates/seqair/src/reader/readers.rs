@@ -494,6 +494,43 @@ mod tests {
         );
     }
 
+    // r[verify pileup.extras.recover_store]
+    /// Documented footgun: the guard derefs to `PileupEngine`, so
+    /// `guard.take_store()` is reachable. If the user calls it, the
+    /// guard's `Drop` finds nothing to recover and the next `pileup()`
+    /// re-allocates from scratch. This test pins that behavior so a
+    /// future change to the guard's recovery logic doesn't silently
+    /// alter the contract documented on `PileupGuard`.
+    #[test]
+    fn pileup_guard_take_store_via_deref_disables_recovery() {
+        use std::num::NonZeroU32;
+        let mut readers = Readers::open(test_bam_path(), test_fasta_path()).unwrap();
+        let opts = SegmentOptions::new(NonZeroU32::new(3_000).unwrap());
+        let segments: Vec<_> = readers
+            .segments(("chr19", Pos0::new(6_103_500).unwrap(), Pos0::new(6_106_500).unwrap()), opts)
+            .unwrap()
+            .collect();
+        assert!(!segments.is_empty());
+
+        // Misuse: drain the store through Deref before the guard drops.
+        {
+            let mut p = readers.pileup(&segments[0]).unwrap();
+            while p.pileups().is_some() {}
+            let drained = p.take_store().expect("populated store available for the first take");
+            // Hold the drained store alive past the guard's drop.
+            assert!(drained.records_capacity() > 0);
+            // p drops here. take_store on the engine returns None (already
+            // taken), so the slot is left as the empty Default that
+            // `Readers::pileup` put there at construction time.
+        }
+        assert_eq!(
+            readers.store.records_capacity(),
+            0,
+            "after the user drains via Deref, the slot is left as an empty Default — \
+             the next pileup() call allocates fresh. This is the documented contract."
+        );
+    }
+
     // r[verify unified.readers_pileup]
     /// Pileup must reject a `Segment` whose contig name doesn't resolve to
     /// the same tid in this `Readers`' header. Catches the foot-gun where a

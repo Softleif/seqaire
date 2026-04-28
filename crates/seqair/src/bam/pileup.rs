@@ -443,8 +443,24 @@ impl<U> std::fmt::Debug for PileupEngine<U> {
 /// and the populated-then-cleared store is moved back into the slot,
 /// retaining its allocated capacity for the next pileup. Callers no
 /// longer need an explicit `recover_store` step.
+///
+/// # Footgun: don't drain the engine via `Deref`
+///
+/// Because the guard `Deref`s to [`PileupEngine`], the engine's
+/// [`PileupEngine::take_store`] is reachable as `guard.take_store()`.
+/// Calling it leaves the engine's store empty, and then the guard's
+/// `Drop` finds nothing to recover, so the next call to
+/// [`Readers::pileup`](crate::reader::Readers::pileup) allocates a fresh
+/// ~39 MB store. **Do not call `take_store` on a guard.** If you need
+/// the underlying engine without recovery, use [`Self::into_inner`] —
+/// that path is documented to disable recovery and at least makes the
+/// intent explicit.
 pub struct PileupGuard<'a, U = ()> {
-    engine: PileupEngine<U>,
+    /// `Some` for the lifetime of the guard, then taken to `None` by
+    /// [`Self::into_inner`] (so the `Drop` impl knows to skip recovery).
+    /// Using an `Option` avoids the `unsafe` `ManuallyDrop` + `ptr::read`
+    /// dance that an owning field would require.
+    engine: Option<PileupEngine<U>>,
     slot: &'a mut RecordStore<U>,
 }
 
@@ -454,34 +470,45 @@ impl<'a, U> PileupGuard<'a, U> {
     /// `pub(crate)` because external callers should always go through
     /// `Readers::pileup` to obtain one.
     pub(crate) fn new(engine: PileupEngine<U>, slot: &'a mut RecordStore<U>) -> Self {
-        Self { engine, slot }
+        Self { engine: Some(engine), slot }
     }
 
     /// Consume the guard and return the inner engine, **without**
-    /// recovering the store. Rare escape hatch — prefer letting the guard
-    /// drop normally.
-    pub fn into_inner(self) -> PileupEngine<U> {
-        // ManuallyDrop so the guard's Drop doesn't run after we move
-        // `engine` out (would try to recover from a moved-out value).
-        let this = std::mem::ManuallyDrop::new(self);
-        // SAFETY: ManuallyDrop guarantees `this`'s Drop won't run, so it
-        // is safe to read the field by value. We only read `engine` here;
-        // `slot` is a `&mut` reference and is dropped (releasing the
-        // borrow) when `this` goes out of scope.
-        unsafe { std::ptr::read(&this.engine) }
+    /// recovering the store. Rare escape hatch — prefer letting the
+    /// guard drop normally.
+    ///
+    /// Note that the originating `Readers`' internal store slot is
+    /// already empty at this point (it was moved into the engine when
+    /// the guard was constructed), and `into_inner` does not put
+    /// anything back. The next call to
+    /// [`Readers::pileup`](crate::reader::Readers::pileup) on that
+    /// `Readers` will therefore allocate a fresh `RecordStore`. If you
+    /// want the engine for inspection without disabling recovery,
+    /// inspect through the guard via [`Deref`](std::ops::Deref) and
+    /// drop the guard normally instead.
+    pub fn into_inner(mut self) -> PileupEngine<U> {
+        self.engine.take().expect("engine present until into_inner is called")
+    }
+
+    fn engine_ref(&self) -> &PileupEngine<U> {
+        self.engine.as_ref().expect("engine present until guard is dropped or into_inner is called")
+    }
+
+    fn engine_mut(&mut self) -> &mut PileupEngine<U> {
+        self.engine.as_mut().expect("engine present until guard is dropped or into_inner is called")
     }
 }
 
 impl<U> std::ops::Deref for PileupGuard<'_, U> {
     type Target = PileupEngine<U>;
     fn deref(&self) -> &PileupEngine<U> {
-        &self.engine
+        self.engine_ref()
     }
 }
 
 impl<U> std::ops::DerefMut for PileupGuard<'_, U> {
     fn deref_mut(&mut self) -> &mut PileupEngine<U> {
-        &mut self.engine
+        self.engine_mut()
     }
 }
 
@@ -493,12 +520,15 @@ impl<U> std::fmt::Debug for PileupGuard<'_, U> {
 
 impl<U> Drop for PileupGuard<'_, U> {
     fn drop(&mut self) {
-        // Recover the store into the caller's slot. `take_store` returns
-        // `None` if the store was already moved out via `into_inner` (in
-        // which case the guard's Drop is suppressed by ManuallyDrop) or
-        // if the engine was constructed with an empty store and never
-        // populated. Either way, leave the slot untouched.
-        if let Some(store) = self.engine.take_store() {
+        // Recover the store into the caller's slot. The engine is `None`
+        // only after [`PileupGuard::into_inner`], in which case recovery
+        // is intentionally skipped. `take_store` further returns `None`
+        // if the store was already drained through `Deref` (the
+        // documented footgun) or was empty with zero capacity from the
+        // start. In any of those cases, leave the slot untouched.
+        if let Some(mut engine) = self.engine.take()
+            && let Some(store) = engine.take_store()
+        {
             *self.slot = store;
         }
     }
