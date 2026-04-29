@@ -38,6 +38,8 @@
 // are indeed cache-friendly.
 
 // r[impl io.minimal_public_api]
+pub mod aligned_pairs;
+pub mod aligned_pairs_view;
 pub mod aux;
 pub mod aux_data;
 pub mod base_mod;
@@ -47,6 +49,7 @@ pub mod cigar;
 pub mod csi_index;
 pub mod header;
 pub mod index;
+pub mod nm_md;
 pub mod owned_record;
 pub mod pileup;
 pub mod reader;
@@ -56,6 +59,13 @@ pub mod region_buf;
 pub mod seq;
 pub mod writer;
 
+pub use aligned_pairs::{
+    AlignedPair, AlignedPairs, AlignedPairsError, MatchKind, MatchPosition, MatchesOnly,
+};
+pub use aligned_pairs_view::{
+    AlignedPairWithRead, AlignedPairWithRef, AlignedPairsWithRead, AlignedPairsWithRef,
+    MatchedBase, MatchedBases, MatchedRef, MatchedRefs,
+};
 pub use aux_data::{AuxData, AuxDataError};
 pub use base_mod::{BaseModError, BaseModState, ModMode, ModStrand, ModType, Modification};
 pub use bgzf::BgzfError;
@@ -63,6 +73,7 @@ pub use cigar::CigarOp;
 pub use csi_index::{CsiError, CsiIndex};
 pub use header::{BamHeader, BamHeaderError, ContigInfo};
 pub use index::{AlignmentIndex, BaiError, BamIndex};
+pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{AlignmentView, PileupColumn, PileupEngine, PileupGuard, PileupOp, RefSeq};
 pub use reader::{BamError, BamShared, IndexedBamReader};
