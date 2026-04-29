@@ -179,3 +179,9 @@ doc = false
 name = "fuzz_structured_pileup"
 path = "fuzz_targets/fuzz_structured_pileup.rs"
 doc = false
+
+# Structure-aware: AlignedPairs / with_read / with_reference / matches_only / nm / md
+[[bin]]
+name = "fuzz_aligned_pairs"
+path = "fuzz_targets/fuzz_aligned_pairs.rs"
+doc = false
