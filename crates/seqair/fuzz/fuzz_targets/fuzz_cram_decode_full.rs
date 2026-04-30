@@ -2,7 +2,6 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use rustc_hash::FxHashMap;
 use seqair::cram::compression_header::CompressionHeader;
 use seqair::cram::encoding::{DecodeContext, ExternalCursor};
 
@@ -28,11 +27,13 @@ fuzz_target!(|input: CramDecodeInput| {
     };
 
     // Build external blocks map with common content IDs
-    let mut external = FxHashMap::default();
-    external.insert(0, ExternalCursor::new(input.external_0));
-    external.insert(1, ExternalCursor::new(input.external_1));
-    external.insert(2, ExternalCursor::new(input.external_2));
-    external.insert(3, ExternalCursor::new(input.external_3));
+    let external = [
+        (0, ExternalCursor::new(input.external_0)),
+        (1, ExternalCursor::new(input.external_1)),
+        (2, ExternalCursor::new(input.external_2)),
+        (3, ExternalCursor::new(input.external_3)),
+    ]
+    .into();
 
     let mut ctx = DecodeContext::new(&input.core_data, external);
 
