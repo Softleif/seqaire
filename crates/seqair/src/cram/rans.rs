@@ -262,19 +262,25 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
 // flagged `drop_in_place<CramError>` next to `read_u8` for exactly this
 // reason. The closure form is lazy: nothing built, nothing dropped on
 // the hot path.
+//
+// `split_first` (not `first` + `get(1..)`) is also load-bearing:
+// `slice::first` showed up at the top of the renormalize stack in
+// profiles because the two-step form did two slice bounds checks. The
+// `split_first` form returns `(first, rest)` in one shot.
 fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
-    *src = src.get(1..).ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
+    let (&b, rest) =
+        src.split_first().ok_or_else(|| CramError::Truncated { context: "rans u8" })?;
+    *src = rest;
     Ok(b)
 }
 
 fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let bytes = src.get(..4).ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
-    let val = u32::from_le_bytes(
-        bytes.try_into().map_err(|_| CramError::Truncated { context: "rans u32" })?,
-    );
-    *src = src.get(4..).ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
-    Ok(val)
+    // `split_first_chunk` does the same single-bounds-check trick as
+    // `split_first` for fixed-size slices.
+    let (head, rest) =
+        src.split_first_chunk::<4>().ok_or_else(|| CramError::Truncated { context: "rans u32" })?;
+    *src = rest;
+    Ok(u32::from_le_bytes(*head))
 }
 
 fn read_itf8_u16(src: &mut &[u8]) -> Result<u16, CramError> {

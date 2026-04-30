@@ -80,29 +80,32 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
 
 // ── Primitive readers ────────────────────────────────────────────────
 
-// Lazy `ok_or_else` is load-bearing in these per-byte helpers — see
-// the analogous comment in rans.rs::read_u8 for why eager `ok_or`
-// shows up as `drop_in_place<CramError>` in profiles.
+// Lazy `ok_or_else` and single-bounds-check `split_first` /
+// `split_first_chunk` are load-bearing in these per-byte helpers — see
+// the analogous comment in rans.rs::read_u8 for why eager `ok_or` and
+// the two-step `first` + `get(1..)` form show up under `read_u8` in
+// profiles.
 fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
-    *src = src.get(1..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
+    let (&b, rest) =
+        src.split_first().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
+    *src = rest;
     Ok(b)
 }
 
 fn read_u16_le(src: &mut &[u8]) -> Result<u16, CramError> {
-    let bytes: &[u8; 2] =
-        src.first_chunk().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
-    let val = u16::from_le_bytes(*bytes);
-    *src = src.get(2..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
-    Ok(val)
+    let (head, rest) = src
+        .split_first_chunk::<2>()
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
+    *src = rest;
+    Ok(u16::from_le_bytes(*head))
 }
 
 fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let bytes: &[u8; 4] =
-        src.first_chunk().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
-    let val = u32::from_le_bytes(*bytes);
-    *src = src.get(4..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
-    Ok(val)
+    let (head, rest) = src
+        .split_first_chunk::<4>()
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
+    *src = rest;
+    Ok(u32::from_le_bytes(*head))
 }
 
 // r[impl cram.codec.uint7_bounded]
