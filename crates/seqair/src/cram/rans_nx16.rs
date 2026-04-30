@@ -295,6 +295,46 @@ fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
 const ORDER_0_BITS: u32 = 12;
 
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result<(), CramError> {
+    if state_count == 32 {
+        return decode_order_0_32state(src, dst);
+    }
+    decode_order_0_generic(src, dst, state_count)
+}
+
+/// Scalar 32-state order-0 decode. Separated from the generic path so
+/// SIMD dispatch (NEON / AVX2) has a clear insertion point.
+#[allow(clippy::indexing_slicing, reason = "sym ≤ 255 (u8), f < 4096 (12-bit mask)")]
+fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
+    let frequencies = read_frequencies_0(src)?;
+    let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
+    let sym_table = build_symbol_table_nx16(&cumulative_frequencies);
+    let mut states = read_states(src, 32)?;
+
+    for chunk in dst.chunks_mut(32) {
+        for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
+            let f = state_cumulative_frequency(*state, ORDER_0_BITS);
+            let sym = sym_table[f as usize];
+            *d = sym;
+            let i = usize::from(sym);
+            *state = state_step(
+                *state,
+                *frequencies.get(i).unwrap_or(&0),
+                *cumulative_frequencies.get(i).unwrap_or(&0),
+                ORDER_0_BITS,
+            );
+            *state = state_renormalize(*state, src).ok_or_else(truncated)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn decode_order_0_generic(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    state_count: usize,
+) -> Result<(), CramError> {
     let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     let frequencies = read_frequencies_0(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
@@ -957,5 +997,40 @@ mod tests {
             let actual = table[f_val as usize];
             assert_eq!(actual, expected);
         }
+    }
+
+    #[test]
+    fn order0_32state_and_generic_produce_same_output() {
+        // Minimal 32-state order-0 stream: symbol 0 with freq=4096
+        // (covers the full 12-bit range), 32 states initialized
+        // to freq<<12, decodes to all-zero output. Validates that
+        // the 32-state path and generic path agree on the same input.
+        let mut stream = Vec::new();
+        stream.push(0x04); // flags: N32
+        stream.push(4); // uncompressed_size = 4 (uint7)
+        stream.push(0); // alphabet: sym=0
+        stream.push(0); // alphabet terminator
+        stream.push(0xA0); // freq=4096 (uint7, 2 bytes)
+        stream.push(0x20);
+        for _ in 0..32 {
+            stream.extend_from_slice(&0x01000000u32.to_le_bytes());
+        }
+
+        let result = decode(&stream, 0).unwrap();
+        assert_eq!(result, &[0, 0, 0, 0]);
+
+        // Direct comparison: 32-state vs generic
+        let mut src1: &[u8] = &stream;
+        let mut src2: &[u8] = &stream;
+        let flags = read_u8(&mut src1).unwrap();
+        let _ = read_u8(&mut src2).unwrap();
+        assert_eq!(flags & FLAG_N32, FLAG_N32);
+        let _ = read_uint7(&mut src1).unwrap();
+        let _ = read_uint7(&mut src2).unwrap();
+        let mut dst1 = vec![0u8; 4];
+        let mut dst2 = vec![0u8; 4];
+        decode_order_0_32state(&mut src1, &mut dst1).unwrap();
+        decode_order_0_generic(&mut src2, &mut dst2, 32).unwrap();
+        assert_eq!(dst1, dst2);
     }
 }
