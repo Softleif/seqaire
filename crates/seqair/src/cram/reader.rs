@@ -253,13 +253,25 @@ pub struct IndexedCramReader<R: Read + Seek = File> {
     file: R,
     fasta: IndexedFastaReader<R>,
     shared: Arc<CramShared>,
-    // Scratch buffers reused across fetch_into calls
+    // Scratch buffers reused across fetch_into calls. The per-record
+    // ones (`name_buf`, `feature_byte_buf`, `cigar_ops_buf`) used to be
+    // `Vec::new()` allocated inside `decode_record`, dominating profiles
+    // in N-record hot loops. Hoisting them here means the second record
+    // onward pays zero alloc cost.
     container_buf: Vec<u8>,
     cigar_buf: Vec<CigarOp>,
     bases_buf: Vec<Base>,
     qual_buf: Vec<u8>,
     aux_buf: Vec<u8>,
     ref_seq_buf: Vec<u8>,
+    /// Reused across records: read name (qname) bytes.
+    name_buf: Vec<u8>,
+    /// Reused across records: per-feature byte payloads (insertion bases,
+    /// soft-clip bases, bases-block, quality-block).
+    feature_byte_buf: Vec<u8>,
+    /// Reused across records: accumulated `(length, op_code)` CIGAR ops
+    /// before being packed into BAM-layout `CigarOp`s.
+    cigar_ops_buf: Vec<(u32, u8)>,
 }
 
 impl<R: Read + Seek> std::fmt::Debug for IndexedCramReader<R> {
@@ -324,6 +336,9 @@ impl IndexedCramReader<File> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
         })
     }
 
@@ -341,6 +356,9 @@ impl IndexedCramReader<File> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
         })
     }
 }
@@ -403,6 +421,9 @@ impl IndexedCramReader<Cursor<Vec<u8>>> {
             qual_buf: Vec::new(),
             aux_buf: Vec::new(),
             ref_seq_buf: Vec::new(),
+            name_buf: Vec::new(),
+            feature_byte_buf: Vec::new(),
+            cigar_ops_buf: Vec::new(),
         })
     }
 }
@@ -598,6 +619,9 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     &mut self.bases_buf,
                     &mut self.qual_buf,
                     &mut self.aux_buf,
+                    &mut self.name_buf,
+                    &mut self.feature_byte_buf,
+                    &mut self.cigar_ops_buf,
                     customize,
                 )?;
                 fetched_total = fetched_total.saturating_add(slice_fetched);

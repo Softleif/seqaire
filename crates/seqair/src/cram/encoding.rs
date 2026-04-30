@@ -146,42 +146,33 @@ impl ExternalCursor {
         Some(val)
     }
 
-    // TODO(perf): read_bytes_until and read_bytes both .to_vec() from contiguous data.
-    // Three options to avoid per-call allocation:
-    //
-    // 1. Quick win (no API change): for ByteArrayLen with External val_encoding,
-    //    add read_bytes_slice() that returns &[u8] and memcpy once, instead of
-    //    N push() calls. Same for read_bytes_until → read_bytes_until_slice.
-    //    NLL allows returning &[u8] from &mut self (borrows data, not mutability).
-    //
-    // 2. decode_into(ctx, buf: &mut Vec<u8>): callers pass a reusable scratch buffer.
-    //    Still copies, but buffer capacity stabilizes after first region — zero allocs
-    //    in steady state. Requires changing call sites in slice.rs.
-    //
-    // 3. True zero-copy: change pos to Cell<usize>, all cursor methods take &self,
-    //    get_external returns &ExternalCursor, decode returns Cow<'_, [u8]>.
-    //    Problem: read_name is stored across many decode() calls, so Cow borrows ctx
-    //    and blocks subsequent decodes. Would need split borrows or a different caller
-    //    pattern (immediate .to_vec() for read_name, Cow for short-lived results).
+    /// Append `n` bytes starting at `pos` into `buf`, advancing `pos` past
+    /// them. Replaces the allocating `read_bytes`: callers pass a scratch
+    /// buffer they reuse across records, so the steady state is zero
+    /// allocations.
+    pub fn read_bytes_into(&mut self, n: usize, buf: &mut Vec<u8>) -> Option<()> {
+        let end = self.pos.checked_add(n)?;
+        let slice = self.data.get(self.pos..end)?;
+        buf.extend_from_slice(slice);
+        self.pos = end;
+        Some(())
+    }
 
-    pub fn read_bytes_until(&mut self, stop: u8) -> Option<Vec<u8>> {
+    /// Append bytes up to (but not including) the first `stop` byte into
+    /// `buf`, advancing `pos` past the stop byte. Replaces the allocating
+    /// `read_bytes_until`.
+    pub fn read_bytes_until_into(&mut self, stop: u8, buf: &mut Vec<u8>) -> Option<()> {
         let start = self.pos;
         while self.pos < self.data.len() {
             if *self.data.get(self.pos)? == stop {
-                let result = self.data.get(start..self.pos)?.to_vec();
+                let slice = self.data.get(start..self.pos)?;
+                buf.extend_from_slice(slice);
                 self.pos = self.pos.checked_add(1)?; // skip stop byte
-                return Some(result);
+                return Some(());
             }
             self.pos = self.pos.checked_add(1)?;
         }
         None
-    }
-
-    pub fn read_bytes(&mut self, n: usize) -> Option<Vec<u8>> {
-        let end = self.pos.checked_add(n)?;
-        let result = self.data.get(self.pos..end)?.to_vec();
-        self.pos = end;
-        Some(result)
     }
 
     pub fn into_data(self) -> Vec<u8> {
@@ -369,9 +360,23 @@ impl ByteEncoding {
 }
 
 impl ByteArrayEncoding {
-    pub fn decode(&self, ctx: &mut DecodeContext<'_>) -> Result<Vec<u8>, CramError> {
+    /// Append decoded bytes onto `buf`. Caller decides whether to clear
+    /// `buf` first (e.g. clear when reading a record's qname; *don't*
+    /// clear when appending a tag value into an existing aux block).
+    ///
+    /// Replaces the allocating `decode(ctx) -> Vec<u8>` form: per-record
+    /// decode in CRAM hot loops used to allocate one or more `Vec<u8>`s
+    /// per record (`read_name` + every tag value + every insertion /
+    /// soft-clip / `Bases`-block feature). With a caller-owned scratch
+    /// buffer the steady state is zero allocations after the first
+    /// record warms the buffer's capacity.
+    pub fn decode_into(
+        &self,
+        ctx: &mut DecodeContext<'_>,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), CramError> {
         match self {
-            Self::Null => Ok(Vec::new()),
+            Self::Null => Ok(()),
             // r[impl cram.encoding.external]
             Self::External { content_id } => {
                 // For byte arrays with external encoding, the entire array is in the external block.
@@ -385,20 +390,29 @@ impl ByteArrayEncoding {
                 let len = usize::try_from(len_i32)
                     .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
                 super::reader::check_alloc_size(len, "byte array length")?;
-                let mut result = Vec::with_capacity(len);
+                buf.reserve(len);
                 for _ in 0..len {
-                    result.push(val_encoding.decode(ctx)?);
+                    buf.push(val_encoding.decode(ctx)?);
                 }
-                Ok(result)
+                Ok(())
             }
             // r[impl cram.encoding.byte_array_stop]
             Self::ByteArrayStop { stop_byte, content_id } => {
                 let cursor = ctx.get_external(*content_id)?;
                 cursor
-                    .read_bytes_until(*stop_byte)
+                    .read_bytes_until_into(*stop_byte, buf)
                     .ok_or(CramError::Truncated { context: "byte array stop" })
             }
         }
+    }
+
+    /// Allocating wrapper around `decode_into` for callers that don't yet
+    /// have a scratch buffer. New code should prefer `decode_into` to keep
+    /// the steady-state allocation count at zero.
+    pub fn decode(&self, ctx: &mut DecodeContext<'_>) -> Result<Vec<u8>, CramError> {
+        let mut buf = Vec::new();
+        self.decode_into(ctx, &mut buf)?;
+        Ok(buf)
     }
 
     pub fn parse(cursor: &mut &[u8]) -> Result<Self, CramError> {
@@ -576,9 +590,14 @@ mod tests {
     #[test]
     fn external_cursor_read_bytes_until() {
         let mut cursor = ExternalCursor::new(b"hello\x00world\x00".to_vec());
-        assert_eq!(cursor.read_bytes_until(0), Some(b"hello".to_vec()));
-        assert_eq!(cursor.read_bytes_until(0), Some(b"world".to_vec()));
-        assert_eq!(cursor.read_bytes_until(0), None);
+        let mut buf = Vec::new();
+        cursor.read_bytes_until_into(0, &mut buf).expect("first token");
+        assert_eq!(buf, b"hello");
+        buf.clear();
+        cursor.read_bytes_until_into(0, &mut buf).expect("second token");
+        assert_eq!(buf, b"world");
+        buf.clear();
+        assert!(cursor.read_bytes_until_into(0, &mut buf).is_none());
     }
 
     // r[verify cram.encoding.beta]
