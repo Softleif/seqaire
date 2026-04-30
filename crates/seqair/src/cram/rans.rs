@@ -22,9 +22,45 @@ use super::reader::CramError;
 const ALPHABET_SIZE: usize = 256;
 const LOWER_BOUND: u32 = 1 << 23;
 
+/// Reusable allocations for rANS 4x8 order-1 decoding.
+///
+/// Order-1 needs three large tables per block: frequency array (128 KB),
+/// cumulative frequency array (128 KB), and symbol lookup table (1 MB).
+/// Allocating them fresh for every block dominated CRAM decode profiles.
+/// This struct holds one of each; zero it or overwrite it per block.
+pub(crate) struct Rans4x8Buf {
+    pub freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    pub cum_freq: Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>,
+    pub sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]>,
+}
+
+impl Rans4x8Buf {
+    pub fn new() -> Self {
+        Self {
+            freq: Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            cum_freq: Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            sym_tables: Box::new([[0u8; 4096]; ALPHABET_SIZE]),
+        }
+    }
+}
+
+impl Default for Rans4x8Buf {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // r[impl cram.codec.rans4x8]
-/// Decode a rANS 4x8 compressed block.
+/// Decode a rANS 4x8 compressed block (allocating path — for callers
+/// without a reusable buffer). Prefer [`decode_with_buf`] on the hot path.
 pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
+    let mut buf = Rans4x8Buf::new();
+    decode_with_buf(src, &mut buf)
+}
+
+/// Decode a rANS 4x8 compressed block, reusing the caller-owned
+/// [`Rans4x8Buf`] for order-1 tables. Order-0 blocks don't touch the buf.
+pub(crate) fn decode_with_buf(src: &[u8], buf: &mut Rans4x8Buf) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
     // Header: order (u8), compressed_size (u32 LE), uncompressed_size (u32 LE)
@@ -40,7 +76,7 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
 
     match order {
         0 => decode_order_0(&mut cur, &mut dst)?,
-        1 => decode_order_1(&mut cur, &mut dst)?,
+        1 => decode_order_1_buf(&mut cur, &mut dst, buf)?,
         _ => return Err(CramError::InvalidRansOrder { order }),
     }
 
@@ -83,16 +119,18 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     clippy::indexing_slicing,
     reason = "indices are bounded: ctx/sym ≤ 255 (u8), f ≤ 4095 (12-bit mask)"
 )]
-fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
+fn decode_order_1_buf(
+    src: &mut &[u8],
+    dst: &mut [u8],
+    buf: &mut Rans4x8Buf,
+) -> Result<(), CramError> {
     // See decode_order_0 for the lazy-CramError pattern.
     let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
-    let freq = read_frequencies_1(src).ok_or_else(truncated)?;
+    read_frequencies_1_into(src, &mut buf.freq).ok_or_else(truncated)?;
 
-    let mut cum_freq = vec![[0u16; ALPHABET_SIZE]; ALPHABET_SIZE];
-    let mut sym_tables: Box<[[u8; 4096]; ALPHABET_SIZE]> = Box::new([[0u8; 4096]; ALPHABET_SIZE]);
     for ctx in 0..ALPHABET_SIZE {
-        cum_freq[ctx] = build_cumulative_frequencies(&freq[ctx]);
-        sym_tables[ctx] = build_symbol_table(&cum_freq[ctx]);
+        buf.cum_freq[ctx] = build_cumulative_frequencies(&buf.freq[ctx]);
+        buf.sym_tables[ctx] = build_symbol_table(&buf.cum_freq[ctx]);
     }
 
     let mut states = read_states(src).ok_or_else(truncated)?;
@@ -101,45 +139,37 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     // Chunk-based interleaving: split output into 4 equal segments.
     // Each state decodes into its own segment sequentially.
     let chunk_size = dst.len() / 4;
-    // Precompute write offsets for each state. `chunk_size = dst.len() / 4`,
-    // so `bases[si] + pos < 4 * chunk_size <= dst.len()` for `si < 4` and
-    // `pos < chunk_size`. Eliminates per-iteration `checked_mul` /
-    // `checked_add` / `ok_or_else` on the `out_idx` calculation.
     let bases: [usize; 4] = [0, chunk_size, chunk_size.wrapping_mul(2), chunk_size.wrapping_mul(3)];
 
     for pos in 0..chunk_size {
         for si in 0usize..4 {
-            // Pull state into a local so the inner expression doesn't
-            // re-index `states[si]` three times per iteration.
             let mut state = states[si];
             let ctx = prev_syms[si] as usize;
             let f = (state & 0x0FFF) as u16;
-            let sym = sym_tables[ctx][f as usize];
+            let sym = buf.sym_tables[ctx][f as usize];
             dst[bases[si].wrapping_add(pos)] = sym;
             let sym_idx = sym as usize;
-            state = u32::from(freq[ctx][sym_idx])
+            state = u32::from(buf.freq[ctx][sym_idx])
                 .wrapping_mul(state >> 12)
                 .wrapping_add(state & 0x0FFF)
-                .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
+                .wrapping_sub(u32::from(buf.cum_freq[ctx][sym_idx]));
             renormalize(&mut state, src).ok_or_else(truncated)?;
             states[si] = state;
             prev_syms[si] = sym;
         }
     }
 
-    // Remainder: state 3 handles trailing bytes. `4 * chunk_size <= dst.len()`
-    // by construction (chunk_size = dst.len() / 4), so this can't overflow.
     let remainder_start = chunk_size.wrapping_mul(4);
     for pos in remainder_start..dst.len() {
         let ctx = prev_syms[3] as usize;
         let f = (states[3] & 0x0FFF) as u16;
-        let sym = sym_tables[ctx][f as usize];
+        let sym = buf.sym_tables[ctx][f as usize];
         dst[pos] = sym;
         let sym_idx = sym as usize;
-        states[3] = u32::from(freq[ctx][sym_idx])
+        states[3] = u32::from(buf.freq[ctx][sym_idx])
             .wrapping_mul(states[3] >> 12)
             .wrapping_add(states[3] & 0x0FFF)
-            .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
+            .wrapping_sub(u32::from(buf.cum_freq[ctx][sym_idx]));
         if pos.checked_add(1).is_some_and(|next| next < dst.len()) {
             renormalize(&mut states[3], src).ok_or_else(truncated)?;
         }
@@ -222,9 +252,10 @@ fn read_frequencies_0(src: &mut &[u8]) -> Option<[u16; ALPHABET_SIZE]> {
 }
 
 #[allow(clippy::indexing_slicing, reason = "ctx is u8, so ctx as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_1(src: &mut &[u8]) -> Option<Box<[[u16; ALPHABET_SIZE]; ALPHABET_SIZE]>> {
-    let mut freq = Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]);
-
+fn read_frequencies_1_into(
+    src: &mut &[u8],
+    freq: &mut [[u16; ALPHABET_SIZE]; ALPHABET_SIZE],
+) -> Option<()> {
     let mut ctx = read_u8(src)?;
     let mut prev_ctx = ctx;
 
@@ -247,7 +278,7 @@ fn read_frequencies_1(src: &mut &[u8]) -> Option<Box<[[u16; ALPHABET_SIZE]; ALPH
         prev_ctx = ctx;
     }
 
-    Some(freq)
+    Some(())
 }
 
 #[allow(
