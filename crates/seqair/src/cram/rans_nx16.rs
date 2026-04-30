@@ -382,6 +382,8 @@ fn decode_order_0_generic(
     for chunk in dst.chunks_mut(states.len()) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
             let f = state_cumulative_frequency(*state, ORDER_0_BITS);
+            debug_assert!((f as usize) < sym_table.len());
+            #[allow(clippy::indexing_slicing, reason = "bounds checked by debug_assert above")]
             let sym = sym_table[f as usize];
             *d = sym;
             let i = usize::from(sym);
@@ -533,6 +535,8 @@ fn decode_order_1_with_buf(
     let last_chunk_start = chunk_size.checked_mul(state_count).ok_or_else(|| {
         CramError::Truncated { context: "rans_nx16 order-1 last chunk offset overflow" }
     })?;
+    debug_assert!(last_chunk_start <= dst.len());
+    #[allow(clippy::indexing_slicing, reason = "last_chunk_start bounded by checked_mul above")]
     let last_chunk = &mut dst[last_chunk_start..];
     if !last_chunk.is_empty() {
         let mut state = *states
@@ -544,12 +548,22 @@ fn decode_order_1_with_buf(
 
         for d in last_chunk {
             let k = usize::from(prev_sym);
+            debug_assert!(k < ALPHABET_SIZE, "prev_sym {prev_sym} out of range");
             let f = state_cumulative_frequency(state, bits);
+            #[allow(clippy::indexing_slicing, reason = "k < 256, l < 256")]
             let sym = cumulative_frequencies_symbol(&buf.cumulative_frequencies[k], f);
             *d = sym;
             let l = usize::from(sym);
-            state =
-                state_step(state, buf.frequencies[k][l], buf.cumulative_frequencies[k][l], bits);
+            debug_assert!(l < ALPHABET_SIZE, "sym {sym} out of range");
+            #[allow(clippy::indexing_slicing, reason = "k < 256, l < 256")]
+            {
+                state = state_step(
+                    state,
+                    buf.frequencies[k][l],
+                    buf.cumulative_frequencies[k][l],
+                    bits,
+                );
+            }
             state = state_renormalize(state, src).ok_or_else(|| CramError::Truncated {
                 context: "rans_nx16 order-1 last renormalize",
             })?;
