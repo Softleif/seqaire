@@ -148,11 +148,27 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
 /// Returns `None` when the source is exhausted mid-renormalize. The
 /// caller materializes a `CramError::Truncated` from the `None` only
 /// on the err path — see the helpers above for the size + drop story.
+///
+/// Mirrors htslib's `RansDecRenorm`: the common case for a well-formed
+/// 4x8 stream is one renormalize byte per call (state was just above
+/// `LOWER_BOUND >> 8` before the decode step). Two unrolled `if`-and-
+/// read steps cover that and the slightly-rarer 2-byte case as
+/// straight-line code, without a `while`-loop overhead per state
+/// update. A small tail loop catches the pathological "state was
+/// near 0" case (which only arises on malformed streams in practice
+/// but is cheap to keep correct).
 #[inline]
 fn renormalize(state: &mut u32, src: &mut &[u8]) -> Option<()> {
+    if *state >= LOWER_BOUND {
+        return Some(());
+    }
+    *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
+    if *state >= LOWER_BOUND {
+        return Some(());
+    }
+    *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
     while *state < LOWER_BOUND {
-        let b = u32::from(read_u8(src)?);
-        *state = (*state << 8) | b;
+        *state = state.wrapping_shl(8) | u32::from(read_u8(src)?);
     }
     Some(())
 }
