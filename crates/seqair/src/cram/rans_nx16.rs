@@ -141,7 +141,7 @@ fn read_u8(src: &mut &[u8]) -> Option<u8> {
 }
 
 #[inline]
-fn read_u16_le(src: &mut &[u8]) -> Option<u16> {
+pub(crate) fn read_u16_le_prv(src: &mut &[u8]) -> Option<u16> {
     let (head, rest) = src.split_first_chunk::<2>()?;
     *src = rest;
     Some(u16::from_le_bytes(*head))
@@ -222,7 +222,7 @@ fn cumulative_frequencies_symbol(
 // r[impl cram.codec.state_step_safety]
 // SAFETY: spec guarantees g <= f * (s >> bits) + (s & mask) for valid frequency tables.
 // Use wrapping_sub for release-mode robustness against malformed data.
-fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
+pub(crate) fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
     let result =
         f.wrapping_mul(s >> bits).wrapping_add(s & (1u32.wrapping_shl(bits).wrapping_sub(1)));
     debug_assert!(result >= g, "state_step underflow: {result} < {g}");
@@ -241,13 +241,13 @@ fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
 /// near zero. `wrapping_shl` + `|` replaces `checked_*` because
 /// `s < 0x8000` guarantees `s << 16 ≤ 0x7FFF0000` (always fits in u32).
 #[inline]
-fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
+pub(crate) fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
     if s < (1 << 15) {
-        s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+        s = s.wrapping_shl(16) | u32::from(read_u16_le_prv(src)?);
         if s < (1 << 15) {
-            s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+            s = s.wrapping_shl(16) | u32::from(read_u16_le_prv(src)?);
             while s < (1 << 15) {
-                s = s.wrapping_shl(16) | u32::from(read_u16_le(src)?);
+                s = s.wrapping_shl(16) | u32::from(read_u16_le_prv(src)?);
             }
         }
     }
@@ -292,7 +292,7 @@ fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
 
 // ── Order-0 ──────────────────────────────────────────────────────────
 
-const ORDER_0_BITS: u32 = 12;
+pub(crate) const ORDER_0_BITS: u32 = 12;
 
 fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result<(), CramError> {
     if state_count == 32 {
@@ -305,12 +305,28 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
 /// SIMD dispatch (NEON / AVX2) has a clear insertion point.
 #[allow(clippy::indexing_slicing, reason = "sym ≤ 255 (u8), f < 4096 (12-bit mask)")]
 fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
-    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     let frequencies = read_frequencies_0(src)?;
     let cumulative_frequencies = build_cumulative_frequencies(&frequencies);
     let sym_table = build_symbol_table_nx16(&cumulative_frequencies);
     let mut states = read_states(src, 32)?;
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Safety: NEON is always available on aarch64.
+        unsafe {
+            return super::rans_nx16_neon::decode_32state_loop(
+                src,
+                dst,
+                &frequencies,
+                &cumulative_frequencies,
+                &sym_table,
+                &mut states,
+            );
+        }
+    }
+
+    // Scalar fallback
+    let truncated = || CramError::Truncated { context: "rans_nx16 order-0 truncated" };
     for chunk in dst.chunks_mut(32) {
         for (d, state) in chunk.iter_mut().zip(states.iter_mut()) {
             let f = state_cumulative_frequency(*state, ORDER_0_BITS);
