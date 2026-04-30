@@ -157,22 +157,31 @@ fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
 // r[impl cram.codec.uint7_bounded]
 // Cold helper (parsed once per block); keeps the rich `CramError`
 // signature so the `Uint7Overflow` variant survives.
+// r[impl cram.codec.uint7_bounded]
+// Cold helper (parsed once per block); keeps the rich `CramError`
+// signature so the `Uint7Overflow` variant survives.
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
     let mut n: u32 = 0;
-    let mut shift: u32 = 0;
+    let mut count: u8 = 0;
     loop {
-        if shift >= 35 {
+        if count >= 5 {
             return Err(CramError::Uint7Overflow);
+        }
+
+        #[allow(clippy::arithmetic_side_effects, reason = "count < 5")]
+        {
+            count += 1;
         }
 
         let b = u32::from(
             read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 uint7" })?,
         );
-        n |= (b & 0x7f).checked_shl(shift).ok_or(CramError::Uint7Overflow)?;
+        // ITF-8 is MSB-first: shift accumulator left so each new byte's
+        // 7 data bits become the new low bits.
+        n = (n << 7) | (b & 0x7f);
         if b & 0x80 == 0 {
             break;
         }
-        shift = shift.wrapping_add(7);
     }
     Ok(n)
 }
@@ -1113,13 +1122,31 @@ mod tests {
         assert_eq!(dst1, dst2);
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "value is masked to 7 bits or < 0x80")]
-    fn encode_uint7_prv(stream: &mut Vec<u8>, mut val: u32) {
-        while val >= 0x80 {
-            stream.push((val as u8 & 0x7F) | 0x80);
-            val >>= 7;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::arithmetic_side_effects,
+        reason = "val masked to 7 bits; n bounded to ≤5 by loop over 32-bit value shifted by 7"
+    )]
+    fn encode_uint7_prv(stream: &mut Vec<u8>, val: u32) {
+        if val == 0 {
+            stream.push(0);
+            return;
         }
-        stream.push(val as u8);
+        // Encode into temp buffer LSB-first, then emit in reverse (MSB-first).
+        let mut tmp = [0u8; 5];
+        let mut n = 0;
+        let mut v = val;
+        while v > 0 {
+            tmp[n] = v as u8 & 0x7F;
+            v >>= 7;
+            n += 1;
+        }
+        // MSB-first: all bytes except the last get continuation bit set.
+        while n > 1 {
+            n -= 1;
+            stream.push(tmp[n] | 0x80);
+        }
+        stream.push(tmp[0]);
     }
 
     #[test]
