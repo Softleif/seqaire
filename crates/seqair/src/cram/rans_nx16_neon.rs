@@ -1,11 +1,5 @@
 //! NEON-accelerated inner loop for rANS Nx16 order-0 32-state decode.
-//!
-//! Vectorizes the state update arithmetic (`freq * (state>>12) + (state&mask) - cum`)
-//! while keeping symbol lookup and renormalization scalar. Matches the existing
-#![allow(
-    clippy::indexing_slicing,
-    reason = "SIMD lane indices are compiler-checked array access; bounds guaranteed by j<32 invariant"
-)]
+#![allow(clippy::indexing_slicing, reason = "SIMD lane indices bounded by j<32 invariant")]
 
 #[cfg(target_arch = "aarch64")]
 use super::reader::CramError;
@@ -13,15 +7,12 @@ use super::reader::CramError;
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
 
-/// NEON 32-state order-0 inner loop. Replaces the scalar loop in
-/// `decode_order_0_32state` when compiled for aarch64.
+/// NEON 32-state order-0 inner loop.
 ///
 /// # Safety
 ///
-/// NEON support must be guaranteed by the caller (always true on aarch64).
-/// `dst.len()` must be a multiple of 32.
-/// `states.len() == 32`, `frequencies.len() == 256`,
-/// `cumulative_frequencies.len() == 256`, `sym_table.len() == 4096`.
+/// Caller guarantees NEON availability (always true on aarch64),
+/// `states.len() == 32`, and all table references are valid.
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
 pub(crate) unsafe fn decode_32state_loop(
@@ -33,8 +24,7 @@ pub(crate) unsafe fn decode_32state_loop(
     states: &mut [u32],
 ) -> Result<(), CramError> {
     let full_chunks = dst.len() / 32;
-    let threshold = unsafe { vdupq_n_u32(1 << 15) };
-    let mask_12bit = unsafe { vdupq_n_u32(0xFFF) };
+    let mask_12bit = vdupq_n_u32(0xFFF);
 
     for chunk_idx in 0..full_chunks {
         let start = chunk_idx.wrapping_mul(32);
@@ -53,9 +43,10 @@ pub(crate) unsafe fn decode_32state_loop(
 
         // SIMD state update (8 groups of 4)
         for j in (0..32).step_by(4) {
+            // Safety: states has ≥32 elements, j+4 ≤ 32.
             let s = unsafe { vld1q_u32(states.as_ptr().add(j)) };
-            let hi = unsafe { vshrq_n_u32(s, 12) };
-            let f = unsafe { vandq_u32(s, mask_12bit) };
+            let hi = vshrq_n_u32(s, 12);
+            let f = vandq_u32(s, mask_12bit);
 
             let syms = [
                 usize::from(chunk[j]),
@@ -76,13 +67,15 @@ pub(crate) unsafe fn decode_32state_loop(
                 cumulative_frequencies[syms[3]],
             ];
 
-            let freqs = unsafe { vld1q_u32(freq_arr.as_ptr()) };
-            let cums = unsafe { vld1q_u32(cum_arr.as_ptr()) };
-            let new_s = unsafe { vsubq_u32(vaddq_u32(vmulq_u32(freqs, hi), f), cums) };
+            // Safety: freq_arr and cum_arr are stack arrays with 4 valid u32 elements.
+            let (freqs, cums) =
+                unsafe { (vld1q_u32(freq_arr.as_ptr()), vld1q_u32(cum_arr.as_ptr())) };
+            let new_s = vsubq_u32(vaddq_u32(vmulq_u32(freqs, hi), f), cums);
+            // Safety: states has ≥32 elements, j+4 ≤ 32.
             unsafe { vst1q_u32(states.as_mut_ptr().add(j), new_s) };
         }
 
-        // ── Renormalize: scalar (32 iterations) ──
+        // Scalar renormalization
         for state in states.iter_mut() {
             if *state < (1 << 15) {
                 let lo = u32::from(
@@ -108,7 +101,7 @@ pub(crate) unsafe fn decode_32state_loop(
         }
     }
 
-    // ── Scalar remainder: bytes not filling a full 32-byte chunk ──
+    // Scalar remainder
     let remainder_start = full_chunks.wrapping_mul(32);
     if let Some(remainder) = dst.get_mut(remainder_start..) {
         for d in remainder.iter_mut() {
