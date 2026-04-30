@@ -72,25 +72,28 @@ pub fn decode(src: &[u8], mut uncompressed_size: usize) -> Result<Vec<u8>, CramE
 
 // ── Primitive readers ────────────────────────────────────────────────
 
+// Lazy `ok_or_else` is load-bearing in these per-byte helpers — see
+// the analogous comment in rans.rs::read_u8 for why eager `ok_or`
+// shows up as `drop_in_place<CramError>` in profiles.
 fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or(CramError::Truncated { context: "rans_nx16 u8" })?;
-    *src = src.get(1..).ok_or(CramError::Truncated { context: "rans_nx16 u8" })?;
+    let &b = src.first().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
+    *src = src.get(1..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u8" })?;
     Ok(b)
 }
 
 fn read_u16_le(src: &mut &[u8]) -> Result<u16, CramError> {
     let bytes: &[u8; 2] =
-        src.first_chunk().ok_or(CramError::Truncated { context: "rans_nx16 u16" })?;
+        src.first_chunk().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
     let val = u16::from_le_bytes(*bytes);
-    *src = src.get(2..).ok_or(CramError::Truncated { context: "rans_nx16 u16" })?;
+    *src = src.get(2..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u16" })?;
     Ok(val)
 }
 
 fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
     let bytes: &[u8; 4] =
-        src.first_chunk().ok_or(CramError::Truncated { context: "rans_nx16 u32" })?;
+        src.first_chunk().ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
     let val = u32::from_le_bytes(*bytes);
-    *src = src.get(4..).ok_or(CramError::Truncated { context: "rans_nx16 u32" })?;
+    *src = src.get(4..).ok_or_else(|| CramError::Truncated { context: "rans_nx16 u32" })?;
     Ok(val)
 }
 
@@ -165,10 +168,9 @@ fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
 fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Result<u32, CramError> {
     if s < (1 << 15) {
         let lo = u32::from(read_u16_le(src)?);
-        s = s
-            .checked_shl(16)
-            .and_then(|hi| hi.checked_add(lo))
-            .ok_or(CramError::Truncated { context: "rans_nx16 state renormalize overflow" })?;
+        s = s.checked_shl(16).and_then(|hi| hi.checked_add(lo)).ok_or_else(|| {
+            CramError::Truncated { context: "rans_nx16 state renormalize overflow" }
+        })?;
     }
     Ok(s)
 }
@@ -316,7 +318,7 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
     let chunk_size = dst
         .len()
         .checked_div(state_count)
-        .ok_or(CramError::Truncated { context: "rans_nx16 order-1 zero state count" })?;
+        .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 zero state count" })?;
 
     for i in 0..chunk_size {
         for (j, (state, prev_sym)) in states.iter_mut().zip(&mut prev_syms).enumerate() {
@@ -325,16 +327,16 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8], state_count: usize) -> Result
             let sym = cumulative_frequencies_symbol(
                 cumulative_frequencies
                     .get(k)
-                    .ok_or(CramError::Truncated { context: "rans_nx16 order-1 cumfreq" })?,
+                    .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 cumfreq" })?,
                 f,
             );
 
-            let out_idx = j
-                .checked_mul(chunk_size)
-                .and_then(|v| v.checked_add(i))
-                .ok_or(CramError::Truncated { context: "rans_nx16 order-1 index overflow" })?;
+            let out_idx =
+                j.checked_mul(chunk_size).and_then(|v| v.checked_add(i)).ok_or_else(|| {
+                    CramError::Truncated { context: "rans_nx16 order-1 index overflow" }
+                })?;
             *dst.get_mut(out_idx)
-                .ok_or(CramError::Truncated { context: "rans_nx16 order-1 output" })? = sym;
+                .ok_or_else(|| CramError::Truncated { context: "rans_nx16 order-1 output" })? = sym;
 
             let l = usize::from(sym);
             *state = state_step(*state, frequencies[k][l], cumulative_frequencies[k][l], bits);
