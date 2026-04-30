@@ -119,23 +119,28 @@ pub(crate) unsafe fn decode_32state_loop(
         }
     }
 
-    // Scalar remainder
+    // Scalar remainder — cycle through states like the scalar fallback does.
+    // Using states[0] for all remainder items would exhaust the source
+    // because the rANS stream interleaves data across all N states.
     let remainder_start = full_chunks.wrapping_mul(32);
     if let Some(remainder) = dst.get_mut(remainder_start..) {
-        for d in remainder.iter_mut() {
-            let f = states[0] & 0xFFF;
+        for (j, d) in remainder.iter_mut().enumerate() {
+            let state = states
+                .get_mut(j)
+                .ok_or(CramError::Truncated { context: "avx2 remainder state index" })?;
+            let f = *state & 0xFFF;
             let sym = sym_table
                 .get(f as usize)
                 .ok_or(CramError::Truncated { context: "avx2 remainder sym_table" })?;
             *d = *sym;
             let i = usize::from(*sym);
-            states[0] = super::rans_nx16::state_step(
-                states[0],
+            *state = super::rans_nx16::state_step(
+                *state,
                 frequencies[i],
                 cumulative_frequencies[i],
                 super::rans_nx16::ORDER_0_BITS,
             );
-            states[0] = super::rans_nx16::state_renormalize(states[0], src)
+            *state = super::rans_nx16::state_renormalize(*state, src)
                 .ok_or(CramError::Truncated { context: "avx2 remainder renorm" })?;
         }
     }
