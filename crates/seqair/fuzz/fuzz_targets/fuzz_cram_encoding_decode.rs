@@ -41,6 +41,7 @@ fuzz_target!(|input: EncodingInput| {
 
     // Fuzz ExternalCursor operations
     let mut cursor = ExternalCursor::new(input.external_data);
+    let mut buf = Vec::new();
     for op in &input.external_ops {
         match op {
             ExternalOp::ReadByte => {
@@ -50,12 +51,14 @@ fuzz_target!(|input: EncodingInput| {
                 let _ = cursor.read_itf8();
             }
             ExternalOp::ReadBytesUntil(stop) => {
-                let _ = cursor.read_bytes_until(*stop);
+                buf.clear();
+                let _ = cursor.read_bytes_until_into(*stop, &mut buf);
             }
             ExternalOp::ReadBytes(n) => {
                 // Clamp to avoid huge allocations
                 let n = (*n as usize) % 64;
-                let _ = cursor.read_bytes(n);
+                buf.clear();
+                let _ = cursor.read_bytes_into(n, &mut buf);
             }
             ExternalOp::Remaining => {
                 let _ = cursor.remaining();
