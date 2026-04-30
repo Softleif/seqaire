@@ -342,17 +342,26 @@ fn decode_order_0_32state(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramErr
     #[cfg(target_arch = "x86_64")]
     {
         if is_x86_feature_detected!("avx2") {
+            let states_snapshot = states.clone();
+            let src_snapshot = *src;
             // Safety: AVX2 availability verified above.
             unsafe {
-                return super::rans_nx16_avx2::decode_32state_loop(
+                if super::rans_nx16_avx2::decode_32state_loop(
                     src,
                     dst,
                     &frequencies,
                     &cumulative_frequencies,
                     &sym_table,
                     &mut states,
-                );
+                )
+                .is_ok()
+                {
+                    return Ok(());
+                }
             }
+            // AVX2 failed — restore pre-AVX2 state and fall through to scalar.
+            states = states_snapshot;
+            *src = src_snapshot;
         }
     }
 
@@ -1227,6 +1236,44 @@ mod tests {
             let mut scalar_dst = vec![0u8; len];
             decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
             assert_eq!(simd_result, scalar_dst);
+        }
+
+        #[test]
+        fn simd_remainder_uses_correct_lanes(len in 0usize..256) {
+            // Two symbols with equal frequencies so states diverge on
+            // different s&0xFFF values. Initial states start large enough
+            // that no renormalization is needed for ≤256 rounds.
+            let mut stream = Vec::with_capacity(512);
+            stream.push(FLAG_N32);
+            encode_uint7_prv(&mut stream, len as u32);
+            // Alphabet: sym 5 and sym 100. Non-consecutive to avoid the
+            // run-compression path in read_alphabet (5→100 is not a run).
+            stream.push(5);
+            stream.push(100);
+            stream.push(0); // terminator
+            // freq[5]=2048, freq[100]=2048 (sum = 4096 → no normalization)
+            encode_uint7_prv(&mut stream, 2048);
+            encode_uint7_prv(&mut stream, 2048);
+            // 32 initial states. Start at (4096 << 12) | (j * 80) so lanes
+            // differ in their s&0xFFF, producing different decoded symbols.
+            for j in 0u32..32 {
+                let s = (4096 << 12) | (j * 80);
+                stream.extend_from_slice(&s.to_le_bytes());
+            }
+
+            let mut cur_simd: &[u8] = &stream;
+            read_u8(&mut cur_simd).unwrap();
+            let _ = read_uint7(&mut cur_simd).unwrap();
+            let mut dst_simd = vec![0u8; len];
+            decode_order_0_32state(&mut cur_simd, &mut dst_simd).unwrap();
+
+            let mut cur_gen: &[u8] = &stream;
+            read_u8(&mut cur_gen).unwrap();
+            let _ = read_uint7(&mut cur_gen).unwrap();
+            let mut dst_gen = vec![0u8; len];
+            decode_order_0_generic(&mut cur_gen, &mut dst_gen, 32).unwrap();
+
+            assert_eq!(dst_simd, dst_gen, "SIMD and scalar diverge for len={len}");
         }
     }
 }
