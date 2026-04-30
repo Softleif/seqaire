@@ -830,6 +830,7 @@ fn read_rle_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError
 }
 
 #[cfg(test)]
+#[allow(clippy::cast_possible_truncation, reason = "test code with bounded values")]
 mod tests {
     use super::*;
 
@@ -999,7 +1000,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn read_uint7_roundtrip(val in 0u32..=u32::MAX) {
-            let mut stream = Vec::new();
+            let mut stream = Vec::with_capacity(256);
             encode_uint7_prv(&mut stream, val);
             let mut cur: &[u8] = &stream;
             let decoded = read_uint7(&mut cur).unwrap();
@@ -1011,7 +1012,7 @@ mod tests {
         #[test]
         fn read_uint7_roundtrip_max_continuation(val in (1u32 << 28)..=u32::MAX) {
             // Values requiring 5 continuation bytes (the maximum).
-            let mut stream = Vec::new();
+            let mut stream = Vec::with_capacity(256);
             encode_uint7_prv(&mut stream, val);
             // Must produce exactly 5 bytes (all continuation except last).
             proptest::prop_assert_eq!(stream.len(), 5, "max-continuation encodes to 5 bytes");
@@ -1076,13 +1077,14 @@ mod tests {
         }
     }
 
+    #[allow(clippy::cast_possible_truncation, reason = "len bounded by proptest range")]
     #[test]
     fn order0_32state_and_generic_produce_same_output() {
         // Minimal 32-state order-0 stream: symbol 0 with freq=4096
         // (covers the full 12-bit range), 32 states initialized
         // to freq<<12, decodes to all-zero output. Validates that
         // the 32-state path and generic path agree on the same input.
-        let mut stream = Vec::new();
+        let mut stream = Vec::with_capacity(256);
         stream.push(0x04); // flags: N32
         stream.push(4); // uncompressed_size = 4 (uint7)
         stream.push(0); // alphabet: sym=0
@@ -1111,6 +1113,7 @@ mod tests {
         assert_eq!(dst1, dst2);
     }
 
+    #[allow(clippy::cast_possible_truncation, reason = "value is masked to 7 bits or < 0x80")]
     fn encode_uint7_prv(stream: &mut Vec<u8>, mut val: u32) {
         while val >= 0x80 {
             stream.push((val as u8 & 0x7F) | 0x80);
@@ -1122,7 +1125,7 @@ mod tests {
     #[test]
     fn neon_simd_handles_len_32() {
         let len = 32;
-        let mut stream = Vec::new();
+        let mut stream = Vec::with_capacity(256);
         stream.push(FLAG_N32);
         encode_uint7_prv(&mut stream, len as u32);
         stream.extend_from_slice(&[0, 0]);
@@ -1148,7 +1151,7 @@ mod tests {
     #[test]
     fn neon_fallback_handles_len_128_direct() {
         let len = 128;
-        let mut stream = Vec::new();
+        let mut stream = Vec::with_capacity(256);
         stream.push(FLAG_N32);
         encode_uint7_prv(&mut stream, len as u32);
         stream.extend_from_slice(&[0, 0]);
@@ -1175,7 +1178,7 @@ mod tests {
             // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
             // (covers the full 12-bit range), all other symbols freq=0.
             // With freq[sym0]=4096 the state is invariant — no renorm needed.
-            let mut stream = Vec::new();
+            let mut stream = Vec::with_capacity(256);
             stream.push(FLAG_N32);
             encode_uint7_prv(&mut stream, len as u32);
             // Alphabet: sym 0 only

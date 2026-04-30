@@ -84,8 +84,7 @@ fn cram_record_decode(c: &mut Criterion) {
             let crai_index = ncram::crai::fs::read(CRAI_PATH).unwrap();
             let region = Region::new(
                 CHROM,
-                Position::try_from(1_usize).unwrap()
-                    ..=Position::try_from(usize::try_from(END).unwrap()).unwrap(),
+                Position::try_from(1_usize).unwrap()..=Position::try_from(END.as_usize()).unwrap(),
             );
             let query = reader.query(&header, &crai_index, &region).unwrap();
             let mut count = 0usize;
