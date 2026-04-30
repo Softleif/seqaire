@@ -3,6 +3,20 @@
 //! 4-way interleaved asymmetric numeral systems with 8-bit renormalization.
 //! Supports order-0 and order-1 modes.
 
+// `clippy::unnecessary_lazy_evaluations` flags every `ok_or_else(||
+// CramError::Truncated { ... })` here, because the variant's
+// construction is "cheap". On the per-byte hot path it isn't: the
+// eager `ok_or` form has the compiler build (and drop) a full-sized
+// `CramError` on every successful read — the type's Drop has to
+// dispatch on the discriminant because other variants own `PathBuf` /
+// `std::io::Error` / `SmolStr`. samply showed
+// `core::ptr::drop_in_place<CramError>` next to `decode_order_1` /
+// `read_u8` for exactly this. Keep the lazy form here.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::reader::CramError;
 
 const ALPHABET_SIZE: usize = 256;

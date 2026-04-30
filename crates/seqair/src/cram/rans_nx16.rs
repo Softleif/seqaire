@@ -4,6 +4,14 @@
 //! N-way interleaved asymmetric numeral systems with 16-bit renormalization.
 //! Supports order-0 and order-1 modes, plus STRIPE, RLE, and PACK transforms.
 
+// See rans.rs for the rationale: lazy `ok_or_else(|| CramError::...)`
+// is the deliberate hot-path choice because eager construction triggers
+// a per-call `drop_in_place<CramError>` that shows up in profiles.
+#![allow(
+    clippy::unnecessary_lazy_evaluations,
+    reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
+)]
+
 use super::reader::CramError;
 
 const ALPHABET_SIZE: usize = 256;
