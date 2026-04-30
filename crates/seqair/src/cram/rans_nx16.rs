@@ -159,24 +159,20 @@ fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
 // signature so the `Uint7Overflow` variant survives.
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
     let mut n: u32 = 0;
-    let mut count: u8 = 0;
+    let mut shift: u32 = 0;
     loop {
-        if count >= 5 {
+        if shift >= 35 {
             return Err(CramError::Uint7Overflow);
-        }
-
-        #[allow(clippy::arithmetic_side_effects, reason = "count < 5")]
-        {
-            count += 1;
         }
 
         let b = u32::from(
             read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 uint7" })?,
         );
-        n = (n << 7) | (b & 0x7f);
+        n |= (b & 0x7f).checked_shl(shift).ok_or(CramError::Uint7Overflow)?;
         if b & 0x80 == 0 {
             break;
         }
+        shift = shift.wrapping_add(7);
     }
     Ok(n)
 }
@@ -986,6 +982,31 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    proptest::proptest! {
+        #[test]
+        fn read_uint7_roundtrip(val in 0u32..=u32::MAX) {
+            let mut stream = Vec::new();
+            encode_uint7_prv(&mut stream, val);
+            let mut cur: &[u8] = &stream;
+            let decoded = read_uint7(&mut cur).unwrap();
+            proptest::prop_assert_eq!(decoded, val);
+            // Encoder and decoder must consume exactly the same number of bytes.
+            proptest::prop_assert!(cur.is_empty(), "undecoded trailing bytes");
+        }
+
+        #[test]
+        fn read_uint7_roundtrip_max_continuation(val in (1u32 << 28)..=u32::MAX) {
+            // Values requiring 5 continuation bytes (the maximum).
+            let mut stream = Vec::new();
+            encode_uint7_prv(&mut stream, val);
+            // Must produce exactly 5 bytes (all continuation except last).
+            proptest::prop_assert_eq!(stream.len(), 5, "max-continuation encodes to 5 bytes");
+            let mut cur: &[u8] = &stream;
+            let decoded = read_uint7(&mut cur).unwrap();
+            proptest::prop_assert_eq!(decoded, val);
+        }
+    }
+
     // r[verify cram.codec.normalize_checked]
     #[test]
     fn normalize_frequencies_overflow_returns_error() {
@@ -1135,7 +1156,7 @@ mod tests {
     proptest::proptest! {
         #[test]
         fn simd_matches_scalar_order0_32state(
-            len in 0usize..96,
+            len in 0usize..1024,
         ) {
             // Stream decoding to `len` zero bytes. Symbol 0 has freq=4096
             // (covers the full 12-bit range), all other symbols freq=0.
