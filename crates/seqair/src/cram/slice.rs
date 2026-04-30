@@ -108,7 +108,7 @@ impl SliceHeader {
     clippy::too_many_arguments,
     reason = "CRAM slice decoding requires all compression header, data, and offset parameters"
 )]
-pub fn decode_slice<E: CustomizeRecordStore>(
+pub(crate) fn decode_slice<E: CustomizeRecordStore>(
     ch: &CompressionHeader,
     container_data: &[u8],
     slice_offset: usize,
@@ -128,13 +128,15 @@ pub fn decode_slice<E: CustomizeRecordStore>(
     feature_byte_buf: &mut Vec<u8>,
     cigar_ops_buf: &mut Vec<(u32, u8)>,
     customize: &mut E,
+    rans_4x8_buf: &mut Option<super::rans::Rans4x8Buf>,
 ) -> Result<(usize, usize), CramError> {
     let slice_data = container_data
         .get(slice_offset..)
         .ok_or(CramError::Truncated { context: "slice offset" })?;
 
     // Parse slice header block
-    let (slice_header_block, mut pos) = block::parse_block(slice_data)?;
+    let (slice_header_block, mut pos) =
+        block::parse_block_with_buf(slice_data, rans_4x8_buf.as_mut())?;
     if slice_header_block.content_type != ContentType::SliceHeader {
         return Err(CramError::ExpectedSliceHeader { found: slice_header_block.content_type });
     }
@@ -187,7 +189,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
     for _ in 0..sh.num_blocks {
         let remaining =
             slice_data.get(pos..).ok_or(CramError::Truncated { context: "slice block" })?;
-        let (blk, consumed) = block::parse_block(remaining)?;
+        let (blk, consumed) = block::parse_block_with_buf(remaining, rans_4x8_buf.as_mut())?;
         pos = pos.wrapping_add(consumed);
 
         match blk.content_type {
@@ -205,9 +207,7 @@ pub fn decode_slice<E: CustomizeRecordStore>(
 
     // r[impl cram.slice.embedded_ref]
     let embedded_ref_data = if sh.embedded_reference >= 0 {
-        let idx = external_blocks
-            .iter()
-            .position(|(id, _)| *id == sh.embedded_reference);
+        let idx = external_blocks.iter().position(|(id, _)| *id == sh.embedded_reference);
         match idx {
             Some(i) => external_blocks.swap_remove(i).1.into_data(),
             None => Vec::new(),
@@ -1177,6 +1177,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut (),
+            &mut None,
         );
 
         assert!(
