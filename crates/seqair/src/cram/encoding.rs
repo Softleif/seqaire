@@ -426,18 +426,67 @@ impl ByteEncoding {
             Self::Null => Ok(0),
             Self::External { content_id } => {
                 let cursor = ctx.get_external(*content_id)?;
-                cursor.read_byte().ok_or(CramError::Truncated { context: "external byte" })
+                cursor.read_byte().ok_or_else(|| CramError::Truncated { context: "external byte" })
             }
             Self::Huffman(table) => {
                 let val = table
                     .decode(&mut ctx.core)
-                    .ok_or(CramError::Truncated { context: "huffman byte" })?;
+                    .ok_or_else(|| CramError::Truncated { context: "huffman byte" })?;
                 #[expect(
                     clippy::cast_possible_truncation,
                     clippy::cast_sign_loss,
                     reason = "Huffman byte encoding returns i32 but values are 0..=255 for byte streams"
                 )]
                 Ok(val as u8)
+            }
+        }
+    }
+
+    /// Decode `n` bytes and append them to `buf`.
+    ///
+    /// For `External` (the common case for `BA` / `QS` / per-byte
+    /// payload streams), this is a single `FxHashMap` lookup followed
+    /// by one `extend_from_slice` of `n` bytes — orders of magnitude
+    /// faster than calling [`Self::decode`] in a loop, which would do
+    /// `n` lookups and `n` byte reads. samply showed
+    /// `ByteEncoding::decode` near the top of `decode_record` self-time
+    /// because the `quality_score` and the inner `val_encoding` of
+    /// `ByteArrayLen` were called per byte through that path.
+    ///
+    /// For `Null` we extend with zeros; for `Huffman` we still loop
+    /// (each symbol's bit length is data-dependent).
+    #[inline]
+    pub fn decode_n_into(
+        &self,
+        ctx: &mut DecodeContext<'_>,
+        n: usize,
+        buf: &mut Vec<u8>,
+    ) -> Result<(), CramError> {
+        match self {
+            Self::Null => {
+                buf.resize(buf.len().saturating_add(n), 0);
+                Ok(())
+            }
+            Self::External { content_id } => {
+                let cursor = ctx.get_external(*content_id)?;
+                cursor
+                    .read_bytes_into(n, buf)
+                    .ok_or_else(|| CramError::Truncated { context: "external bulk bytes" })
+            }
+            Self::Huffman(table) => {
+                buf.reserve(n);
+                for _ in 0..n {
+                    let val = table
+                        .decode(&mut ctx.core)
+                        .ok_or_else(|| CramError::Truncated { context: "huffman byte" })?;
+                    #[expect(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        reason = "Huffman byte encoding returns i32 but values are 0..=255 for byte streams"
+                    )]
+                    buf.push(val as u8);
+                }
+                Ok(())
             }
         }
     }
@@ -508,18 +557,18 @@ impl ByteArrayEncoding {
                 let len = usize::try_from(len_i32)
                     .map_err(|_| super::reader::CramError::InvalidLength { value: len_i32 })?;
                 super::reader::check_alloc_size(len, "byte array length")?;
-                buf.reserve(len);
-                for _ in 0..len {
-                    buf.push(val_encoding.decode(ctx)?);
-                }
-                Ok(())
+                // `decode_n_into` fast-paths the External case (one
+                // FxHashMap lookup + one memcpy of `len` bytes) instead
+                // of the per-byte `val_encoding.decode(ctx)` loop that
+                // used to do `len` lookups and `len` byte reads.
+                val_encoding.decode_n_into(ctx, len, buf)
             }
             // r[impl cram.encoding.byte_array_stop]
             Self::ByteArrayStop { stop_byte, content_id } => {
                 let cursor = ctx.get_external(*content_id)?;
                 cursor
                     .read_bytes_until_into(*stop_byte, buf)
-                    .ok_or(CramError::Truncated { context: "byte array stop" })
+                    .ok_or_else(|| CramError::Truncated { context: "byte array stop" })
             }
         }
     }

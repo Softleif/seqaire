@@ -489,11 +489,11 @@ fn decode_record<E: CustomizeRecordStore>(
         let mapq = ds.mapping_quality.decode(ctx)? as u8;
 
         // r[impl cram.record.quality]
-        // Quality scores
+        // Quality scores. Bulk decode for External (single FxHashMap
+        // lookup + one memcpy of `read_length` bytes) instead of the
+        // per-byte `decode(ctx)` loop that dominated profiles.
         if quality_as_array {
-            for _ in 0..read_length {
-                qual_buf.push(ds.quality_score.decode(ctx)?);
-            }
+            ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
         } else {
             qual_buf.resize(read_length, 0xFF);
         }
@@ -605,11 +605,10 @@ fn decode_record<E: CustomizeRecordStore>(
         }
     }
 
-    // Quality
+    // Quality. See the mapped-read branch above for the bulk-decode
+    // rationale.
     if quality_as_array {
-        for _ in 0..read_length {
-            qual_buf.push(ds.quality_score.decode(ctx)?);
-        }
+        ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
     } else {
         qual_buf.resize(read_length, 0xFF);
     }
