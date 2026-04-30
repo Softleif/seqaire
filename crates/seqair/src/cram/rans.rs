@@ -101,31 +101,35 @@ fn decode_order_1(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     // Chunk-based interleaving: split output into 4 equal segments.
     // Each state decodes into its own segment sequentially.
     let chunk_size = dst.len() / 4;
+    // Precompute write offsets for each state. `chunk_size = dst.len() / 4`,
+    // so `bases[si] + pos < 4 * chunk_size <= dst.len()` for `si < 4` and
+    // `pos < chunk_size`. Eliminates per-iteration `checked_mul` /
+    // `checked_add` / `ok_or_else` on the `out_idx` calculation.
+    let bases: [usize; 4] = [0, chunk_size, chunk_size.wrapping_mul(2), chunk_size.wrapping_mul(3)];
 
     for pos in 0..chunk_size {
         for si in 0usize..4 {
-            let out_idx = si
-                .checked_mul(chunk_size)
-                .and_then(|base| base.checked_add(pos))
-                .ok_or_else(|| CramError::Truncated { context: "rans order-1 out_idx overflow" })?;
+            // Pull state into a local so the inner expression doesn't
+            // re-index `states[si]` three times per iteration.
+            let mut state = states[si];
             let ctx = prev_syms[si] as usize;
-            let f = (states[si] & 0x0FFF) as u16;
+            let f = (state & 0x0FFF) as u16;
             let sym = sym_tables[ctx][f as usize];
-            dst[out_idx] = sym;
+            dst[bases[si].wrapping_add(pos)] = sym;
             let sym_idx = sym as usize;
-            states[si] = u32::from(freq[ctx][sym_idx])
-                .wrapping_mul(states[si] >> 12)
-                .wrapping_add(states[si] & 0x0FFF)
+            state = u32::from(freq[ctx][sym_idx])
+                .wrapping_mul(state >> 12)
+                .wrapping_add(state & 0x0FFF)
                 .wrapping_sub(u32::from(cum_freq[ctx][sym_idx]));
-            renormalize(&mut states[si], src).ok_or_else(truncated)?;
+            renormalize(&mut state, src).ok_or_else(truncated)?;
+            states[si] = state;
             prev_syms[si] = sym;
         }
     }
 
-    // Remainder: state 3 handles trailing bytes
-    let remainder_start = 4usize.checked_mul(chunk_size).ok_or_else(|| CramError::Truncated {
-        context: "rans order-1 remainder offset overflow",
-    })?;
+    // Remainder: state 3 handles trailing bytes. `4 * chunk_size <= dst.len()`
+    // by construction (chunk_size = dst.len() / 4), so this can't overflow.
+    let remainder_start = chunk_size.wrapping_mul(4);
     for pos in remainder_start..dst.len() {
         let ctx = prev_syms[3] as usize;
         let f = (states[3] & 0x0FFF) as u16;
