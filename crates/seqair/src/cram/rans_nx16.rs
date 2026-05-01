@@ -848,7 +848,8 @@ fn read_rle_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation, reason = "test code with bounded values")]
+#[allow(clippy::cast_possible_truncation, reason = "test code")]
+#[allow(clippy::arithmetic_side_effects, reason = "test code")]
 mod tests {
     use super::*;
 
