@@ -26,14 +26,20 @@ const FLAG_PACK: u8 = 0x80;
 
 type Frequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
 type CumulativeFrequencies1 = Box<[[u32; ALPHABET_SIZE]; ALPHABET_SIZE]>;
+/// 256 contexts x 4096-entry symbol-decode table. ~1 MiB.
+type SymTables1 = Box<[[u8; 4096]; ALPHABET_SIZE]>;
 
-/// Reusable allocations for rANS Nx16 order-1 decoding (∼512 KB).
+/// Reusable allocations for rANS Nx16 order-1 decoding (~1.5 MB).
 ///
-/// Holds the per-context frequency and cumulative-frequency tables
+/// Holds the per-context frequency, cumulative-frequency, and symbol-decode tables
 /// so they aren't `Box::new`'d for every order-1 block.
 pub(crate) struct Nx16Order1Buf {
     pub frequencies: Frequencies1,
     pub cumulative_frequencies: CumulativeFrequencies1,
+    /// Per-context symbol-decode tables. Mirrors `Rans4x8Buf::sym_tables`;
+    /// avoids the linear scan that `cumulative_frequencies_symbol` did
+    /// inside the order-1 hot loop.
+    pub sym_tables: SymTables1,
     pub states: Vec<u32>,
     pub prev_syms: Vec<u8>,
 }
@@ -43,6 +49,7 @@ impl Nx16Order1Buf {
         Self {
             frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
             cumulative_frequencies: Box::new([[0u32; ALPHABET_SIZE]; ALPHABET_SIZE]),
+            sym_tables: Box::new([[0u8; 4096]; ALPHABET_SIZE]),
             states: Vec::with_capacity(32),
             prev_syms: Vec::with_capacity(32),
         }
@@ -211,6 +218,12 @@ fn state_cumulative_frequency(s: u32, bits: u32) -> u32 {
     s & mask
 }
 
+/// Linear-scan oracle for the precomputed `build_symbol_table_nx16` table.
+/// Kept for tests as an independent check; the decode hot loops now use
+/// the precomputed tables directly (order-0: `build_symbol_table_nx16`;
+/// order-1: `Nx16Order1Buf::sym_tables` populated by
+/// `build_symbol_table_nx16_into`).
+#[cfg(test)]
 fn cumulative_frequencies_symbol(
     cumulative_frequencies: &[u32; ALPHABET_SIZE],
     frequency: u32,
@@ -498,14 +511,25 @@ fn build_cumulative_frequencies(frequencies: &[u32; ALPHABET_SIZE]) -> [u32; ALP
 )]
 fn build_symbol_table_nx16(cum: &[u32; ALPHABET_SIZE]) -> [u8; 4096] {
     let mut table = [0u8; 4096];
+    build_symbol_table_nx16_into(cum, &mut table);
+    table
+}
+
+/// In-place form of [`build_symbol_table_nx16`] for callers with a
+/// reusable buffer (the order-1 path: 256 contexts × 4096 entries =
+/// 1 MiB, repopulated per block).
+#[allow(
+    clippy::indexing_slicing,
+    reason = "sym ≤ 254 (loop guard), sym+1 ≤ 255 < ALPHABET_SIZE=256"
+)]
+fn build_symbol_table_nx16_into(cum: &[u32; ALPHABET_SIZE], table: &mut [u8; 4096]) {
     let mut sym = 0u8;
-    for (f, entry) in (0u32..4096).zip(&mut table) {
+    for (f, entry) in (0u32..4096).zip(table.iter_mut()) {
         while sym < 255 && f >= *cum.get(usize::from(sym).wrapping_add(1)).unwrap_or(&u32::MAX) {
             sym = sym.wrapping_add(1);
         }
         *entry = sym;
     }
-    table
 }
 
 fn decode_order_1_with_buf(
@@ -516,6 +540,13 @@ fn decode_order_1_with_buf(
 ) -> Result<(), CramError> {
     let bits = read_frequencies_1(src, &mut buf.frequencies)?;
     build_cumulative_frequencies_1_into(&buf.frequencies, &mut buf.cumulative_frequencies);
+    // Pre-compute per-context symbol-decode tables (256 ctx * 4096 entries
+    // = 1 MiB). Replaces the O(256) `cumulative_frequencies_symbol` linear
+    // scan with a single index in the per-byte hot loop below — mirrors
+    // what `Rans4x8Buf` already does for the 4x8 codec.
+    for (cum, table) in buf.cumulative_frequencies.iter().zip(buf.sym_tables.iter_mut()) {
+        build_symbol_table_nx16_into(cum, table);
+    }
 
     let states = &mut buf.states;
     states.clear();
@@ -537,13 +568,13 @@ fn decode_order_1_with_buf(
 
     #[allow(
         clippy::indexing_slicing,
-        reason = "k/l ≤ 255, state/prev_sym indices from enumerate < state_count"
+        reason = "k/l ≤ 255, state/prev_sym indices from enumerate < state_count, f < 4096"
     )]
     for i in 0..chunk_size {
         for (j, (state, prev_sym)) in states.iter_mut().zip(prev_syms.iter_mut()).enumerate() {
             let k = usize::from(*prev_sym);
             let f = state_cumulative_frequency(*state, bits);
-            let sym = cumulative_frequencies_symbol(&buf.cumulative_frequencies[k], f);
+            let sym = buf.sym_tables[k][f as usize];
 
             let out_idx =
                 j.checked_mul(chunk_size).and_then(|v| v.checked_add(i)).ok_or_else(|| {
@@ -579,8 +610,8 @@ fn decode_order_1_with_buf(
             let k = usize::from(prev_sym);
             debug_assert!(k < ALPHABET_SIZE, "prev_sym {prev_sym} out of range");
             let f = state_cumulative_frequency(state, bits);
-            #[allow(clippy::indexing_slicing, reason = "k < 256, l < 256")]
-            let sym = cumulative_frequencies_symbol(&buf.cumulative_frequencies[k], f);
+            #[allow(clippy::indexing_slicing, reason = "k < 256, f < 4096")]
+            let sym = buf.sym_tables[k][f as usize];
             *d = sym;
             let l = usize::from(sym);
             debug_assert!(l < ALPHABET_SIZE, "sym {sym} out of range");
@@ -1238,6 +1269,44 @@ mod tests {
             let expected = cumulative_frequencies_symbol(&cum, f_val);
             let actual = table[f_val as usize];
             assert_eq!(actual, expected);
+        }
+    }
+
+    proptest::proptest! {
+        // For arbitrary cumulative-frequency distributions summing to 4096,
+        // the precomputed table must agree with the linear-scan oracle on
+        // every f in [0, 4096).
+        #[test]
+        fn build_symbol_table_proptest(seeds in proptest::collection::vec(0u32..=4096, 8)) {
+            // Build a frequency table from the seed weights, normalized to sum 4096.
+            let total: u64 = seeds.iter().map(|&s| u64::from(s)).sum();
+            proptest::prop_assume!(total > 0);
+            let mut freq = [0u32; 256];
+            for (i, &s) in seeds.iter().enumerate() {
+                let scaled = (u64::from(s) * 4096 / total) as u32;
+                freq[i % 256] = freq[i % 256].saturating_add(scaled);
+            }
+            // Normalize residual to symbol 0.
+            let sum: u32 = freq.iter().sum();
+            if sum < 4096 {
+                freq[0] = freq[0].saturating_add(4096 - sum);
+            }
+            // Skip if normalization overflow — only valid distributions matter.
+            proptest::prop_assume!(freq.iter().sum::<u32>() == 4096);
+
+            let cum = build_cumulative_frequencies(&freq);
+            let table = build_symbol_table_nx16(&cum);
+
+            // Verify the in-place form populates identically.
+            let mut table_into = [0u8; 4096];
+            build_symbol_table_nx16_into(&cum, &mut table_into);
+            proptest::prop_assert_eq!(table, table_into);
+
+            for f_val in 0u32..4096 {
+                let expected = cumulative_frequencies_symbol(&cum, f_val);
+                let actual = table[f_val as usize];
+                proptest::prop_assert_eq!(actual, expected, "mismatch at f={}", f_val);
+            }
         }
     }
 
