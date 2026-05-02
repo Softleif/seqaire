@@ -23,6 +23,7 @@ pub(crate) unsafe fn decode_32state_loop(
     sym_table: &[u8; 4096],
     states: &mut [u32],
 ) -> Result<(), CramError> {
+    debug_assert_eq!(states.len(), 32, "NEON 32-state loop requires exactly 32 states");
     let full_chunks = dst.len() / 32;
     let mask_12bit = vdupq_n_u32(0xFFF);
 
@@ -32,13 +33,12 @@ pub(crate) unsafe fn decode_32state_loop(
             .get_mut(start..start.wrapping_add(32))
             .ok_or(CramError::Truncated { context: "neon chunk range" })?;
 
-        // Scalar symbol lookup
+        // Scalar symbol lookup. `f < 4096` is statically guaranteed by the
+        // 12-bit mask, so `sym_table[f]` and `chunk[j]` are bounds-check-free
+        // under the file-level indexing_slicing allow.
         for j in 0..32 {
-            let f = states.get(j).unwrap_or(&0) & 0xFFF;
-            let sym = sym_table
-                .get(f as usize)
-                .ok_or(CramError::Truncated { context: "neon sym_table" })?;
-            *chunk.get_mut(j).unwrap_or(&mut 0) = *sym;
+            let f = (states[j] & 0xFFF) as usize;
+            chunk[j] = sym_table[f];
         }
 
         // SIMD state update (8 groups of 4)
@@ -75,29 +75,12 @@ pub(crate) unsafe fn decode_32state_loop(
             unsafe { vst1q_u32(states.as_mut_ptr().add(j), new_s) };
         }
 
-        // Scalar renormalization
+        // Scalar renormalization. Calls the shared `state_renormalize` so the
+        // NEON path can never drift from the scalar path's behavior — the
+        // fast `s >= 1<<15` early-out is inlined.
         for state in states.iter_mut() {
-            if *state < (1 << 15) {
-                let lo = u32::from(
-                    super::rans_nx16::read_u16_le_prv(src)
-                        .ok_or(CramError::Truncated { context: "neon renorm" })?,
-                );
-                *state = state.wrapping_shl(16) | lo;
-                if *state < (1 << 15) {
-                    let lo = u32::from(
-                        super::rans_nx16::read_u16_le_prv(src)
-                            .ok_or(CramError::Truncated { context: "neon renorm" })?,
-                    );
-                    *state = state.wrapping_shl(16) | lo;
-                    while *state < (1 << 15) {
-                        let lo = u32::from(
-                            super::rans_nx16::read_u16_le_prv(src)
-                                .ok_or(CramError::Truncated { context: "neon renorm" })?,
-                        );
-                        *state = state.wrapping_shl(16) | lo;
-                    }
-                }
-            }
+            *state = super::rans_nx16::state_renormalize(*state, src)
+                .ok_or(CramError::Truncated { context: "neon renorm" })?;
         }
     }
 
