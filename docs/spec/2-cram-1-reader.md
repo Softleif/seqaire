@@ -536,6 +536,9 @@ The rANS 4x8 frequency table uses run-length encoding where a symbol counter `sy
 r[cram.codec.rans_sym_bounded+2]
 Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have wrapped to 0 via `wrapping_add(1)` when the previous value was 255. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped to 0.
 
+r[cram.codec.rans4x8_compressed_size_check]
+The rANS 4x8 header carries a 4-byte little-endian `compressed_size` field after the order byte. After consuming the 9-byte header, the remainder of the input MUST be exactly `compressed_size` bytes. Mismatch indicates a truncated or corrupt stream and MUST produce a typed error (`Rans4x8CompressedSizeMismatch`); do not silently truncate or extend. Mirrors htscodecs' `rANS_static.c:245` `if (in_sz != in_size - 9) return NULL`.
+
 r[cram.codec.simd_dispatch]
 The 32-state order-0 rANS Nx16 decode has SIMD specializations (NEON for aarch64, AVX2 for x86_64). The dispatch MUST propagate SIMD errors to the caller — there is no scalar fallback at runtime. SIMD and scalar share the same algorithm over the same `src` and `states`; the only legitimate way for SIMD to fail (truncation) is also a way for scalar to fail. Hiding a SIMD-only failure with a snapshot/restore + scalar retry would mask SIMD bugs, since the proptest oracle (`simd_matches_scalar_with_renorm`) would never see them. The pure-scalar `decode_order_0_32state_scalar` is reachable only on targets without SIMD support (non-aarch64 + non-AVX2 x86_64).
 

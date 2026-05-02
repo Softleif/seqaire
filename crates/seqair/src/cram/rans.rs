@@ -63,13 +63,23 @@ pub fn decode(src: &[u8]) -> Result<Vec<u8>, CramError> {
 pub(crate) fn decode_with_buf(src: &[u8], buf: &mut Rans4x8Buf) -> Result<Vec<u8>, CramError> {
     let mut cur: &[u8] = src;
 
-    // Header: order (u8), compressed_size (u32 LE), uncompressed_size (u32 LE)
+    // Header: order (u8), compressed_size (u32 LE), uncompressed_size (u32 LE).
+    // The 9-byte header is followed by `compressed_size` payload bytes; htslib
+    // rejects mismatch with `in_sz != in_size - 9` (rANS_static.c:245).
+    // r[impl cram.codec.rans4x8_compressed_size_check]
     let order = read_u8(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
-    let _compressed_size =
+    let compressed_size =
         read_u32_le(&mut cur).ok_or_else(|| CramError::Truncated { context: "rans header" })?;
     let uncompressed_size = read_u32_le(&mut cur)
         .ok_or_else(|| CramError::Truncated { context: "rans header" })?
         as usize;
+
+    if cur.len() != compressed_size as usize {
+        return Err(CramError::Rans4x8CompressedSizeMismatch {
+            advertised: compressed_size,
+            actual: cur.len(),
+        });
+    }
 
     super::reader::check_alloc_size(uncompressed_size, "rANS 4x8 output")?;
     let mut dst = vec![0u8; uncompressed_size];
@@ -374,6 +384,28 @@ mod tests {
 
         let err = decode(&src).unwrap_err();
         assert!(matches!(err, CramError::InvalidRansOrder { order: 7 }));
+    }
+
+    // r[verify cram.codec.rans4x8_compressed_size_check]
+    #[test]
+    fn rans_compressed_size_mismatch_returns_error() {
+        // Header advertises compressed_size = 100, but the actual remaining
+        // payload after the 9-byte header is only ~16 bytes. htslib rejects
+        // exactly this with `if (in_sz != in_size-9) return NULL`
+        // (rANS_static.c:245). Catching the lie here instead of getting a
+        // confusing downstream Truncated error.
+        let mut src = Vec::new();
+        src.push(0u8); // order = 0
+        src.extend_from_slice(&100u32.to_le_bytes()); // compressed_size = 100 (lie)
+        src.extend_from_slice(&7u32.to_le_bytes()); // uncompressed_size = 7
+        // Only ~16 bytes of payload, far short of 100.
+        src.extend_from_slice(&[0u8; 16]);
+
+        let err = decode(&src).unwrap_err();
+        assert!(
+            matches!(err, CramError::Rans4x8CompressedSizeMismatch { advertised: 100, actual: 16 }),
+            "expected Rans4x8CompressedSizeMismatch, got: {err:?}",
+        );
     }
 
     // r[verify cram.codec.alphabet_run_bounded]
