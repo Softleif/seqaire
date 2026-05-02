@@ -56,6 +56,12 @@ struct NoodlesRecord {
     qual: Vec<u8>,
     qname: Vec<u8>,
     seq_len: usize,
+    /// 0-based mate position (BAM convention). `-1` for unmapped/no-mate.
+    next_pos: i64,
+    /// Mate reference id. `-1` for unmapped/no-mate.
+    next_ref_id: i32,
+    /// Template length (insert size). Signed.
+    template_len: i64,
 }
 
 fn read_noodles_records(cram_path: &Path) -> (sam::Header, Vec<NoodlesRecord>) {
@@ -95,6 +101,12 @@ fn read_noodles_records(cram_path: &Path) -> (sam::Header, Vec<NoodlesRecord>) {
         let qual: Vec<u8> = record.quality_scores().iter().collect();
         let qname: Vec<u8> = record.name().map(|n| n.to_vec()).unwrap_or_default();
         let seq_len = seq.len();
+        // noodles mate fields: 1-based Position (sub 1 → BAM 0-based);
+        // sentinel -1 when None.
+        let next_pos =
+            record.mate_alignment_start().map(|p| usize::from(p) as i64 - 1).unwrap_or(-1);
+        let next_ref_id = record.mate_reference_sequence_id().map(|id| id as i32).unwrap_or(-1);
+        let template_len = i64::from(record.template_length());
 
         records.push(NoodlesRecord {
             pos,
@@ -106,6 +118,9 @@ fn read_noodles_records(cram_path: &Path) -> (sam::Header, Vec<NoodlesRecord>) {
             qual,
             qname,
             seq_len,
+            next_pos,
+            next_ref_id,
+            template_len,
         });
     }
 
@@ -189,6 +204,23 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             assert_eq!(our_rec.pos.as_i64(), noodles_rec.pos, "{version} rec {i}: pos");
             assert_eq!(our_rec.flags.raw(), noodles_rec.flags, "{version} rec {i}: flags");
             assert_eq!(our_rec.mapq, noodles_rec.mapq, "{version} rec {i}: mapq");
+            // r[verify cram.record.mate_detached]
+            // r[verify cram.record.mate_attached]
+            // r[verify cram.record.mate_tlen_reconstruction]
+            assert_eq!(
+                i64::from(our_rec.next_pos),
+                noodles_rec.next_pos,
+                "{version} rec {i}: next_pos",
+            );
+            assert_eq!(
+                our_rec.next_ref_id, noodles_rec.next_ref_id,
+                "{version} rec {i}: next_ref_id",
+            );
+            assert_eq!(
+                i64::from(our_rec.template_len),
+                noodles_rec.template_len,
+                "{version} rec {i}: template_len",
+            );
         }
     }
 }
