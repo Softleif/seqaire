@@ -77,7 +77,10 @@ pub use nm_md::NmMdError;
 pub use owned_record::{OwnedBamRecord, OwnedRecordError};
 pub use pileup::{AlignmentView, PileupColumn, PileupEngine, PileupGuard, PileupOp, RefSeq};
 pub use reader::{BamError, BamShared, IndexedBamReader};
-pub use record::BamRecord;
+// `record` is intentionally not re-exported as a type. The production decode
+// path is `RecordStore::push_raw`; the `record` module exposes only shared
+// decode primitives (`parse_header`, `compute_end_pos_from_raw`, `DecodeError`)
+// used by `RecordStore` and `OwnedBamRecord::from_raw_bam`.
 pub use record_store::RecordStore;
 pub use seqair_types::bam_flags as flags;
 pub use seqair_types::{Offset, One, Pos, Pos0, Pos1, Zero};

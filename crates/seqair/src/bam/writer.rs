@@ -552,23 +552,24 @@ mod tests {
         let parsed_header = BamHeader::parse(&mut reader).unwrap();
         assert_eq!(parsed_header.target_count(), 2);
 
-        // Read first record
+        // Read records back through the production decode path (RecordStore).
+        let mut store = RecordStore::new();
+
         let block_size = reader.read_i32().unwrap();
         assert!(block_size > 0);
         let mut rec_data = vec![0u8; block_size as usize];
         reader.read_exact_into(&mut rec_data).unwrap();
-        let rec = super::super::record::BamRecord::decode(&rec_data).unwrap();
-        assert_eq!(&*rec.qname, b"read1");
-        assert_eq!(*rec.pos, 100);
-        assert_eq!(rec.mapq, 30);
+        let idx0 = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
+        assert_eq!(store.qname(idx0), b"read1");
+        assert_eq!(*store.record(idx0).pos, 100);
+        assert_eq!(store.record(idx0).mapq, 30);
 
-        // Read second record
         let block_size = reader.read_i32().unwrap();
         let mut rec_data = vec![0u8; block_size as usize];
         reader.read_exact_into(&mut rec_data).unwrap();
-        let rec = super::super::record::BamRecord::decode(&rec_data).unwrap();
-        assert_eq!(&*rec.qname, b"read2");
-        assert_eq!(*rec.pos, 200);
+        let idx1 = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
+        assert_eq!(store.qname(idx1), b"read2");
+        assert_eq!(*store.record(idx1).pos, 200);
     }
 
     // r[verify bam_writer.error_poisoning]
@@ -870,13 +871,14 @@ mod tests {
         let mut reader = super::super::bgzf::BgzfReader::from_reader(io::Cursor::new(&output));
         let _ = BamHeader::parse(&mut reader).unwrap();
 
+        let mut store = RecordStore::new();
         for i in 0..5 {
             let block_size = reader.read_i32().unwrap();
             let mut rec_data = vec![0u8; block_size as usize];
             reader.read_exact_into(&mut rec_data).unwrap();
-            let rec = super::super::record::BamRecord::decode(&rec_data).unwrap();
+            let idx = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
             let expected = format!("read{i}");
-            assert_eq!(&*rec.qname, expected.as_bytes());
+            assert_eq!(store.qname(idx), expected.as_bytes());
         }
     }
 }

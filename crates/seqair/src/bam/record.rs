@@ -1,119 +1,22 @@
-//! Decode a BAM record from raw bytes into a [`BamRecord`] with owned variable-length fields.
-//! Used transiently during region loading; the pileup engine works from [`crate::bam::RecordStore`] instead.
+//! Shared BAM-record decode primitives — header parsing, raw-byte readers,
+//! end-position computation, and the [`DecodeError`] enum.
+//!
+//! There is intentionally **no** `BamRecord` struct here. The production decode
+//! path is [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw),
+//! which streams raw BAM bytes straight into the slab buffers without
+//! allocating a per-record owned struct. The functions in this module
+//! (`parse_header`, `compute_end_pos_from_raw`, `read2`, `read4`) are the
+//! pieces of that decode path that are also needed elsewhere — by the
+//! pre-push CIGAR scan, by [`OwnedBamRecord::from_raw_bam`](super::owned_record::OwnedBamRecord::from_raw_bam),
+//! and historically by tests as a round-trip oracle.
+//!
+//! If you need an owned, mutable record (for writing or in-memory editing),
+//! use [`OwnedBamRecord`](super::owned_record::OwnedBamRecord). If you need
+//! to decode a region's worth of records for pileup or read-level work, push
+//! them into a [`RecordStore`](super::record_store::RecordStore) and access
+//! fields via [`SlimRecord`](super::record_store::SlimRecord).
 
-use super::cigar::CigarOp;
-use super::seq;
 use seqair_types::{BamFlags, Pos0};
-
-/// A decoded BAM record with owned variable-length data.
-///
-/// Wrapped in `Rc` for cheap sharing between the arena and pileup columns.
-/// All accessor methods live directly on the struct — no separate `RecordRef`.
-// r[impl bam.record.fields]
-// r[impl bam.record.decode]
-// r[impl flags.field_type]
-#[derive(Debug, Clone)]
-pub struct BamRecord {
-    pub pos: Pos0,
-    pub end_pos: Pos0,
-    pub tid: i32,
-    pub seq_len: u32,
-    pub flags: BamFlags,
-    pub n_cigar_ops: u16,
-    pub mapq: u8,
-    // r[impl perf.precompute_matches_indels]
-    pub matching_bases: u32,
-    pub indel_bases: u32,
-    pub qname: Box<[u8]>,
-    pub cigar: Box<[CigarOp]>,
-    pub seq: Box<[u8]>,
-    pub qual: Box<[u8]>,
-    pub aux: Box<[u8]>,
-}
-
-impl BamRecord {
-    /// Decode from raw BAM bytes (after the 4-byte `block_size` prefix).
-    pub fn decode(raw: &[u8]) -> Result<Self, DecodeError> {
-        let h = parse_header(raw)?;
-        let seq_len_usize = h.seq_len as usize;
-
-        // All slice bounds (32..var_start, var_start..cigar_end, etc.) are ≤ qual_end ≤ raw.len()
-        debug_assert!(h.qual_end <= raw.len(), "qual_end overrun: {} > {}", h.qual_end, raw.len());
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
-        )]
-        let qname_raw = &raw[32..h.var_start];
-        let qname_actual_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
-
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
-        )]
-        let cigar_slice = &raw[h.var_start..h.cigar_end];
-        let mut cigar_ops: Vec<CigarOp> = Vec::new();
-        CigarOp::extend_from_bam_bytes(&mut cigar_ops, cigar_slice);
-        let end_pos = super::cigar::compute_end_pos(h.pos, &cigar_ops)
-            .ok_or(DecodeError::InvalidPosition { value: h.pos.as_i32() })?;
-        let (matching_bases, indel_bases) = super::cigar::calc_matches_indels(&cigar_ops);
-
-        #[allow(
-            clippy::indexing_slicing,
-            reason = "all bounds ≤ qual_end ≤ raw.len() checked by parse_header"
-        )]
-        Ok(BamRecord {
-            pos: h.pos,
-            end_pos,
-            tid: h.tid,
-            seq_len: h.seq_len,
-            flags: h.flags,
-            n_cigar_ops: h.n_cigar_ops,
-            mapq: h.mapq,
-            matching_bases,
-            indel_bases,
-            qname: qname_raw[..qname_actual_len].into(),
-            cigar: cigar_ops.into_boxed_slice(),
-            // r[impl bam.record.seq_4bit]
-            // r[impl bam.record.seq_at_simd+2]
-            seq: seq::decode_seq(&raw[h.cigar_end..h.seq_end], seq_len_usize).into_boxed_slice(),
-            qual: raw[h.seq_end..h.qual_end].into(),
-            // r[impl bam.record.raw_aux]
-            aux: raw[h.qual_end..].into(),
-        })
-    }
-
-    // --- accessors ---
-
-    // r[impl bam.record.flag_reverse]
-    pub fn is_reverse(&self) -> bool {
-        self.flags.is_reverse()
-    }
-
-    // r[impl bam.record.flag_first]
-    pub fn is_first_in_template(&self) -> bool {
-        self.flags.is_first_in_template()
-    }
-
-    // r[impl bam.record.flag_second]
-    pub fn is_second_in_template(&self) -> bool {
-        self.flags.is_second_in_template()
-    }
-
-    // r[impl bam.record.flag_unmapped]
-    pub fn is_unmapped(&self) -> bool {
-        self.flags.is_unmapped()
-    }
-
-    // r[impl bam.record.seq_at]
-    pub fn seq_at(&self, pos: usize) -> u8 {
-        self.seq.get(pos).copied().unwrap_or(b'N')
-    }
-
-    // r[impl bam.record.aux_parse]
-    pub fn aux(&self, tag: &[u8; 2]) -> Option<super::aux::AuxValue<'_>> {
-        super::aux::find_tag(&self.aux, *tag)
-    }
-}
 
 /// Compute `end_pos` from raw BAM record bytes (before full decode).
 ///
@@ -184,8 +87,10 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 
 /// Parsed BAM fixed header fields and computed variable-length offsets.
 ///
-/// Shared between `BamRecord::decode` and `RecordStore::push_raw` to avoid
-/// duplicating the 36-byte header parsing and checked offset arithmetic.
+/// Shared between [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw)
+/// and [`OwnedBamRecord::from_raw_bam`](super::owned_record::OwnedBamRecord::from_raw_bam)
+/// to avoid duplicating the 36-byte header parsing and checked offset arithmetic.
+#[derive(Debug)]
 pub(crate) struct ParsedHeader {
     pub tid: i32,
     pub pos: Pos0,
@@ -304,7 +209,7 @@ mod tests {
 
     // r[verify bam.record.checked_offsets]
     #[test]
-    fn decode_rejects_overflow_in_offset_calc() {
+    fn parse_header_rejects_overflow_in_offset_calc() {
         // Craft a 32-byte record with fields that would overflow if added unchecked:
         // name_len = 255, n_cigar_ops = 65535, seq_len = u32::MAX
         let mut raw = [0u8; 32];
@@ -316,41 +221,12 @@ mod tests {
         raw[14..16].copy_from_slice(&0u16.to_le_bytes()); // flags
         raw[16..20].copy_from_slice(&u32::MAX.to_le_bytes()); // seq_len
 
-        let result = BamRecord::decode(&raw);
+        let result = parse_header(&raw);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
             matches!(err, DecodeError::OffsetOverflow | DecodeError::TooShort { .. }),
             "expected OffsetOverflow or TooShort, got {err:?}"
         );
-    }
-
-    #[test]
-    fn test_decode_record() {
-        let mut raw = [0u8; 64];
-        raw[0..4].copy_from_slice(&0i32.to_le_bytes());
-        raw[4..8].copy_from_slice(&100i32.to_le_bytes());
-        raw[8] = 5;
-        raw[9] = 60;
-        raw[10..12].copy_from_slice(&0u16.to_le_bytes());
-        raw[12..14].copy_from_slice(&1u16.to_le_bytes());
-        raw[14..16].copy_from_slice(&99u16.to_le_bytes());
-        raw[16..20].copy_from_slice(&4u32.to_le_bytes());
-        raw[20..32].fill(0);
-        raw[32..37].copy_from_slice(b"read\0");
-        raw[37..41].copy_from_slice(&(4u32 << 4).to_le_bytes());
-        raw[41] = 0x12;
-        raw[42] = 0x48;
-        raw[43..47].copy_from_slice(&[30, 30, 30, 30]);
-
-        let rec = BamRecord::decode(&raw[..47]).unwrap();
-        assert_eq!(rec.pos, Pos0::new(100).unwrap());
-        assert_eq!(rec.end_pos, Pos0::new(103).unwrap());
-        assert_eq!(rec.flags, BamFlags::from(99));
-        assert_eq!(rec.mapq, 60);
-        assert_eq!(&*rec.qname, b"read");
-        assert_eq!(rec.seq_at(0), b'A');
-        assert_eq!(rec.seq_at(3), b'T');
-        assert_eq!(rec.matching_bases, 4);
     }
 }
