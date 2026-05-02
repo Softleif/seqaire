@@ -531,10 +531,13 @@ r[cram.edge.rans_sym_overflow]
 The rANS 4x8 frequency table uses run-length encoding where a symbol counter `sym: u8` is incremented for each run element. When `sym == 255`, `sym += 1` overflows. The reader MUST use wrapping arithmetic (`wrapping_add(1)`) for this counter — the overflow is harmless because the loop terminates before using the overflowed value.
 
 r[cram.codec.rans_sym_bounded+2]
-Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have wrapped to 0 via `wrapping_add(1)` when the previous value was 255. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped to 0. The run-length loop MUST break when `sym` would exceed 255.
+Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have wrapped to 0 via `wrapping_add(1)` when the previous value was 255. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped to 0.
+
+r[cram.codec.alphabet_run_bounded]
+A run in the alphabet/frequency-table run-length encoding starts at symbol `s` with length `len`, writing `len` consecutive entries from `s`. Implementations MUST reject runs where `s + len > 256` with a typed error (`MalformedAlphabetRun`). Tolerating such malformed runs (silent break, wraparound) leaves the source stream desynchronized and produces garbage downstream — the htscodecs reference implementation rejects these as well (`rANS_static16_int.h:decode_alphabet`, `rANS_static.c:decode_freq`). This applies to both rANS 4x8 (per-symbol freq table runs and per-context order-1 runs) and rANS Nx16 (`read_alphabet`).
 
 r[cram.codec.state_step_safety]
-The rANS `state_step` function computes `f * (s >> bits) + (s & mask) - g`. For valid frequency tables produced by conforming CRAM writers, `g <= f * (s >> bits) + (s & mask)` always holds, so the subtraction does not underflow. The implementation MUST use `wrapping_sub` for robustness against malformed data in release mode, with a `debug_assert!` to catch violations during development.
+The rANS `state_step` function computes `f * (s >> bits) + (s & mask) - g`. For valid frequency tables produced by conforming CRAM writers, `g <= f * (s >> bits) + (s & mask)` always holds, so the subtraction does not underflow. The implementation MUST use `wrapping_sub` for release-mode robustness against malformed data. The implementation MUST NOT use `debug_assert!` to check this precondition — the input is untrusted CRAM data, so a debug assertion would panic in fuzz/debug builds on adversarial inputs.
 
 r[cram.codec.normalize_checked]
 Frequency normalization (`normalize_frequencies`) sums all 256 frequency entries and doubles the sum in a loop. Both the sum and the doubling MUST use checked arithmetic to detect overflow from malformed frequency tables. Overflow MUST produce an error, not silent wraparound.

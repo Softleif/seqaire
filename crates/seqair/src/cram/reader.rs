@@ -150,6 +150,12 @@ pub enum CramError {
     #[error("rANS Nx16 bit-pack symbol count must be <= 16, got {symbol_count}")]
     RansBitPackTooManySymbols { symbol_count: usize },
 
+    #[error(
+        "malformed rANS alphabet/frequency-table run: starts at sym {start} with len {len} \
+         (would extend past 255)"
+    )]
+    MalformedAlphabetRun { start: u8, len: u8 },
+
     // ── tok3 ─────────────────────────────────────────────────────────────────
     #[error("invalid tok3 token type: {token_type}")]
     InvalidTok3TokenType { token_type: u8 },

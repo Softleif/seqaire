@@ -92,7 +92,7 @@ fn decode_order_0(src: &mut &[u8], dst: &mut [u8]) -> Result<(), CramError> {
     // hot inner loop never builds one because `renormalize` returns
     // `Option<()>`. See the helper-module comment for the cost story.
     let truncated = || CramError::Truncated { context: "rans order-0 truncated" };
-    let freq = read_frequencies_0(src).ok_or_else(truncated)?;
+    let freq = read_frequencies_0(src)?;
     let cum_freq = build_cumulative_frequencies(&freq);
     let sym_table = build_symbol_table(&cum_freq);
     let mut states = read_states(src).ok_or_else(truncated)?;
@@ -126,7 +126,7 @@ fn decode_order_1_buf(
 ) -> Result<(), CramError> {
     // See decode_order_0 for the lazy-CramError pattern.
     let truncated = || CramError::Truncated { context: "rans order-1 truncated" };
-    read_frequencies_1_into(src, &mut buf.freq).ok_or_else(truncated)?;
+    read_frequencies_1_into(src, &mut buf.freq)?;
 
     for ctx in 0..ALPHABET_SIZE {
         buf.cum_freq[ctx] = build_cumulative_frequencies(&buf.freq[ctx]);
@@ -216,31 +216,36 @@ fn read_states(src: &mut &[u8]) -> Option<[u32; 4]> {
     Some(states)
 }
 
+// r[impl cram.codec.alphabet_run_bounded]
 #[allow(clippy::indexing_slicing, reason = "sym is u8, so sym as usize ≤ 255 < ALPHABET_SIZE=256")]
-fn read_frequencies_0(src: &mut &[u8]) -> Option<[u16; ALPHABET_SIZE]> {
+fn read_frequencies_0(src: &mut &[u8]) -> Result<[u16; ALPHABET_SIZE], CramError> {
+    let truncated = || CramError::Truncated { context: "rans 4x8 frequencies" };
     let mut freq = [0u16; ALPHABET_SIZE];
-    let mut sym = read_u8(src)?;
+    let mut sym = read_u8(src).ok_or_else(truncated)?;
     let mut prev_sym = sym;
 
     loop {
-        freq[sym as usize] = read_itf8_u16(src)?;
-        sym = read_u8(src)?;
+        freq[sym as usize] = read_itf8_u16(src).ok_or_else(truncated)?;
+        sym = read_u8(src).ok_or_else(truncated)?;
 
         if sym == 0 {
             break;
         }
 
         if sym == prev_sym.wrapping_add(1) {
-            let run_len = read_u8(src)?;
-            // r[impl cram.edge.rans_sym_overflow]
-            // r[impl cram.codec.rans_sym_bounded+2]
-            // sym can reach 255; break after writing freq[255] to avoid
-            // wrapping to 0 and corrupting freq[0].
+            let run_len = read_u8(src).ok_or_else(truncated)?;
+            // After the inner loop sym becomes start+run_len. htscodecs
+            // rejects any run where the post-increment value wraps past
+            // 255 (see `rANS_static.c::decode_freq` `if (j > 255) goto
+            // cleanup`). Tolerating wraparound silently desyncs the source
+            // stream — the next byte after the run would be misread as a
+            // freq value.
+            let end = u32::from(sym).wrapping_add(u32::from(run_len));
+            if end > 255 {
+                return Err(CramError::MalformedAlphabetRun { start: sym, len: run_len });
+            }
             for _ in 0..run_len {
-                freq[sym as usize] = read_itf8_u16(src)?;
-                if sym == 255 {
-                    break;
-                }
+                freq[sym as usize] = read_itf8_u16(src).ok_or_else(truncated)?;
                 sym = sym.wrapping_add(1);
             }
         }
@@ -248,27 +253,34 @@ fn read_frequencies_0(src: &mut &[u8]) -> Option<[u16; ALPHABET_SIZE]> {
         prev_sym = sym;
     }
 
-    Some(freq)
+    Ok(freq)
 }
 
 #[allow(clippy::indexing_slicing, reason = "ctx is u8, so ctx as usize ≤ 255 < ALPHABET_SIZE=256")]
 fn read_frequencies_1_into(
     src: &mut &[u8],
     freq: &mut [[u16; ALPHABET_SIZE]; ALPHABET_SIZE],
-) -> Option<()> {
-    let mut ctx = read_u8(src)?;
+) -> Result<(), CramError> {
+    let truncated = || CramError::Truncated { context: "rans 4x8 order-1 frequencies" };
+    let mut ctx = read_u8(src).ok_or_else(truncated)?;
     let mut prev_ctx = ctx;
 
     loop {
         freq[ctx as usize] = read_frequencies_0(src)?;
 
-        ctx = read_u8(src)?;
+        ctx = read_u8(src).ok_or_else(truncated)?;
         if ctx == 0 {
             break;
         }
 
         if ctx == prev_ctx.wrapping_add(1) {
-            let run_len = read_u8(src)?;
+            let run_len = read_u8(src).ok_or_else(truncated)?;
+            // Same wraparound concern as read_frequencies_0 but for the
+            // outer per-context dimension.
+            let end = u32::from(ctx).wrapping_add(u32::from(run_len));
+            if end > 255 {
+                return Err(CramError::MalformedAlphabetRun { start: ctx, len: run_len });
+            }
             for _ in 0..run_len {
                 freq[ctx as usize] = read_frequencies_0(src)?;
                 ctx = ctx.wrapping_add(1);
@@ -278,7 +290,7 @@ fn read_frequencies_1_into(
         prev_ctx = ctx;
     }
 
-    Some(())
+    Ok(())
 }
 
 #[allow(
@@ -362,6 +374,11 @@ fn read_itf8_u16(src: &mut &[u8]) -> Option<u16> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::needless_range_loop,
+    reason = "test code: bounded values, range-by-index is clearer than enumerate here"
+)]
 mod tests {
     use super::*;
 
@@ -386,6 +403,87 @@ mod tests {
 
         let err = decode(&src).unwrap_err();
         assert!(matches!(err, CramError::InvalidRansOrder { order: 7 }));
+    }
+
+    // r[verify cram.codec.alphabet_run_bounded]
+    #[test]
+    fn read_frequencies_0_run_overflow_returns_error() {
+        // sym=200, freq=ITF8(1)=0x01, then sym=201 (== prev+1) triggers a
+        // run of length 100 — this would extend past sym 255. With ITF8(1)
+        // payload bytes in between, the well-formed-prefix portion of the
+        // stream is: [200, 0x01, 201, 100, ...freq values...]. The fix
+        // must catch the bad `start + len` BEFORE consuming the run's
+        // freq values.
+        let mut src: &[u8] = &[200, 0x01, 201, 100];
+        let err = read_frequencies_0(&mut src).unwrap_err();
+        assert!(
+            matches!(err, CramError::MalformedAlphabetRun { start: 201, len: 100 }),
+            "expected MalformedAlphabetRun, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_frequencies_0_run_exactly_to_255_ok() {
+        // Canonical htscodecs encoding for F[200..=255]=1: emit 200 (no
+        // run), F[200]=1, then 201 with run-len 54 (covers F[201..254]),
+        // then F[255] in the next outer iteration.
+        // Stream: [200, 1, 201, 54, 1*54, 1, 0] = 60 bytes.
+        let mut src: Vec<u8> = vec![200, 0x01, 201, 54];
+        src.extend(std::iter::repeat_n(0x01u8, 54)); // F[201..254]
+        src.push(0x01); // F[255]
+        src.push(0); // terminator
+        let mut cur: &[u8] = &src;
+        let freq = read_frequencies_0(&mut cur).unwrap();
+        for s in 200..=255usize {
+            assert_eq!(freq[s], 1, "freq[{s}] should be 1");
+        }
+        assert_eq!(freq[199], 0, "freq[199] should be 0");
+        assert_eq!(freq[0], 0, "freq[0] should be 0 (no wraparound)");
+    }
+
+    proptest::proptest! {
+        // Mirror of rans_nx16's bounds proptest. Only tests the rejection
+        // path — constructing a fully valid 4x8 freq stream needs an extra
+        // freq byte after the run for the trailing sym, which is fiddly to
+        // get right at the boundary; the valid path is covered by the fixed
+        // test above and integration round-trips.
+        #[test]
+        fn read_frequencies_0_invalid_run_rejected(
+            start in 1u8..=255,
+            len in 0u8..=255,
+        ) {
+            proptest::prop_assume!(u32::from(start) + u32::from(len) > 255);
+            let prev = start.checked_sub(1).expect("start >= 1");
+            // Provide enough freq bytes that truncation can't fire before the
+            // bounds check: prev + start are 2 reads; the run-len byte is 1
+            // read; we don't need run payload because the check fires first.
+            let stream = [prev, 0x01, start, len];
+            let mut cur: &[u8] = &stream;
+            let err = read_frequencies_0(&mut cur).unwrap_err();
+            proptest::prop_assert!(
+                matches!(err, CramError::MalformedAlphabetRun { start: s, len: l }
+                             if s == start && l == len),
+                "expected MalformedAlphabetRun for start={start}, len={len}, got: {err:?}",
+            );
+        }
+    }
+
+    // r[verify cram.codec.alphabet_run_bounded]
+    #[test]
+    fn read_frequencies_1_ctx_run_overflow_returns_error() {
+        // Outer ctx loop has the same wraparound concern. Stream: ctx=200,
+        // (entire sub-table for ctx=200), ctx=201 (== prev+1), run_len=100.
+        // Bound check 201+100=301 > 255 must fire BEFORE the inner sub-table
+        // reads. We use a minimal single-symbol sub-table for ctx=200:
+        // [sym=0, freq=ITF8(4096), terminator=0].
+        let src: Vec<u8> = vec![200, 0, 0x80, 0x20, 0, 201, 100];
+        let mut freq = Box::new([[0u16; ALPHABET_SIZE]; ALPHABET_SIZE]);
+        let mut cur: &[u8] = &src;
+        let err = read_frequencies_1_into(&mut cur, &mut freq).unwrap_err();
+        assert!(
+            matches!(err, CramError::MalformedAlphabetRun { start: 201, len: 100 }),
+            "expected MalformedAlphabetRun, got: {err:?}"
+        );
     }
 
     // r[verify cram.codec.rans4x8]

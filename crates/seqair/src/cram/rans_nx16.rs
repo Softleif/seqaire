@@ -262,6 +262,7 @@ pub(crate) fn state_renormalize(mut s: u32, src: &mut &[u8]) -> Option<u32> {
 
 // ── Alphabet reading ─────────────────────────────────────────────────
 
+// r[impl cram.codec.alphabet_run_bounded]
 #[allow(
     clippy::indexing_slicing,
     reason = "sym is u8 so usize::from(sym) ≤ 255 < ALPHABET_SIZE=256"
@@ -284,6 +285,15 @@ fn read_alphabet(src: &mut &[u8]) -> Result<[bool; ALPHABET_SIZE], CramError> {
 
         if sym == prev_sym.wrapping_add(1) {
             let len = read_u8(src).ok_or_else(truncated)?;
+            // After the inner loop sym becomes start+len. htscodecs rejects
+            // any run where the post-increment value wraps past 255 (see
+            // `rANS_static16_int.h:decode_alphabet` `if (j > 255) return 0`).
+            // Tolerating wraparound silently corrupts alphabet[0..] entries
+            // and desyncs the source stream.
+            let end = u32::from(sym).wrapping_add(u32::from(len));
+            if end > 255 {
+                return Err(CramError::MalformedAlphabetRun { start: sym, len });
+            }
             for _ in 0..len {
                 alphabet[usize::from(sym)] = true;
                 sym = sym.wrapping_add(1);
@@ -998,6 +1008,69 @@ mod tests {
             0x02, 0x00, 0x00, 0x04, 0x02, 0x00,
         ];
         assert_eq!(decode(&src, 0).unwrap(), b"noodles");
+    }
+
+    // r[verify cram.codec.alphabet_run_bounded]
+    #[test]
+    fn read_alphabet_run_overflow_returns_error() {
+        // sym=250, then sym=251 (== prev+1) triggers a run of length 10. The run
+        // would write alphabet[251..261], wrapping past 255 and corrupting
+        // alphabet[0..5]. Must error instead.
+        let mut src: &[u8] = &[250, 251, 10, 0];
+        let err = read_alphabet(&mut src).unwrap_err();
+        assert!(
+            matches!(err, CramError::MalformedAlphabetRun { start: 251, len: 10 }),
+            "expected MalformedAlphabetRun for run from 251 with len=10, got: {err:?}"
+        );
+    }
+
+    proptest::proptest! {
+        // For all (start, len) where the first symbol is `start-1` (so the
+        // run trigger fires), the decoder must accept iff `start + len <= 255`
+        // and reject with `MalformedAlphabetRun` otherwise. Mirrors the
+        // boundary in htscodecs `decode_alphabet`.
+        #[test]
+        fn read_alphabet_run_bounds_match_spec(start in 1u8..=255, len in 0u8..=255) {
+            // Stream: [start-1, start, len, 0]. The first byte is needed
+            // because the run-trigger requires `sym == prev_sym+1`.
+            let prev = start.checked_sub(1).expect("start >= 1");
+            let stream = [prev, start, len, 0];
+            let mut cur: &[u8] = &stream;
+            let result = read_alphabet(&mut cur);
+
+            let end = u32::from(start) + u32::from(len);
+            if end > 255 {
+                proptest::prop_assert!(
+                    matches!(result, Err(CramError::MalformedAlphabetRun { start: s, len: l })
+                                 if s == start && l == len),
+                    "expected MalformedAlphabetRun for start={start}, len={len}, got: {result:?}",
+                );
+            } else {
+                let alphabet = result.expect("valid bounds should not error");
+                proptest::prop_assert!(alphabet[usize::from(prev)], "alphabet[{prev}] must be set");
+                if len > 0 {
+                    let last = start.checked_add(len.checked_sub(1).expect("len>0"))
+                        .expect("end ≤ 255 so add fits in u8");
+                    proptest::prop_assert!(alphabet[usize::from(last)], "alphabet[{last}] must be set");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_alphabet_run_exactly_to_255_ok() {
+        // Canonical htscodecs encoding for alphabet {200..=255}: emit 200
+        // (no run since alphabet[199] is unset), then 201 with run-len 54
+        // (writes alphabet[201..254]; sym wraps to 255 at the end of the
+        // inner loop). The next outer iteration writes alphabet[255] and
+        // reads the terminator. Stream: [200, 201, 54, 0].
+        let mut src: &[u8] = &[200, 201, 54, 0];
+        let alphabet = read_alphabet(&mut src).unwrap();
+        for s in 200..=255u32 {
+            assert!(alphabet[s as usize], "alphabet[{s}] should be set");
+        }
+        assert!(!alphabet[199], "alphabet[199] should not be set");
+        assert!(!alphabet[0], "alphabet[0] should not be set (no wraparound)");
     }
 
     // r[verify cram.codec.uint7_bounded]
