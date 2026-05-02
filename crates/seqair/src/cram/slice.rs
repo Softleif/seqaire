@@ -477,22 +477,46 @@ fn decode_record<E: CustomizeRecordStore>(
         let feature_count = usize::try_from(feature_count_i32)
             .map_err(|_| CramError::InvalidLength { value: feature_count_i32 })?;
 
-        // Decode features and reconstruct sequence + CIGAR
-        let result = decode_features_and_reconstruct(
-            ch,
-            ctx,
-            feature_count,
-            read_length,
-            pos_0based.as_i64(),
-            ref_start_0based,
-            reference_seq,
-            cigar_buf,
-            bases_buf,
-            feature_byte_buf,
-            cigar_ops_buf,
-        )?;
+        // r[impl cram.index.multi_ref_slices]
+        // r[impl cram.slice.multi_ref_skip]
+        // Multi-ref slices interleave records from multiple references; for a
+        // single-tid query the foreign-tid records are guaranteed to be
+        // discarded, so don't reconstruct their bases/CIGAR. We still need to
+        // drain every per-record data series in lockstep (they're independent
+        // streams) and to compute `ref_consumed` for the SliceMateInfo.end_pos
+        // used by `resolve_mate_tlen`.
+        #[expect(
+            clippy::cast_possible_wrap,
+            reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
+        )]
+        let foreign_tid = is_multi_ref && record_ref_id != tid as i32;
 
-        // MQ
+        // Reconstruction sets matching_bases / indel_bases for the kept-record
+        // push later; for foreign-tid we don't push, so 0 is fine.
+        let (ref_consumed, matching_bases, indel_bases) = if foreign_tid {
+            let span =
+                scan_features_for_refspan(ch, ctx, feature_count, read_length, feature_byte_buf)?;
+            (span, 0, 0)
+        } else {
+            let result = decode_features_and_reconstruct(
+                ch,
+                ctx,
+                feature_count,
+                read_length,
+                pos_0based.as_i64(),
+                ref_start_0based,
+                reference_seq,
+                cigar_buf,
+                bases_buf,
+                feature_byte_buf,
+                cigar_ops_buf,
+            )?;
+            (result.ref_consumed, result.matching_bases, result.indel_bases)
+        };
+
+        // MQ + quality come after features regardless. They must still be
+        // read for foreign-tid records to keep the per-stream cursors
+        // synchronized for subsequent records in the slice.
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -505,8 +529,14 @@ fn decode_record<E: CustomizeRecordStore>(
         // lookup + one memcpy of `read_length` bytes) instead of the
         // per-byte `decode(ctx)` loop that dominated profiles.
         if quality_as_array {
-            ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
-        } else {
+            if foreign_tid {
+                // Drain into a discardable scratch — qual_buf stays empty.
+                feature_byte_buf.clear();
+                ds.quality_score.decode_n_into(ctx, read_length, feature_byte_buf)?;
+            } else {
+                ds.quality_score.decode_n_into(ctx, read_length, qual_buf)?;
+            }
+        } else if !foreign_tid {
             qual_buf.resize(read_length, 0xFF);
         }
 
@@ -519,23 +549,14 @@ fn decode_record<E: CustomizeRecordStore>(
         // eviction check (`end_pos < pos`). For zero-refspan reads we
         // store `pos` itself, the same fallback BAM uses.
         // r[impl cram.record.end_pos]
-        let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(result.ref_consumed));
-        let end_pos_inclusive_raw = if result.ref_consumed == 0 {
-            pos_0based.as_i64()
-        } else {
-            end_pos_raw.wrapping_sub(1)
-        };
+        let end_pos_raw = pos_0based.as_i64().wrapping_add(i64::from(ref_consumed));
+        let end_pos_inclusive_raw =
+            if ref_consumed == 0 { pos_0based.as_i64() } else { end_pos_raw.wrapping_sub(1) };
         let end_pos = Pos0::try_from(end_pos_inclusive_raw).map_err(|_| {
             super::reader::CramError::InvalidPosition { value: end_pos_inclusive_raw }
         })?;
 
-        // r[impl cram.index.multi_ref_slices]
-        // Skip records from different references in multi-ref slices
-        #[expect(
-            clippy::cast_possible_wrap,
-            reason = "tid comes from BAM header, capped at MAX_REFERENCES (1M), well within i32"
-        )]
-        if record_ref_id != tid as i32 {
+        if foreign_tid {
             return Ok((
                 false,
                 SliceMateInfo {
@@ -581,8 +602,8 @@ fn decode_record<E: CustomizeRecordStore>(
             end_pos,
             bam_flags,
             mapq,
-            result.matching_bases,
-            result.indel_bases,
+            matching_bases,
+            indel_bases,
             qname,
             cigar_buf,
             bases_buf,
@@ -1089,6 +1110,117 @@ fn decode_features_and_reconstruct(
         reason = "ref_pos is bounded by reference sequence length which fits in u32; BAM positions are capped at 2^29"
     )]
     Ok(ReconstructResult { ref_consumed: ref_pos as u32, matching_bases, indel_bases })
+}
+
+/// Scan the feature streams for a record without reconstructing its
+/// sequence or CIGAR. Used for records in multi-ref slices whose
+/// `record_ref_id` does not match the query `tid` — we still need to
+/// advance every per-record data series in lockstep with the other
+/// records in the slice, and we still need `ref_consumed` (for
+/// `SliceMateInfo.end_pos` used by `resolve_mate_tlen`), but we don't
+/// need bases/CIGAR/ref-lookup since the record will be discarded.
+///
+/// Stream consumption MUST match `decode_features_and_reconstruct`
+/// exactly — same `ds.X.decode*` calls in the same order for the same
+/// feature codes. Drift here desynchronises every subsequent record in
+/// the slice.
+/// `r[impl cram.slice.multi_ref_skip]`
+fn scan_features_for_refspan(
+    ch: &CompressionHeader,
+    ctx: &mut DecodeContext<'_>,
+    feature_count: usize,
+    read_length: usize,
+    feature_byte_buf: &mut Vec<u8>,
+) -> Result<u32, CramError> {
+    let ds = &ch.data_series;
+    let mut read_pos = 0usize;
+    let mut ref_pos = 0usize;
+    let mut feature_read_pos = 0u32;
+
+    for _ in 0..feature_count {
+        let fc = ds.feature_code.decode(ctx)?;
+        let fp = ds.feature_pos.decode(ctx)? as u32;
+        feature_read_pos = feature_read_pos.wrapping_add(fp);
+        let feat_target = (feature_read_pos as usize).saturating_sub(1);
+
+        // Catch up read_pos and ref_pos to the feature anchor; matching
+        // bases advance both by 1 each.
+        let fill = feat_target.min(read_length).saturating_sub(read_pos);
+        read_pos = read_pos.wrapping_add(fill);
+        ref_pos = ref_pos.wrapping_add(fill);
+
+        match fc {
+            b'X' => {
+                let _bs = ds.base_sub.decode(ctx)?;
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            b'I' => {
+                feature_byte_buf.clear();
+                ds.insertion.decode_into(ctx, feature_byte_buf)?;
+                read_pos = read_pos.wrapping_add(feature_byte_buf.len());
+            }
+            b'i' => {
+                let _base = ds.base.decode(ctx)?;
+                read_pos = read_pos.wrapping_add(1);
+            }
+            b'D' => {
+                let len = ds.deletion_length.decode(ctx)? as u32;
+                ref_pos = ref_pos.wrapping_add(len as usize);
+            }
+            b'S' => {
+                feature_byte_buf.clear();
+                ds.soft_clip.decode_into(ctx, feature_byte_buf)?;
+                read_pos = read_pos.wrapping_add(feature_byte_buf.len());
+            }
+            b'H' => {
+                let _len = ds.hard_clip.decode(ctx)?;
+            }
+            b'N' => {
+                let len = ds.ref_skip.decode(ctx)? as u32;
+                ref_pos = ref_pos.wrapping_add(len as usize);
+            }
+            b'P' => {
+                let _len = ds.padding.decode(ctx)?;
+            }
+            b'B' => {
+                let _base = ds.base.decode(ctx)?;
+                let _qual = ds.quality_score.decode(ctx)?;
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            b'b' => {
+                feature_byte_buf.clear();
+                ds.bases_block.decode_into(ctx, feature_byte_buf)?;
+                let len = feature_byte_buf.len();
+                read_pos = read_pos.wrapping_add(len);
+                ref_pos = ref_pos.wrapping_add(len);
+            }
+            b'q' => {
+                feature_byte_buf.clear();
+                ds.quality_block.decode_into(ctx, feature_byte_buf)?;
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            b'Q' => {
+                let _qual = ds.quality_score.decode(ctx)?;
+                read_pos = read_pos.wrapping_add(1);
+                ref_pos = ref_pos.wrapping_add(1);
+            }
+            _ => return Err(CramError::UnknownFeatureCode { feature_code: fc }),
+        }
+    }
+
+    // Tail: matching bases advance read_pos and ref_pos in lockstep up
+    // to read_length.
+    let tail = read_length.saturating_sub(read_pos);
+    ref_pos = ref_pos.wrapping_add(tail);
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "ref_pos bounded by reference length which fits in u32; BAM positions are capped at 2^29"
+    )]
+    Ok(ref_pos as u32)
 }
 
 fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
