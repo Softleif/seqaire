@@ -56,21 +56,6 @@ pub enum OwnedRecordError {
         #[from]
         source: AuxDataError,
     },
-
-    /// Error decoding raw BAM bytes into an owned record.
-    #[error("failed to decode BAM record: {reason}")]
-    Decode { reason: &'static str },
-}
-
-/// Decode a BAM-wire `i32` `pos`/`next_pos` field into `Option<Pos0>`.
-///
-/// `-1` (the canonical "unmapped/unavailable" sentinel from [SAM1] §1.4) maps
-/// to `None`. Non-negative values map to `Some(Pos0)`. Other negative values
-/// are not a valid BAM encoding; we map them to `None` rather than panicking,
-/// matching the lenient behavior of the read path elsewhere.
-#[inline]
-fn pos_from_bam_i32(v: i32) -> Option<Pos0> {
-    if v < 0 { None } else { Pos0::try_from(v).ok() }
 }
 
 /// Encode `Option<Pos0>` to a BAM-wire `i32`. `None` → `-1`.
@@ -201,81 +186,6 @@ impl OwnedBamRecordBuilder {
 }
 
 impl OwnedBamRecord {
-    /// Decode a complete owned record from raw BAM bytes (after the 4-byte `block_size` prefix).
-    ///
-    /// Use this when a BAM-rewriting pipeline needs an editable, typed view of a single record
-    /// — modify fields, then [`to_bam_bytes`](Self::to_bam_bytes) it back out. For bulk read-path
-    /// decode (pileup, per-read iteration), prefer
-    /// [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw), which avoids the
-    /// per-record allocation.
-    pub fn from_raw_bam(raw: &[u8]) -> Result<Self, OwnedRecordError> {
-        use super::record::parse_header;
-
-        let h = parse_header(raw).map_err(|_| OwnedRecordError::Decode {
-            reason: "failed to parse BAM record header",
-        })?;
-
-        // Extract mate fields from the 32-byte fixed header (offsets 20-31)
-        // parse_header already validated raw.len() >= 32
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
-        let next_ref_id = i32::from_le_bytes([raw[20], raw[21], raw[22], raw[23]]);
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
-        let next_pos_i32 = i32::from_le_bytes([raw[24], raw[25], raw[26], raw[27]]);
-        #[allow(clippy::indexing_slicing, reason = "raw.len() >= 32 validated by parse_header")]
-        let template_len = i32::from_le_bytes([raw[28], raw[29], raw[30], raw[31]]);
-
-        // Extract qname (strip trailing NUL)
-        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
-        let qname_raw = &raw[32..h.var_start];
-        let qname_len = qname_raw.iter().position(|&b| b == 0).unwrap_or(qname_raw.len());
-        let qname = qname_raw.get(..qname_len).unwrap_or(qname_raw).to_vec();
-
-        // CIGAR ops are packed u32s; CigarOp wraps that layout transparently.
-        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
-        let cigar_bytes = &raw[h.var_start..h.cigar_end];
-        let mut cigar = Vec::with_capacity(h.n_cigar_ops as usize);
-        for i in 0..h.n_cigar_ops as usize {
-            let offset = i
-                .checked_mul(4)
-                .ok_or(OwnedRecordError::Decode { reason: "CIGAR offset overflow" })?;
-            let chunk: [u8; 4] = cigar_bytes
-                .get(offset..offset.saturating_add(4))
-                .and_then(|s| s.try_into().ok())
-                .ok_or(OwnedRecordError::Decode { reason: "CIGAR data truncated" })?;
-            cigar.push(CigarOp::from_bam_u32(u32::from_le_bytes(chunk)));
-        }
-
-        // Decode 4-bit packed sequence to Base values
-        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
-        let seq_packed = &raw[h.cigar_end..h.seq_end];
-        let seq_ascii = super::seq::decode_seq(seq_packed, h.seq_len as usize);
-        let seq: Vec<Base> = seq_ascii.iter().map(|&b| Base::from(b)).collect();
-
-        // Quality scores
-        #[allow(clippy::indexing_slicing, reason = "bounds checked by parse_header")]
-        let qual: Vec<BaseQuality> =
-            raw[h.seq_end..h.qual_end].iter().copied().map(BaseQuality::from_byte).collect();
-
-        // Auxiliary data (everything after qual)
-        #[allow(clippy::indexing_slicing, reason = "qual_end <= raw.len()")]
-        let aux = AuxData::from_bytes(raw[h.qual_end..].to_vec());
-
-        Ok(OwnedBamRecord {
-            ref_id: h.tid,
-            pos: Some(h.pos),
-            mapq: h.mapq,
-            flags: h.flags,
-            next_ref_id,
-            next_pos: pos_from_bam_i32(next_pos_i32),
-            template_len,
-            qname,
-            cigar,
-            seq,
-            qual,
-            aux,
-        })
-    }
-
     /// Start building a record with the required fields.
     ///
     /// Pass `None` for `pos` to mark the record as unmapped (BAM wire `-1`).
@@ -895,66 +805,5 @@ mod tests {
             .unwrap();
         let pairs: Vec<_> = rec.aligned_pairs().unwrap().collect();
         assert!(pairs.is_empty());
-    }
-
-    // Test from_raw_bam round-trip
-    #[test]
-    fn from_raw_bam_preserves_all_fields() {
-        let original = OwnedBamRecord::builder(1, Some(Pos0::new(500).unwrap()), b"read1".to_vec())
-            .flags(BamFlags::from(0x63))
-            .mapq(42)
-            .cigar(vec![CigarOp::new(CigarOpType::Match, 5)])
-            .seq(vec![Base::A, Base::C, Base::G, Base::T, Base::A])
-            .qual([30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec())
-            .next_ref_id(2)
-            .next_pos(Some(Pos0::new(1000).unwrap()))
-            .template_len(150)
-            .build()
-            .unwrap();
-
-        let mut aux = AuxData::new();
-        aux.set_string(*b"RG", b"grp1");
-        aux.set_int(*b"NM", 3).unwrap();
-        let mut original = original;
-        original.aux = aux;
-
-        // Serialize to BAM bytes
-        let mut buf = Vec::new();
-        original.to_bam_bytes(&mut buf).unwrap();
-
-        // Reconstruct from raw bytes
-        let reconstructed = OwnedBamRecord::from_raw_bam(&buf).unwrap();
-
-        assert_eq!(reconstructed.ref_id, 1);
-        assert_eq!(reconstructed.pos, Some(Pos0::new(500).unwrap()));
-        assert_eq!(reconstructed.flags, BamFlags::from(0x63));
-        assert_eq!(reconstructed.mapq, 42);
-        assert_eq!(reconstructed.next_ref_id, 2);
-        assert_eq!(reconstructed.next_pos, Some(Pos0::new(1000).unwrap()));
-        assert_eq!(reconstructed.template_len, 150);
-        assert_eq!(reconstructed.qname, b"read1");
-        assert_eq!(reconstructed.cigar.len(), 1);
-        assert_eq!(reconstructed.cigar[0], CigarOp::new(CigarOpType::Match, 5));
-        assert_eq!(reconstructed.seq.len(), 5);
-        assert_eq!(reconstructed.qual, [30, 31, 32, 33, 34].map(BaseQuality::from_byte).to_vec());
-        assert_eq!(reconstructed.aux.get(*b"NM"), Some(super::super::aux::AuxValue::U8(3)));
-        assert_eq!(
-            reconstructed.aux.get(*b"RG"),
-            Some(super::super::aux::AuxValue::String(b"grp1"))
-        );
-    }
-
-    // Test full round-trip: build → serialize → from_raw_bam → serialize → compare
-    #[test]
-    fn full_roundtrip_via_raw_bam() {
-        let rec = simple_record();
-        let mut buf1 = Vec::new();
-        rec.to_bam_bytes(&mut buf1).unwrap();
-
-        let reconstructed = OwnedBamRecord::from_raw_bam(&buf1).unwrap();
-        let mut buf2 = Vec::new();
-        reconstructed.to_bam_bytes(&mut buf2).unwrap();
-
-        assert_eq!(buf1, buf2);
     }
 }

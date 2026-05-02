@@ -6,9 +6,8 @@
 //! which streams raw BAM bytes straight into the slab buffers without
 //! allocating a per-record owned struct. The functions in this module
 //! (`parse_header`, `compute_end_pos_from_raw`, `read2`, `read4`) are the
-//! pieces of that decode path that are also needed elsewhere — by the
-//! pre-push CIGAR scan, by [`OwnedBamRecord::from_raw_bam`](super::owned_record::OwnedBamRecord::from_raw_bam),
-//! and historically by tests as a round-trip oracle.
+//! pieces of that decode path that are also needed by the pre-push CIGAR
+//! scan and by tests that need raw-bytes-level inspection.
 //!
 //! If you need an owned, mutable record (for writing or in-memory editing),
 //! use [`OwnedBamRecord`](super::owned_record::OwnedBamRecord). If you need
@@ -87,9 +86,9 @@ pub(crate) fn read4(buf: &[u8], offset: usize) -> [u8; 4] {
 
 /// Parsed BAM fixed header fields and computed variable-length offsets.
 ///
-/// Shared between [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw)
-/// and [`OwnedBamRecord::from_raw_bam`](super::owned_record::OwnedBamRecord::from_raw_bam)
-/// to avoid duplicating the 36-byte header parsing and checked offset arithmetic.
+/// Used by [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw)
+/// and [`compute_end_pos_from_raw`] to avoid duplicating the 36-byte header
+/// parsing and checked offset arithmetic.
 #[derive(Debug)]
 pub(crate) struct ParsedHeader {
     pub tid: i32,
