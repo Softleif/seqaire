@@ -1,13 +1,13 @@
-//! Shared BAM-record decode primitives — header parsing, raw-byte readers,
-//! end-position computation, and the [`DecodeError`] enum.
+//! Shared BAM-record wire-format primitives — header parse + encode, raw-byte
+//! readers, end-position computation, and the [`DecodeError`] enum.
 //!
 //! There is intentionally **no** `BamRecord` struct here. The production decode
 //! path is [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw),
 //! which streams raw BAM bytes straight into the slab buffers without
 //! allocating a per-record owned struct. The functions in this module
-//! (`parse_header`, `compute_end_pos_from_raw`, `read2`, `read4`) are the
-//! pieces of that decode path that are also needed by the pre-push CIGAR
-//! scan and by tests that need raw-bytes-level inspection.
+//! (`parse_header`, `encode_fixed_header`, `compute_end_pos_from_raw`,
+//! `read2`, `read4`) are the wire-format pieces shared between the read and
+//! write paths.
 //!
 //! If you need an owned, mutable record (for writing or in-memory editing),
 //! use [`OwnedBamRecord`](super::owned_record::OwnedBamRecord). If you need
@@ -167,6 +167,42 @@ pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
         seq_end,
         qual_end,
     })
+}
+
+/// Field values for the 32-byte BAM fixed record header, in BAM wire types.
+///
+/// Callers validate field-size limits (qname ≤ 254, cigar ≤ 65535, seq ≤
+/// `i32::MAX`) before constructing this; the encoder only packs bytes.
+/// `pos` and `next_pos` are already resolved to wire form (`-1` for
+/// unmapped/unavailable per `[SAM1] §1.4`).
+pub(crate) struct FixedHeaderFields {
+    pub ref_id: i32,
+    pub pos: i32,
+    pub bin: u16,
+    pub mapq: u8,
+    /// `qname.len() + 1` (NUL terminator); caller validated qname ≤ 254 bytes.
+    pub l_read_name: u8,
+    pub flags: u16,
+    pub n_cigar_op: u16,
+    pub l_seq: i32,
+    pub next_ref_id: i32,
+    pub next_pos: i32,
+    pub template_len: i32,
+}
+
+/// Pack the 11 fixed-record fields into the canonical 32-byte BAM record
+/// header and append to `buf`. Inverse of [`parse_header`].
+pub(crate) fn encode_fixed_header(buf: &mut Vec<u8>, f: &FixedHeaderFields) {
+    let bin_mq_nl = (u32::from(f.bin) << 16) | (u32::from(f.mapq) << 8) | u32::from(f.l_read_name);
+    let flag_nc = (u32::from(f.flags) << 16) | u32::from(f.n_cigar_op);
+    buf.extend_from_slice(&f.ref_id.to_le_bytes());
+    buf.extend_from_slice(&f.pos.to_le_bytes());
+    buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
+    buf.extend_from_slice(&flag_nc.to_le_bytes());
+    buf.extend_from_slice(&f.l_seq.to_le_bytes());
+    buf.extend_from_slice(&f.next_ref_id.to_le_bytes());
+    buf.extend_from_slice(&f.next_pos.to_le_bytes());
+    buf.extend_from_slice(&f.template_len.to_le_bytes());
 }
 
 #[non_exhaustive]

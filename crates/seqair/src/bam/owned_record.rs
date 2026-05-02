@@ -335,18 +335,16 @@ impl OwnedBamRecord {
             return Err(OwnedRecordError::SeqLengthOverflow { len: self.seq.len() });
         }
 
-        // Compute bin at serialization time
-        let bin = self.bin();
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "qname.len() ≤ 254 (validated above); fits in u32"
+            reason = "qname.len() ≤ 254 (validated above); +1 fits in u8"
         )]
-        let l_read_name = (self.qname.len() as u32).saturating_add(1); // +1 for NUL
+        let l_read_name = (self.qname.len() as u8).saturating_add(1); // +1 for NUL
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "cigar.len() ≤ 65535 (validated above); fits in u32"
+            reason = "cigar.len() ≤ 65535 (validated above); fits in u16"
         )]
-        let n_cigar_op = self.cigar.len() as u32;
+        let n_cigar_op = self.cigar.len() as u16;
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_possible_wrap,
@@ -354,21 +352,22 @@ impl OwnedBamRecord {
         )]
         let l_seq = self.seq.len() as i32;
 
-        // Pack bin_mq_nl: bin(16) | mapq(8) | l_read_name(8)
-        let bin_mq_nl = (u32::from(bin) << 16) | (u32::from(self.mapq) << 8) | (l_read_name & 0xFF);
-
-        // Pack flag_nc: flag(16) | n_cigar_op(16)
-        let flag_nc = (u32::from(self.flags.raw()) << 16) | (n_cigar_op & 0xFFFF);
-
-        // 32-byte fixed header
-        buf.extend_from_slice(&self.ref_id.to_le_bytes());
-        buf.extend_from_slice(&pos_to_bam_i32(self.pos).to_le_bytes());
-        buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
-        buf.extend_from_slice(&flag_nc.to_le_bytes());
-        buf.extend_from_slice(&l_seq.to_le_bytes());
-        buf.extend_from_slice(&self.next_ref_id.to_le_bytes());
-        buf.extend_from_slice(&pos_to_bam_i32(self.next_pos).to_le_bytes());
-        buf.extend_from_slice(&self.template_len.to_le_bytes());
+        super::record::encode_fixed_header(
+            buf,
+            &super::record::FixedHeaderFields {
+                ref_id: self.ref_id,
+                pos: pos_to_bam_i32(self.pos),
+                bin: self.bin(),
+                mapq: self.mapq,
+                l_read_name,
+                flags: self.flags.raw(),
+                n_cigar_op,
+                l_seq,
+                next_ref_id: self.next_ref_id,
+                next_pos: pos_to_bam_i32(self.next_pos),
+                template_len: self.template_len,
+            },
+        );
 
         // qname + NUL
         buf.extend_from_slice(&self.qname);

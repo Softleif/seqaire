@@ -282,35 +282,31 @@ impl<W: Write> BamWriter<W> {
             return Err(OwnedRecordError::SeqLengthOverflow { len: rec.seq_len as usize }.into());
         }
 
-        let l_read_name = qname.len() + 1; // +1 for NUL
-        let n_cigar_op = rec.n_cigar_ops;
+        // qname.len() + 1 fits in u8 since qname.len() ≤ 254 (validated above).
+        let l_read_name = (qname.len() as u8).saturating_add(1);
 
         // Compute BAI bin from pos and end_pos
         let beg = rec.pos.as_u64();
         let end = rec.end_pos.as_u64().max(beg.saturating_add(1));
         let bin = crate::io::reg2bin(beg, end, 14, 5) as u16;
 
-        // Build the 32-byte fixed header + variable data into self.buf
         self.buf.clear();
-
-        // ref_id (4)
-        self.buf.extend_from_slice(&rec.tid.to_le_bytes());
-        // pos (4)
-        self.buf.extend_from_slice(&rec.pos.as_i32().to_le_bytes());
-        // bin_mq_nl (4): bin << 16 | mapq << 8 | l_read_name
-        let bin_mq_nl = (u32::from(bin) << 16) | (u32::from(rec.mapq) << 8) | (l_read_name as u32);
-        self.buf.extend_from_slice(&bin_mq_nl.to_le_bytes());
-        // flag_nc (4): flags << 16 | n_cigar_op
-        let flag_nc = (u32::from(rec.flags.raw()) << 16) | u32::from(n_cigar_op);
-        self.buf.extend_from_slice(&flag_nc.to_le_bytes());
-        // l_seq (4)
-        self.buf.extend_from_slice(&(rec.seq_len as i32).to_le_bytes());
-        // next_ref_id (4)
-        self.buf.extend_from_slice(&rec.next_ref_id.to_le_bytes());
-        // next_pos (4)
-        self.buf.extend_from_slice(&rec.next_pos.to_le_bytes());
-        // template_len (4)
-        self.buf.extend_from_slice(&rec.template_len.to_le_bytes());
+        super::record::encode_fixed_header(
+            &mut self.buf,
+            &super::record::FixedHeaderFields {
+                ref_id: rec.tid,
+                pos: rec.pos.as_i32(),
+                bin,
+                mapq: rec.mapq,
+                l_read_name,
+                flags: rec.flags.raw(),
+                n_cigar_op: rec.n_cigar_ops,
+                l_seq: rec.seq_len as i32,
+                next_ref_id: rec.next_ref_id,
+                next_pos: rec.next_pos,
+                template_len: rec.template_len,
+            },
+        );
 
         // qname + NUL
         self.buf.extend_from_slice(qname);
