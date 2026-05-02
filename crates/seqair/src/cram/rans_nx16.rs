@@ -1124,6 +1124,44 @@ mod tests {
     }
 
     proptest::proptest! {
+        // r[verify cram.codec.rans_nx16]
+        // Direct test of state_renormalize. Models the spec exactly:
+        // - if state >= 1<<15, no bytes consumed, state unchanged.
+        // - else, repeatedly shift-left-16 and OR a u16 LE from src
+        //   until state >= 1<<15.
+        #[test]
+        fn state_renormalize_matches_spec(
+            initial_state in 0u32..=u32::MAX,
+            bytes in proptest::collection::vec(0u8..=255, 0..=16),
+        ) {
+            let mut src: &[u8] = &bytes;
+            let initial_src_len = src.len();
+            let result = state_renormalize(initial_state, &mut src);
+
+            if initial_state >= (1 << 15) {
+                // Fast path: no bytes consumed, state unchanged.
+                proptest::prop_assert_eq!(result, Some(initial_state));
+                proptest::prop_assert_eq!(src.len(), initial_src_len);
+                return Ok(());
+            }
+
+            // Slow path: build the expected result by replaying the spec.
+            let mut expected_state = initial_state;
+            let mut expected_src: &[u8] = &bytes;
+            while expected_state < (1 << 15) {
+                let Some((head, rest)) = expected_src.split_first_chunk::<2>() else {
+                    proptest::prop_assert_eq!(result, None,
+                        "expected None when src exhausted mid-renorm");
+                    return Ok(());
+                };
+                let lo = u32::from(u16::from_le_bytes(*head));
+                expected_state = expected_state.wrapping_shl(16) | lo;
+                expected_src = rest;
+            }
+            proptest::prop_assert_eq!(result, Some(expected_state));
+            proptest::prop_assert_eq!(src.len(), expected_src.len());
+        }
+
         #[test]
         fn read_uint7_roundtrip(val in 0u32..=u32::MAX) {
             let mut stream = Vec::with_capacity(256);
@@ -1344,6 +1382,66 @@ mod tests {
             let mut scalar_dst = vec![0u8; len];
             decode_order_0_generic(&mut cur, &mut scalar_dst, 32).unwrap();
             assert_eq!(simd_result, scalar_dst);
+        }
+
+        // Exercises the renormalization path that the other two SIMD/scalar
+        // proptests miss. With initial state = 0x8001 (just above the 1<<15
+        // renorm threshold) and freq[sym0]=2048, the first decode step
+        // produces new_state = 2048 * 8 + 1 = 0x4001, below the threshold,
+        // forcing a renorm read for every lane on every outer iteration.
+        // The trailing renorm bytes vary across the proptest's seed space.
+        #[test]
+        fn simd_matches_scalar_with_renorm(
+            renorm_bytes in proptest::collection::vec(0u8..=255, 256..512),
+            len in 32usize..=128,
+        ) {
+            // Round len down to a multiple of 32 so the test exercises only
+            // the full-chunk path (the remainder path is covered separately).
+            let len = (len / 32).checked_mul(32).expect("len ≤ 128 → fits in usize");
+            let mut stream = Vec::with_capacity(256);
+            stream.push(FLAG_N32);
+            encode_uint7_prv(&mut stream, len as u32);
+            // Alphabet: sym 0 only.
+            stream.extend_from_slice(&[0, 0]);
+            // freq[0] = 2048 (uint7: 0x90, 0x00). With one symbol active
+            // and sum=2048, normalize_frequencies will scale to 4096 by
+            // doubling (shift=1), giving an effective freq[0] = 4096
+            // — but we want renorm, so use TWO symbols with freq=2048 each.
+            stream.clear();
+            stream.push(FLAG_N32);
+            encode_uint7_prv(&mut stream, len as u32);
+            stream.push(0); // sym 0
+            stream.push(1); // sym 1 (consecutive triggers run-compress, but len=0 is fine)
+            stream.push(0); // run len = 0 (no run)
+            stream.push(0); // terminator
+            encode_uint7_prv(&mut stream, 2048); // freq[0]
+            encode_uint7_prv(&mut stream, 2048); // freq[1]
+            // 32 initial states all at 0x8001 — first step drops state to
+            // 0x4001 (< 1<<15) and forces renorm on every lane.
+            for _ in 0..32 {
+                stream.extend_from_slice(&0x0000_8001u32.to_le_bytes());
+            }
+            // Renorm-fodder bytes: each renorm consumes 2 bytes (u16 LE).
+            // Provide enough for several renorms per lane × 32 lanes.
+            stream.extend_from_slice(&renorm_bytes);
+
+            // SIMD path. Truncated streams are fine — both paths agree by
+            // erroring, but we just bail out of the proptest case.
+            let Ok(simd_result) = decode(&stream, 0) else {
+                return Ok(());
+            };
+
+            // Scalar path
+            let mut cur: &[u8] = &stream;
+            read_u8(&mut cur).unwrap();
+            read_uint7(&mut cur).unwrap();
+            let mut scalar_dst = vec![0u8; len];
+            let scalar_ok = decode_order_0_generic(&mut cur, &mut scalar_dst, 32).is_ok();
+
+            // Both paths must produce the same output (or both fail). If
+            // SIMD succeeded, scalar must too.
+            proptest::prop_assert!(scalar_ok, "scalar failed where SIMD succeeded");
+            proptest::prop_assert_eq!(simd_result, scalar_dst);
         }
 
         #[test]
