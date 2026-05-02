@@ -1,8 +1,19 @@
 //! Owned, mutable BAM record for writing and in-memory modification.
 //!
-//! [`OwnedBamRecord`] is the write-path counterpart to the read-path [`BamRecord`](super::record::BamRecord).
-//! It stores all fields in owned, mutable collections and supports serialization to BAM binary format
-//! via [`to_bam_bytes`](OwnedBamRecord::to_bam_bytes).
+//! [`OwnedBamRecord`] is the write-path entry point for the crate. Construct
+//! one with [`OwnedBamRecord::builder`] (typed fields, validated at build
+//! time), then hand it to [`BamWriter::write`](super::writer::BamWriter::write)
+//! to serialize. [`to_bam_bytes`](OwnedBamRecord::to_bam_bytes) exposes the
+//! same encoder for callers that need raw BAM bytes without going through a
+//! writer.
+//!
+//! For the read path — bulk decode of a region's records for pileup or
+//! per-read iteration — use [`RecordStore`](super::record_store::RecordStore)
+//! instead. The store streams raw BAM bytes straight into slab buffers
+//! without allocating per-record owned structs and is what every production
+//! reader path uses. `OwnedBamRecord` exists separately because the write
+//! path needs typed, mutable fields with builder ergonomics; pushing
+//! pre-encoded bytes into slabs is the wrong shape for that.
 
 use super::aux_data::{AuxData, AuxDataError};
 use super::cigar::CigarOp;
@@ -192,9 +203,11 @@ impl OwnedBamRecordBuilder {
 impl OwnedBamRecord {
     /// Decode a complete owned record from raw BAM bytes (after the 4-byte `block_size` prefix).
     ///
-    /// Unlike [`BamRecord::decode`](super::record::BamRecord::decode), this preserves ALL fields
-    /// including mate info (`next_ref_id`, `next_pos`, `template_len`) that the read-path type drops.
-    /// This is essential for BAM rewriting pipelines that need to modify records and write them back.
+    /// Use this when a BAM-rewriting pipeline needs an editable, typed view of a single record
+    /// — modify fields, then [`to_bam_bytes`](Self::to_bam_bytes) it back out. For bulk read-path
+    /// decode (pileup, per-read iteration), prefer
+    /// [`RecordStore::push_raw`](super::record_store::RecordStore::push_raw), which avoids the
+    /// per-record allocation.
     pub fn from_raw_bam(raw: &[u8]) -> Result<Self, OwnedRecordError> {
         use super::record::parse_header;
 
@@ -499,6 +512,16 @@ mod tests {
             .unwrap()
     }
 
+    /// Decode `to_bam_bytes` output by pushing into a one-shot `RecordStore`.
+    /// This is the production decode path (what region loading actually runs)
+    /// — there is no separate `BamRecord::decode` oracle by design.
+    fn decode_into_store(buf: &[u8]) -> super::super::record_store::RecordStore {
+        let mut store = super::super::record_store::RecordStore::new();
+        let idx = store.push_raw(buf, &mut ()).unwrap().expect("record accepted");
+        assert_eq!(idx, 0);
+        store
+    }
+
     // r[verify bam.owned_record.to_bam_bytes]
     // r[verify bam.owned_record.test_roundtrip_bytes]
     #[test]
@@ -507,17 +530,8 @@ mod tests {
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
 
-        // Prepend block_size and decode with the existing BamRecord::decode
-        #[expect(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "test: buf is a small record"
-        )]
-        let block_size = buf.len() as i32;
-        let mut full = block_size.to_le_bytes().to_vec();
-        full.extend_from_slice(&buf);
-
-        let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
+        let store = decode_into_store(&buf);
+        let decoded = store.record(0);
 
         assert_eq!(decoded.tid, 0);
         assert_eq!(*decoded.pos, 100);
@@ -525,7 +539,7 @@ mod tests {
         assert_eq!(decoded.flags, BamFlags::empty());
         assert_eq!(decoded.seq_len, 5);
         assert_eq!(decoded.n_cigar_ops, 1);
-        assert_eq!(&*decoded.qname, b"read1");
+        assert_eq!(store.qname(0), b"read1");
     }
 
     #[test]
@@ -545,11 +559,12 @@ mod tests {
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
 
-        let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
-        let nm = super::super::aux::find_tag(&decoded.aux, *b"NM");
+        let store = decode_into_store(&buf);
+        let aux = store.aux(0);
+        let nm = super::super::aux::find_tag(aux, *b"NM");
         assert_eq!(nm, Some(super::super::aux::AuxValue::U8(3)));
 
-        let rg = super::super::aux::find_tag(&decoded.aux, *b"RG");
+        let rg = super::super::aux::find_tag(aux, *b"RG");
         assert_eq!(rg, Some(super::super::aux::AuxValue::String(b"grp1")));
     }
 
@@ -651,8 +666,8 @@ mod tests {
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
 
-        let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
-        assert!(decoded.qual.iter().all(|&q| q == 0xFF));
+        let store = decode_into_store(&buf);
+        assert!(store.qual(0).iter().all(|&q| q == BaseQuality::UNAVAILABLE));
     }
 
     #[test]
@@ -688,7 +703,8 @@ mod tests {
         let mut buf = Vec::new();
         rec.to_bam_bytes(&mut buf).unwrap();
 
-        let decoded = super::super::record::BamRecord::decode(&buf).unwrap();
+        let store = decode_into_store(&buf);
+        let decoded = store.record(0);
         assert_eq!(decoded.n_cigar_ops, 0);
         assert_eq!(decoded.seq_len, 3);
         assert_eq!(decoded.flags & BamFlags::from(0x4), BamFlags::from(0x4));

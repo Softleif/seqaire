@@ -1,13 +1,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use seqair::bam::{BamRecord, RecordStore};
+use seqair::bam::RecordStore;
 
+// Fuzz `RecordStore::push_raw` — the production decode path that every reader
+// in the crate runs. There is intentionally no separate `BamRecord::decode`
+// to fuzz; that struct was removed in favor of slab-only decode.
 fuzz_target!(|data: &[u8]| {
-    // Fuzz the BAM record decoder
-    let _ = BamRecord::decode(data);
-
-    // Also fuzz RecordStore::push_raw which decodes and stores
     let mut store = RecordStore::default();
     let _ = store.push_raw(data, &mut ());
 });
