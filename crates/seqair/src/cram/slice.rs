@@ -171,9 +171,8 @@ pub(crate) fn decode_slice<E: CustomizeRecordStore>(
             .map_err(|_| CramError::InvalidLength { value: sh.alignment_span })?;
         let slice_ref_end = slice_ref_start.wrapping_add(span);
         if let Some(slice_ref) = reference_seq.get(slice_ref_start..slice_ref_end) {
-            let computed =
-                md5::compute(slice_ref.iter().map(|b| b.to_ascii_uppercase()).collect::<Vec<u8>>());
-            if *computed != sh.reference_md5 {
+            let computed = md5_uppercase_streaming(slice_ref);
+            if computed != sh.reference_md5 {
                 return Err(CramError::ReferenceMd5Mismatch {
                     contig: header.target_name(tid).unwrap_or("?").into(),
                     start: sh.alignment_start as u64,
@@ -1090,6 +1089,23 @@ fn read_itf8(cursor: &mut &[u8]) -> Result<u32, CramError> {
     varint::read_itf8_from(cursor).ok_or(CramError::Truncated { context: "slice header itf8" })
 }
 
+/// MD5 of `bytes` after ASCII-uppercasing, computed without allocating
+/// an intermediate `Vec<u8>`. Slice references for a CRAM region can be
+/// 1 MB+; allocating per slice for verification was a real cost on
+/// pileup-heavy workloads.
+fn md5_uppercase_streaming(bytes: &[u8]) -> [u8; 16] {
+    let mut ctx = md5::Context::new();
+    let mut buf = [0u8; 4096];
+    for chunk in bytes.chunks(buf.len()) {
+        let dst = buf.get_mut(..chunk.len()).expect("chunks(N) yields chunks of length ≤ N");
+        for (d, &s) in dst.iter_mut().zip(chunk) {
+            *d = s.to_ascii_uppercase();
+        }
+        ctx.consume(&*dst);
+    }
+    ctx.finalize().into()
+}
+
 fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
     varint::read_ltf8_from(cursor).ok_or(CramError::Truncated { context: "slice header ltf8" })
 }
@@ -1097,9 +1113,45 @@ fn read_ltf8(cursor: &mut &[u8]) -> Result<u64, CramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn load_test_cram() -> Vec<u8> {
         std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.cram")).unwrap()
+    }
+
+    /// Reference implementation that allocates a Vec — what `md5_uppercase_streaming`
+    /// must match for any input.
+    fn md5_uppercase_alloc(bytes: &[u8]) -> [u8; 16] {
+        let upper: Vec<u8> = bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
+        md5::compute(&upper).into()
+    }
+
+    proptest! {
+        // r[verify cram.edge.reference_mismatch]
+        // Streaming MD5 must produce identical output to the allocating
+        // form across input lengths spanning sub-block, single-block,
+        // multi-block, and unaligned-tail cases.
+        #[test]
+        fn md5_uppercase_streaming_matches_alloc(
+            bytes in proptest::collection::vec(0u8..=255, 0..16_384),
+        ) {
+            prop_assert_eq!(md5_uppercase_streaming(&bytes), md5_uppercase_alloc(&bytes));
+        }
+    }
+
+    #[test]
+    fn md5_uppercase_streaming_known_vectors() {
+        // Empty input.
+        let empty_md5: [u8; 16] = md5::compute(b"").into();
+        assert_eq!(md5_uppercase_streaming(b""), empty_md5);
+
+        // Lowercase string uppercases to the canonical MD5 of "ACGT".
+        let acgt_md5: [u8; 16] = md5::compute(b"ACGT").into();
+        assert_eq!(md5_uppercase_streaming(b"acgt"), acgt_md5);
+
+        // Mixed case + non-letters (Ns are common in references).
+        let mixed_md5: [u8; 16] = md5::compute(b"ACGTNACGT").into();
+        assert_eq!(md5_uppercase_streaming(b"AcGtNaCgT"), mixed_md5);
     }
 
     #[test]
