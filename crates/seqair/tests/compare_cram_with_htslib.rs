@@ -47,6 +47,12 @@ struct HtsRecord {
     flags: u16,
     mapq: u8,
     seq_len: usize,
+    /// 0-based mate position (BAM convention). `-1` for unmapped mates.
+    next_pos: i64,
+    /// Mate reference id. `-1` for unmapped/no-mate.
+    next_ref_id: i32,
+    /// Template length (insert size). Signed.
+    template_len: i64,
 }
 
 fn fetch_hts_records(contig: &str, start: u64, end: u64) -> Vec<HtsRecord> {
@@ -68,6 +74,9 @@ fn fetch_hts_records(contig: &str, start: u64, end: u64) -> Vec<HtsRecord> {
             flags: record.flags(),
             mapq: record.mapq(),
             seq_len: record.seq_len(),
+            next_pos: record.mpos(),
+            next_ref_id: record.mtid(),
+            template_len: record.insert_size(),
         });
     }
     records
@@ -156,6 +165,58 @@ fn cram_records_match_htslib_for_chr19() {
             // (matches the BAM path's `compute_end_pos` and the pileup
             // engine's eviction check `end_pos < pos`). Compare with `-1`.
             assert_eq!(cram.end_pos.as_i64(), hts.end_pos - 1, "{version} rec {i}: end_pos");
+        }
+    }
+}
+
+// r[verify cram.record.mate_detached]
+// r[verify cram.record.mate_attached]
+// r[verify cram.record.mate_tlen_reconstruction]
+/// Cross-validates CRAM-decoded mate fields (`next_pos`, `next_ref_id`,
+/// `template_len`) against htslib's BAM-side decode. Without this,
+/// off-by-one or sign bugs in CRAM mate handling pass silently because
+/// the `bases`/`positions`/`flags`/`end_pos` checks don't touch these fields.
+///
+/// CRAM stores mate position as 1-based (NP data series); BAM stores it
+/// 0-based. The conversion happens in the slice decoder for detached mates,
+/// and via `infos[..].pos` (already 0-based) for attached mates resolved
+/// in `resolve_mate_tlen`.
+#[test]
+fn cram_mate_fields_match_htslib() {
+    let contig = "chr19";
+    let start = 6_103_076u64;
+    let end = 6_143_229u64;
+    let hts_records = fetch_hts_records(contig, start, end);
+
+    for &(version, cram_path_fn) in CRAM_VERSIONS {
+        let mut readers = Readers::open(cram_path_fn(), test_fasta_path()).unwrap();
+        let mut store = RecordStore::new();
+        let tid = readers.header().tid(contig).unwrap();
+        readers
+            .fetch_into(
+                tid,
+                Pos0::new(start as u32).unwrap(),
+                Pos0::new(end as u32).unwrap(),
+                &mut store,
+            )
+            .unwrap();
+
+        assert_eq!(store.len(), hts_records.len(), "{version}: record count");
+
+        for (i, hts) in hts_records.iter().enumerate() {
+            let cram = store.record(i as u32);
+            assert_eq!(
+                i64::from(cram.next_pos),
+                hts.next_pos,
+                "{version} rec {i}: next_pos (cram=1-based stored to bam=0-based — \
+                 detached path needs `np - 1` conversion)",
+            );
+            assert_eq!(cram.next_ref_id, hts.next_ref_id, "{version} rec {i}: next_ref_id",);
+            assert_eq!(
+                i64::from(cram.template_len),
+                hts.template_len,
+                "{version} rec {i}: template_len (resolve_mate_tlen sign rule)",
+            );
         }
     }
 }

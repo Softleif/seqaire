@@ -399,7 +399,13 @@ fn decode_record<E: CustomizeRecordStore>(
             name_buf.clear();
         }
         next_ref_id_val = ds.next_segment_ref.decode(ctx)?;
-        next_pos_val = ds.next_mate_pos.decode(ctx)?;
+        // CRAM `NP` is 1-based per the spec; BAM's `next_pos` slot is
+        // 0-based. Subtract 1 at the boundary, matching htslib's
+        // `cr->mate_pos - 1` at the BAM emit (cram_decode.c:3121). NP=0
+        // (CRAM "no mate position") naturally lands on -1, the BAM
+        // unmapped-mate sentinel.
+        // r[impl cram.record.mate_detached]
+        next_pos_val = ds.next_mate_pos.decode(ctx)?.saturating_sub(1);
         template_len_val = ds.template_size.decode(ctx)?;
     } else if mate_downstream {
         let nf = ds.next_fragment.decode(ctx)?;
