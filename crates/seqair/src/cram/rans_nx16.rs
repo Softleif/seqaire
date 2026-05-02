@@ -225,12 +225,13 @@ fn cumulative_frequencies_symbol(
 }
 
 // r[impl cram.codec.state_step_safety]
-// SAFETY: spec guarantees g <= f * (s >> bits) + (s & mask) for valid frequency tables.
-// Use wrapping_sub for release-mode robustness against malformed data.
+// The CRAM spec guarantees `g <= f * (s >> bits) + (s & mask)` for valid frequency
+// tables, but malformed/fuzz input can violate it — `wrapping_sub` keeps the
+// release path safe. No `debug_assert!`: the input is untrusted (CRAM data),
+// so a debug assertion would panic on adversarial inputs in fuzz/debug builds.
 pub(crate) fn state_step(s: u32, f: u32, g: u32, bits: u32) -> u32 {
     let result =
         f.wrapping_mul(s >> bits).wrapping_add(s & (1u32.wrapping_shl(bits).wrapping_sub(1)));
-    debug_assert!(result >= g, "state_step underflow: {result} < {g}");
     // r[depends cram.codec.state_step_safety]
     result.wrapping_sub(g)
 }
