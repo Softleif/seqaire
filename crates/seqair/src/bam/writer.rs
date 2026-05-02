@@ -167,19 +167,37 @@ impl<W: Write> BamWriter<W> {
         self.buf.clear();
         record.to_bam_bytes(&mut self.buf)?;
 
-        // r[impl bam_writer.record_size_limit]
+        let beg = record.pos.map(seqair_types::Pos0::as_u64).unwrap_or(0);
+        let end_pos = record.end_pos().map(|p| p.as_u64()).unwrap_or(beg);
+        self.finalize_record(record.ref_id, record.flags.is_unmapped(), beg, end_pos)
+    }
+
+    // r[impl bam_writer.record_size_limit]
+    // r[impl bam_writer.index_record_dispatch]
+    // r[impl bam_writer.flush_before_record]
+    // r[impl bam_writer.insertion_order]
+    // r[impl bam_writer.index_sort_order]
+    /// Common post-encode path shared by `write` and `write_store_record`:
+    /// validate size, validate indexability, write the BGZF block, then push
+    /// to the index. `self.buf` must already hold the record bytes (without
+    /// the 4-byte `block_size` prefix). `beg`/`end_pos` are the BAI inputs;
+    /// for unmapped records the helper collapses `end` to `beg`+1.
+    fn finalize_record(
+        &mut self,
+        ref_id: i32,
+        is_unmapped: bool,
+        beg: u64,
+        end_pos: u64,
+    ) -> Result<(), BamWriteError> {
         if self.buf.len() > MAX_RECORD_SIZE {
             return Err(BamWriteError::RecordTooLarge { size: self.buf.len() });
         }
 
-        // r[impl bam_writer.index_record_dispatch]
-        // Validate indexability BEFORE writing to BGZF — a failed validation after writing
-        // would leave the record in the stream but poison the writer.
-        if self.index.is_some() {
-            let is_unmapped = record.flags.is_unmapped();
-            if record.ref_id == -1 && !is_unmapped {
-                return Err(BamWriteError::MappedWithoutReference);
-            }
+        // Validate indexability BEFORE writing to BGZF — a failed validation
+        // after writing would leave the record in the stream but poison the
+        // writer.
+        if self.index.is_some() && ref_id == -1 && !is_unmapped {
+            return Err(BamWriteError::MappedWithoutReference);
         }
 
         // Safe: buf.len() <= MAX_RECORD_SIZE (2 MiB) < i32::MAX, checked above.
@@ -192,39 +210,25 @@ impl<W: Write> BamWriter<W> {
         let block_size = self.buf.len() as i32;
         let total = 4usize.saturating_add(self.buf.len());
 
-        // r[impl bam_writer.flush_before_record]
         self.bgzf.flush_if_needed(total)?;
-
-        // r[impl bam_writer.insertion_order]
-        // Records are written immediately to the BGZF stream in call order.
         self.bgzf.write_all(&block_size.to_le_bytes())?;
         self.bgzf.write_all(&self.buf)?;
 
-        // Push to index after writing (offset convention: offset AFTER the record)
-        if let Some(ref mut index) = self.index {
-            let is_unmapped = record.flags.is_unmapped();
-
-            if record.ref_id != -1 {
-                // r[impl bam_writer.index_sort_order]
-                // Sort validation is delegated to IndexBuilder::push()
-                let voff = self.bgzf.virtual_offset();
-                let beg = record.pos.map(seqair_types::Pos0::as_u64).unwrap_or(0);
-                let end = if is_unmapped {
-                    // Case 2: placed unmapped — beg = end = pos
-                    beg
-                } else {
-                    // Case 1: mapped — use end_pos from CIGAR
-                    record.end_pos().map(|p| p.as_u64()).unwrap_or(beg)
-                };
-                let end = end.max(beg.saturating_add(1));
-                if is_unmapped {
-                    // Placed unmapped: increment n_unmapped (not n_mapped) in pseudo-bin
-                    index.push_unmapped(record.ref_id, beg, end, voff)?;
-                } else {
-                    index.push(record.ref_id, beg, end, voff)?;
-                }
+        // Push to index after writing (offset convention: offset AFTER the
+        // record). Sort validation is delegated to `IndexBuilder::push()`.
+        // Fully unmapped records (ref_id == -1) are not pushed.
+        if let Some(ref mut index) = self.index
+            && ref_id != -1
+        {
+            let voff = self.bgzf.virtual_offset();
+            // Placed unmapped: beg = end = pos. Mapped: end = end_pos.
+            let end = if is_unmapped { beg } else { end_pos };
+            let end = end.max(beg.saturating_add(1));
+            if is_unmapped {
+                index.push_unmapped(ref_id, beg, end, voff)?;
+            } else {
+                index.push(ref_id, beg, end, voff)?;
             }
-            // Case 3: fully unmapped (ref_id == -1) — not pushed to index
         }
 
         Ok(())
@@ -329,49 +333,10 @@ impl<W: Write> BamWriter<W> {
         // Aux tags (raw BAM bytes)
         self.buf.extend_from_slice(aux);
 
-        // Validate size
-        if self.buf.len() > MAX_RECORD_SIZE {
-            return Err(BamWriteError::RecordTooLarge { size: self.buf.len() });
-        }
-
-        // Validate indexability before writing
-        if self.index.is_some() {
-            let is_unmapped = rec.flags.is_unmapped();
-            if rec.tid == -1 && !is_unmapped {
-                return Err(BamWriteError::MappedWithoutReference);
-            }
-        }
-
-        let block_size = self.buf.len() as i32;
-        let total = 4usize.saturating_add(self.buf.len());
-
-        self.bgzf.flush_if_needed(total)?;
-        self.bgzf.write_all(&block_size.to_le_bytes())?;
-        self.bgzf.write_all(&self.buf)?;
-
-        // Index dispatch (same logic as write_inner)
-        if let Some(ref mut index) = self.index {
-            let is_unmapped = rec.flags.is_unmapped();
-            if rec.tid != -1 {
-                let voff = self.bgzf.virtual_offset();
-                let idx_beg = beg;
-                let idx_end = if is_unmapped {
-                    // Placed unmapped: beg = end = pos
-                    idx_beg
-                } else {
-                    // Mapped: use end_pos from CIGAR
-                    rec.end_pos.as_u64()
-                };
-                let idx_end = idx_end.max(idx_beg.saturating_add(1));
-                if is_unmapped {
-                    index.push_unmapped(rec.tid, idx_beg, idx_end, voff)?;
-                } else {
-                    index.push(rec.tid, idx_beg, idx_end, voff)?;
-                }
-            }
-        }
-
-        Ok(())
+        let ref_id = rec.tid;
+        let is_unmapped = rec.flags.is_unmapped();
+        let end_pos = rec.end_pos.as_u64();
+        self.finalize_record(ref_id, is_unmapped, beg, end_pos)
     }
 
     // r[impl bam_writer.finish]
