@@ -12,7 +12,16 @@
     reason = "lazy form avoids per-call drop_in_place<CramError> on hot path"
 )]
 
+use super::codec_io::{self, Uint7Error};
 use super::reader::CramError;
+
+/// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
+fn uint7_to_cram_error(e: Uint7Error) -> CramError {
+    match e {
+        Uint7Error::Truncated => CramError::Truncated { context: "rans_nx16 uint7" },
+        Uint7Error::Overflow => CramError::Uint7Overflow,
+    }
+}
 
 const ALPHABET_SIZE: usize = 256;
 
@@ -133,71 +142,23 @@ pub(crate) fn decode_with_buf(
 
 // ── Primitive readers ────────────────────────────────────────────────
 
-// These per-byte helpers return `Option<T>` rather than
-// `Result<T, CramError>` to keep the return-type small (2 bytes vs 80)
-// and avoid eager `CramError` construction + drop on the hot path.
-// See the helper-module comment in rans.rs for the full size + drop
-// story; identical reasoning applies here. `split_first` /
-// `split_first_chunk` keep the slice bounds check to a single
-// branch.
-#[inline]
-fn read_u8(src: &mut &[u8]) -> Option<u8> {
-    let (&b, rest) = src.split_first()?;
-    *src = rest;
-    Some(b)
-}
+// All per-byte primitives (`read_u8`, `read_u32_le`, `read_uint7`,
+// `split_off`) live in `super::codec_io`; see that module's docs for
+// the `Option<T>` design rationale (avoiding `drop_in_place<CramError>`
+// on the per-byte hot path).
+pub(crate) use super::codec_io::read_u16_le as read_u16_le_prv;
+use super::codec_io::{read_u8, read_u32_le};
 
+/// Local thin wrappers that produce a `CramError` with a tagged context
+/// from the narrow `Option`/`Uint7Error` returns.
 #[inline]
-pub(crate) fn read_u16_le_prv(src: &mut &[u8]) -> Option<u16> {
-    let (head, rest) = src.split_first_chunk::<2>()?;
-    *src = rest;
-    Some(u16::from_le_bytes(*head))
-}
-
-#[inline]
-fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
-    let (head, rest) = src.split_first_chunk::<4>()?;
-    *src = rest;
-    Some(u32::from_le_bytes(*head))
-}
-
-// r[impl cram.codec.uint7_bounded]
-// Cold helper (parsed once per block); keeps the rich `CramError`
-// signature so the `Uint7Overflow` variant survives.
-// r[impl cram.codec.uint7_bounded]
-// Cold helper (parsed once per block); keeps the rich `CramError`
-// signature so the `Uint7Overflow` variant survives.
 fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
-    let mut n: u32 = 0;
-    let mut count: u8 = 0;
-    loop {
-        if count >= 5 {
-            return Err(CramError::Uint7Overflow);
-        }
-
-        #[allow(clippy::arithmetic_side_effects, reason = "count < 5")]
-        {
-            count += 1;
-        }
-
-        let b = u32::from(
-            read_u8(src).ok_or_else(|| CramError::Truncated { context: "rans_nx16 uint7" })?,
-        );
-        // ITF-8 is MSB-first: shift accumulator left so each new byte's
-        // 7 data bits become the new low bits.
-        n = (n << 7) | (b & 0x7f);
-        if b & 0x80 == 0 {
-            break;
-        }
-    }
-    Ok(n)
+    codec_io::read_uint7(src).map_err(uint7_to_cram_error)
 }
 
+#[inline]
 fn split_off<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], CramError> {
-    let (head, rest) =
-        src.split_at_checked(len).ok_or(CramError::Truncated { context: "rans_nx16 split_off" })?;
-    *src = rest;
-    Ok(head)
+    codec_io::split_off(src, len).ok_or(CramError::Truncated { context: "rans_nx16 split_off" })
 }
 
 fn read_states(src: &mut &[u8], state_count: usize) -> Result<Vec<u32>, CramError> {

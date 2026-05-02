@@ -4,6 +4,7 @@
 // r[impl io.minimal_public_api]
 pub mod bitstream;
 pub mod block;
+pub(crate) mod codec_io;
 pub mod compression_header;
 pub mod container;
 pub mod encoding;

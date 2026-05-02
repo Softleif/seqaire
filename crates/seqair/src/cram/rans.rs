@@ -328,39 +328,10 @@ fn build_symbol_table(cum_freq: &[u16; ALPHABET_SIZE]) -> [u8; 4096] {
     table
 }
 
-// These per-byte helpers return `Option<T>` rather than
-// `Result<T, CramError>` for two compounding reasons:
-//
-// 1. Size. `CramError` is 80 bytes (sized to fit `Open { path: PathBuf,
-//    source: std::io::Error }` and other heap-owning variants), so
-//    `Result<u8, CramError>` is also 80 bytes — passed via memory/sret
-//    in the non-inlined ABI. `Option<u8>` is 2 bytes, in a register.
-// 2. Drop. `CramError` has a discriminant-dispatched Drop because some
-//    variants own `PathBuf` / `SmolStr` / `io::Error`. samply flagged
-//    `core::ptr::drop_in_place<CramError>` next to `read_u8` /
-//    `renormalize` because the eager `ok_or(CramError::...)` form
-//    constructed and then dropped a CramError on every successful read.
-//
-// Callers materialize a `CramError` only on the failure path, with
-// `ok_or_else(|| CramError::Truncated { context: ... })` at the
-// outermost function that knows the context.
-//
-// `split_first` / `split_first_chunk` (not `first` + `get(1..)`) is
-// also load-bearing — the two-step form does two slice bounds checks
-// and `slice::first` was at the top of the renormalize stack.
-#[inline]
-fn read_u8(src: &mut &[u8]) -> Option<u8> {
-    let (&b, rest) = src.split_first()?;
-    *src = rest;
-    Some(b)
-}
-
-#[inline]
-fn read_u32_le(src: &mut &[u8]) -> Option<u32> {
-    let (head, rest) = src.split_first_chunk::<4>()?;
-    *src = rest;
-    Some(u32::from_le_bytes(*head))
-}
+// Per-byte primitives (`read_u8`, `read_u32_le`) live in `super::codec_io`
+// — see that module's docs for the `Option<T>` design rationale (avoiding
+// `drop_in_place<CramError>` on the per-byte hot path).
+use super::codec_io::{read_u8, read_u32_le};
 
 #[inline]
 fn read_itf8_u16(src: &mut &[u8]) -> Option<u16> {
