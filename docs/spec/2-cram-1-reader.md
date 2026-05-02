@@ -539,6 +539,9 @@ Symbol variables in rANS frequency table run-length reading MUST use `u8` type, 
 r[cram.codec.rans4x8_compressed_size_check]
 The rANS 4x8 header carries a 4-byte little-endian `compressed_size` field after the order byte. After consuming the 9-byte header, the remainder of the input MUST be exactly `compressed_size` bytes. Mismatch indicates a truncated or corrupt stream and MUST produce a typed error (`Rans4x8CompressedSizeMismatch`); do not silently truncate or extend. Mirrors htscodecs' `rANS_static.c:245` `if (in_sz != in_size - 9) return NULL`.
 
+r[cram.slice.multi_ref_skip]
+For records in a multi-ref slice (`slice.ref_seq_id == -2`) whose decoded `record_ref_id` does not match the query `tid`, the reader SHOULD skip sequence/CIGAR reconstruction since the record will be discarded anyway. Stream consumption MUST stay in lockstep with the reconstruct path — every `ds.X.decode*` call that the reconstruct path makes must also happen in the skip path, in the same order, for the same feature codes — because each per-record data series is an independent stream and skipping any consumption desynchronises every subsequent record in the slice. The skip path MUST still compute `ref_consumed` (used for `SliceMateInfo.end_pos` in `resolve_mate_tlen`).
+
 r[cram.codec.simd_dispatch]
 The 32-state order-0 rANS Nx16 decode has SIMD specializations (NEON for aarch64, AVX2 for x86_64). The dispatch MUST propagate SIMD errors to the caller — there is no scalar fallback at runtime. SIMD and scalar share the same algorithm over the same `src` and `states`; the only legitimate way for SIMD to fail (truncation) is also a way for scalar to fail. Hiding a SIMD-only failure with a snapshot/restore + scalar retry would mask SIMD bugs, since the proptest oracle (`simd_matches_scalar_with_renorm`) would never see them. The pure-scalar `decode_order_0_32state_scalar` is reachable only on targets without SIMD support (non-aarch64 + non-AVX2 x86_64).
 

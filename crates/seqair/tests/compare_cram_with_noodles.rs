@@ -207,15 +207,32 @@ fn cram_chr19_records_match_noodles_field_by_field() {
             // r[verify cram.record.mate_detached]
             // r[verify cram.record.mate_attached]
             // r[verify cram.record.mate_tlen_reconstruction]
-            assert_eq!(
-                i64::from(our_rec.next_pos),
-                noodles_rec.next_pos,
-                "{version} rec {i}: next_pos",
-            );
-            assert_eq!(
-                our_rec.next_ref_id, noodles_rec.next_ref_id,
-                "{version} rec {i}: next_ref_id",
-            );
+            //
+            // seqair applies the filtered-mate-sentinel rule
+            // (r[impl cram.fetch_into_customized.filtered_mate_sentinel]):
+            // when the mate is outside the fetched range, the kept record's
+            // next_pos / next_ref_id are nulled to BAM's (-1, -1) sentinel
+            // so downstream pileup-pair logic accurately reflects what's in
+            // the store. noodles reads every record sequentially so it
+            // preserves the original mate position regardless. Only assert
+            // equality when seqair's value is non-sentinel; the htslib
+            // suite (`cram_mate_fields_match_htslib`) covers the matching
+            // path with a query that keeps both records in range.
+            if our_rec.next_pos != -1 {
+                assert_eq!(
+                    i64::from(our_rec.next_pos),
+                    noodles_rec.next_pos,
+                    "{version} rec {i}: next_pos",
+                );
+            }
+            if our_rec.next_ref_id != -1 {
+                assert_eq!(
+                    our_rec.next_ref_id, noodles_rec.next_ref_id,
+                    "{version} rec {i}: next_ref_id",
+                );
+            }
+            // template_len is preserved across the filter — it's a
+            // per-template property computed from the full chain span.
             assert_eq!(
                 i64::from(our_rec.template_len),
                 noodles_rec.template_len,
