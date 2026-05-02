@@ -17,7 +17,7 @@ use crate::bam::record::DecodeError;
 use crate::bam::record_store::RecordStore;
 use crate::bam::{BamHeader, BamHeaderError, BgzfError};
 use crate::fasta::{FastaError, IndexedFastaReader};
-use seqair_types::{Base, Pos0, Pos1, SmolStr};
+use seqair_types::{Base, Pos0, Pos1, SmallVec, SmolStr};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -510,10 +510,19 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         let mut fetched_total = 0usize;
         let mut kept_total = 0usize;
 
-        // Group entries by container_offset (multiple slices may be in same container)
-        let mut container_offsets: Vec<u64> = entries.iter().map(|e| e.container_offset).collect();
-        container_offsets.sort_unstable();
-        container_offsets.dedup();
+        // Group CRAI entries by container_offset → set of slice_offsets that
+        // overlap our query. Keys are sorted (BTreeMap) so containers are
+        // visited in file order. Slice_offset values are kept in a tiny
+        // SmallVec since most containers list 1–4 relevant slices.
+        // r[impl cram.index.crai_per_slice]
+        let mut wanted: std::collections::BTreeMap<u64, SmallVec<u64, 4>> =
+            std::collections::BTreeMap::new();
+        for e in &entries {
+            let entry = wanted.entry(e.container_offset).or_default();
+            if !entry.contains(&e.slice_offset) {
+                entry.push(e.slice_offset);
+            }
+        }
 
         // Get reference name for FASTA lookup. Borrow into the Arc'd
         // header — the FASTA fetch only needs `&str`, and the cold
@@ -557,7 +566,7 @@ impl<R: Read + Seek> IndexedCramReader<R> {
         // Profile signal: look for `block::parse_block`,
         // `CompressionHeader::parse`, and `File::read_exact` near the
         // top of `fetch_into_customized` self-time.
-        for &container_offset in &container_offsets {
+        for (&container_offset, wanted_slices) in &wanted {
             self.file.seek(SeekFrom::Start(container_offset))?;
 
             // Read container header
@@ -659,10 +668,21 @@ impl<R: Read + Seek> IndexedCramReader<R> {
                     })?;
             }
 
-            // Decode each slice that belongs to this container and overlaps our query
+            // Decode each slice listed by CRAI as overlapping our query.
+            // CRAI's `slice_offset` matches the container's landmark value
+            // (both are byte offsets from the start of the container's data
+            // block to the slice header). Skipping non-listed landmarks
+            // avoids decoding slices we know cannot overlap — a strict win
+            // for multi-slice / multi-ref containers, no-op otherwise.
+            // r[impl cram.index.crai_per_slice]
             for &landmark in &container_header.landmarks {
                 let slice_offset = usize::try_from(landmark)
                     .map_err(|_| CramError::InvalidLength { value: landmark })?;
+                let landmark_u64 = u64::try_from(landmark)
+                    .map_err(|_| CramError::InvalidLength { value: landmark })?;
+                if !wanted_slices.contains(&landmark_u64) {
+                    continue;
+                }
 
                 // r[impl cram.edge.coordinate_clamp]
                 let (slice_fetched, slice_kept) = slice::decode_slice(
