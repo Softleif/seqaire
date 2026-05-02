@@ -7,7 +7,16 @@
 
 use std::io::{BufRead, Cursor, Read, Write};
 
+use super::codec_io::{Uint7Error, read_u8, read_u32_le, read_uint7, split_off};
 use super::reader::CramError;
+
+/// Bridge `Uint7Error` (narrow, hot-path-friendly) to the rich `CramError`.
+fn uint7_to_cram_error(e: Uint7Error) -> CramError {
+    match e {
+        Uint7Error::Truncated => CramError::Truncated { context: "tok3 uint7" },
+        Uint7Error::Overflow => CramError::Uint7Overflow,
+    }
+}
 
 /// Maximum number of names allowed in a tok3 block.
 const TOK3_NAME_COUNT_LIMIT: usize = 10_000_000;
@@ -280,9 +289,10 @@ impl TokenReader {
 // ── Header ───────────────────────────────────────────────────────────
 
 fn read_header(src: &mut &[u8]) -> Result<(usize, usize, bool), CramError> {
-    let uncompressed_size = read_u32_le(src)? as usize;
-    let name_count = read_u32_le(src)? as usize;
-    let method = read_u8(src)?;
+    let truncated = || CramError::Truncated { context: "tok3 header" };
+    let uncompressed_size = read_u32_le(src).ok_or_else(truncated)? as usize;
+    let name_count = read_u32_le(src).ok_or_else(truncated)? as usize;
+    let method = read_u8(src).ok_or_else(truncated)?;
     let use_arith = method != 0;
     Ok((uncompressed_size, name_count, use_arith))
 }
@@ -302,7 +312,7 @@ fn decode_token_byte_streams(
     let mut t: Option<usize> = None;
 
     while !src.is_empty() {
-        let ttype = read_u8(src)?;
+        let ttype = read_u8(src).ok_or(CramError::Truncated { context: "tok3 token type" })?;
 
         let tok_new = ttype & 0x80 != 0;
         let tok_dup = ttype & 0x40 != 0;
@@ -329,8 +339,9 @@ fn decode_token_byte_streams(
             t.ok_or(CramError::Truncated { context: "tok3 token index before first new token" })?;
 
         if tok_dup {
-            let dup_pos = read_u8(src)? as usize;
-            let dup_type = TokenType::from_byte(read_u8(src)?)?;
+            let truncated_dup = || CramError::Truncated { context: "tok3 dup metadata" };
+            let dup_pos = read_u8(src).ok_or_else(truncated_dup)? as usize;
+            let dup_type = TokenType::from_byte(read_u8(src).ok_or_else(truncated_dup)?)?;
 
             let buf = b
                 .get(dup_pos)
@@ -341,8 +352,9 @@ fn decode_token_byte_streams(
 
             b.get_mut(t_idx).ok_or(CramError::Truncated { context: "tok3 dup set" })?.set(ty, buf);
         } else {
-            let compressed_size = read_uint7(src)? as usize;
-            let buf = split_off(src, compressed_size)?;
+            let compressed_size = read_uint7(src).map_err(uint7_to_cram_error)? as usize;
+            let buf = split_off(src, compressed_size)
+                .ok_or(CramError::Truncated { context: "tok3 compressed payload" })?;
             let decompressed = super::rans_nx16::decode(buf, 0)?;
 
             b.get_mut(t_idx)
@@ -435,45 +447,8 @@ fn decode_single_name(
     Ok(names.get(n).ok_or(CramError::Truncated { context: "tok3 final name" })?.clone())
 }
 
-// ── Primitive readers ────────────────────────────────────────────────
-
-fn read_u8(src: &mut &[u8]) -> Result<u8, CramError> {
-    let &b = src.first().ok_or(CramError::Truncated { context: "tok3 u8" })?;
-    *src = src.get(1..).ok_or(CramError::Truncated { context: "tok3 u8" })?;
-    Ok(b)
-}
-
-fn read_u32_le(src: &mut &[u8]) -> Result<u32, CramError> {
-    let bytes: &[u8; 4] = src.first_chunk().ok_or(CramError::Truncated { context: "tok3 u32" })?;
-    let val = u32::from_le_bytes(*bytes);
-    *src = src.get(4..).ok_or(CramError::Truncated { context: "tok3 u32" })?;
-    Ok(val)
-}
-
-// r[impl cram.codec.uint7_bounded]
-fn read_uint7(src: &mut &[u8]) -> Result<u32, CramError> {
-    let mut n: u32 = 0;
-    let mut count: u8 = 0;
-    loop {
-        if count >= 5 {
-            return Err(CramError::Uint7Overflow);
-        }
-        count = count.checked_add(1).ok_or(CramError::Uint7Overflow)?;
-        let b = u32::from(read_u8(src)?);
-        n = (n << 7) | (b & 0x7f);
-        if b & 0x80 == 0 {
-            break;
-        }
-    }
-    Ok(n)
-}
-
-fn split_off<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], CramError> {
-    let (head, rest) =
-        src.split_at_checked(len).ok_or(CramError::Truncated { context: "tok3 split_off" })?;
-    *src = rest;
-    Ok(head)
-}
+// Primitive readers (`read_u8`, `read_u32_le`, `read_uint7`, `split_off`)
+// live in `super::codec_io`; see the imports at the top of this file.
 
 #[cfg(test)]
 mod tests {
