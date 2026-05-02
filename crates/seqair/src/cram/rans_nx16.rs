@@ -1090,6 +1090,39 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    #[test]
+    fn read_uint7_spec_vectors() {
+        // Hard-coded byte sequences derived from htscodecs `var_put_u32`
+        // (htslib/htscodecs/htscodecs/varint.h:206, BIG_END / MSB-first).
+        // These are an independent oracle: a future refactor that flips
+        // MSB↔LSB byte order in `read_uint7` would silently keep the
+        // round-trip proptest passing (because the encoder is in the same
+        // file), but would break against these fixed bytes.
+        let cases: &[(u32, &[u8])] = &[
+            (0, &[0x00]),
+            (1, &[0x01]),
+            (127, &[0x7F]),
+            (128, &[0x81, 0x00]),
+            (200, &[0x81, 0x48]),
+            (16_383, &[0xFF, 0x7F]),
+            (16_384, &[0x81, 0x80, 0x00]),
+            (0x12345, &[0x84, 0xC6, 0x45]),
+            ((1u32 << 28) - 1, &[0xFF, 0xFF, 0xFF, 0x7F]),
+            (1u32 << 28, &[0x81, 0x80, 0x80, 0x80, 0x00]),
+            (u32::MAX, &[0x8F, 0xFF, 0xFF, 0xFF, 0x7F]),
+        ];
+        for (val, encoded) in cases {
+            let mut cur: &[u8] = encoded;
+            let decoded = read_uint7(&mut cur)
+                .unwrap_or_else(|e| panic!("decode of {encoded:02x?} failed: {e:?}"));
+            assert_eq!(decoded, *val, "decoded value mismatch for {encoded:02x?}");
+            assert!(
+                cur.is_empty(),
+                "decoder consumed wrong byte count for {val} encoded as {encoded:02x?}",
+            );
+        }
+    }
+
     proptest::proptest! {
         #[test]
         fn read_uint7_roundtrip(val in 0u32..=u32::MAX) {
