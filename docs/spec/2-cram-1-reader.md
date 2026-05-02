@@ -536,6 +536,9 @@ The rANS 4x8 frequency table uses run-length encoding where a symbol counter `sy
 r[cram.codec.rans_sym_bounded+2]
 Symbol variables in rANS frequency table run-length reading MUST use `u8` type, making overflow past 255 impossible by construction. After a run-length loop, `sym` may have wrapped to 0 via `wrapping_add(1)` when the previous value was 255. The code MUST NOT use the post-loop `sym` value as a table index if it has wrapped to 0.
 
+r[cram.codec.simd_dispatch]
+The 32-state order-0 rANS Nx16 decode has SIMD specializations (NEON for aarch64, AVX2 for x86_64). The dispatch MUST propagate SIMD errors to the caller — there is no scalar fallback at runtime. SIMD and scalar share the same algorithm over the same `src` and `states`; the only legitimate way for SIMD to fail (truncation) is also a way for scalar to fail. Hiding a SIMD-only failure with a snapshot/restore + scalar retry would mask SIMD bugs, since the proptest oracle (`simd_matches_scalar_with_renorm`) would never see them. The pure-scalar `decode_order_0_32state_scalar` is reachable only on targets without SIMD support (non-aarch64 + non-AVX2 x86_64).
+
 r[cram.codec.alphabet_run_bounded]
 A run in the alphabet/frequency-table run-length encoding starts at symbol `s` with length `len`, writing `len` consecutive entries from `s`. Implementations MUST reject runs where `s + len > 256` with a typed error (`MalformedAlphabetRun`). Tolerating such malformed runs (silent break, wraparound) leaves the source stream desynchronized and produces garbage downstream — the htscodecs reference implementation rejects these as well (`rANS_static16_int.h:decode_alphabet`, `rANS_static.c:decode_freq`). This applies to both rANS 4x8 (per-symbol freq table runs and per-context order-1 runs) and rANS Nx16 (`read_alphabet`).
 

@@ -1455,23 +1455,41 @@ mod tests {
             // Provide enough for several renorms per lane × 32 lanes.
             stream.extend_from_slice(&renorm_bytes);
 
-            // SIMD path. Truncated streams are fine — both paths agree by
-            // erroring, but we just bail out of the proptest case.
-            let Ok(simd_result) = decode(&stream, 0) else {
-                return Ok(());
-            };
-
-            // Scalar path
+            // Scalar path runs first as the oracle. Whatever scalar
+            // produces (Ok+output OR Err), SIMD must match exactly. Now
+            // that the SIMD dispatch propagates errors instead of falling
+            // back to scalar, a SIMD-only failure surfaces as a proptest
+            // failure rather than being silently masked.
             let mut cur: &[u8] = &stream;
             read_u8(&mut cur).unwrap();
             read_uint7(&mut cur).unwrap();
             let mut scalar_dst = vec![0u8; len];
-            let scalar_ok = decode_order_0_generic(&mut cur, &mut scalar_dst, 32).is_ok();
+            let scalar_result = decode_order_0_generic(&mut cur, &mut scalar_dst, 32);
 
-            // Both paths must produce the same output (or both fail). If
-            // SIMD succeeded, scalar must too.
-            proptest::prop_assert!(scalar_ok, "scalar failed where SIMD succeeded");
-            proptest::prop_assert_eq!(simd_result, scalar_dst);
+            let simd_result = decode(&stream, 0);
+
+            match (simd_result, scalar_result) {
+                (Ok(simd_dst), Ok(())) => {
+                    proptest::prop_assert_eq!(simd_dst, scalar_dst);
+                }
+                (Err(_), Err(_)) => {
+                    // Both paths agreed by erroring — fine.
+                }
+                (Ok(_), Err(scalar_err)) => {
+                    proptest::prop_assert!(
+                        false,
+                        "SIMD succeeded where scalar failed: {:?}",
+                        scalar_err,
+                    );
+                }
+                (Err(simd_err), Ok(())) => {
+                    proptest::prop_assert!(
+                        false,
+                        "SIMD failed ({:?}) where scalar succeeded — SIMD bug",
+                        simd_err,
+                    );
+                }
+            }
         }
 
         #[test]
