@@ -400,9 +400,20 @@ impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
 impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
     /// Wrap the supplied writer in a [`BgzfWriter`] and write the BAM header
     /// eagerly.
+    ///
+    /// `write_index(true)` is honoured only on path targets; for an arbitrary
+    /// writer there is no sidecar `.bai` location, and BAI virtual offsets
+    /// only make sense for a seekable BAM file. If set, the request is
+    /// dropped (no `IndexBuilder` is constructed) and an `info!` is logged.
     pub fn build(self) -> Result<BamWriter<W>, BamWriteError> {
+        if self.write_index {
+            tracing::info!(
+                "BAI index requested but not available when writing to a non-path target; \
+                 skipping index construction"
+            );
+        }
         let bgzf = BgzfWriter::with_compression_level(self.target.writer, self.compression_level);
-        BamWriter::from_bgzf(bgzf, self.header, self.write_index)
+        BamWriter::from_bgzf(bgzf, self.header, false)
     }
 }
 
@@ -613,10 +624,9 @@ mod tests {
     #[test]
     fn index_coproduction_produces_builder() {
         let header = test_header();
-        let mut output = Vec::new();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
 
         let rec = test_record(0, 100, b"r1");
         writer.write(&rec).unwrap();
@@ -624,14 +634,11 @@ mod tests {
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_some());
 
-        // Write the BAI to a buffer
         let index = index.unwrap();
         let mut bai_buf = Vec::new();
         index.write_bai(&mut bai_buf, header.target_count()).unwrap();
 
-        // Verify BAI magic
         assert_eq!(&bai_buf[..4], b"BAI\x01");
-        // Verify n_ref
         let n_ref = i32::from_le_bytes([bai_buf[4], bai_buf[5], bai_buf[6], bai_buf[7]]);
         assert_eq!(n_ref, 2);
     }
@@ -640,10 +647,9 @@ mod tests {
     #[test]
     fn unsorted_records_error_with_index() {
         let header = test_header();
-        let mut output = Vec::new();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
 
         let rec1 = test_record(0, 200, b"r1");
         let rec2 = test_record(0, 100, b"r2"); // out of order
@@ -656,10 +662,9 @@ mod tests {
     #[test]
     fn mapped_without_reference_errors() {
         let header = test_header();
-        let mut output = Vec::new();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
         let rec = OwnedBamRecord::builder(-1, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
@@ -677,10 +682,9 @@ mod tests {
     #[test]
     fn fully_unmapped_not_indexed() {
         let header = test_header();
-        let mut output = Vec::new();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Write a mapped record first (index needs at least one)
         let mapped = test_record(0, 100, b"mapped");
@@ -697,6 +701,25 @@ mod tests {
 
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_some());
+    }
+
+    // r[verify bam_writer.create_from_stdout]
+    #[test]
+    fn write_index_on_writer_target_is_soft_noop() {
+        let header = test_header();
+        let mut output = Vec::new();
+
+        // write_index(true) over an arbitrary writer is accepted for API
+        // uniformity but produces no IndexBuilder — there is no place to
+        // route a sidecar BAI for a stream sink, and BAI virtual offsets
+        // are only meaningful against a seekable file.
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+
+        writer.write(&test_record(0, 100, b"r1")).unwrap();
+
+        let (_inner, index) = writer.finish().unwrap();
+        assert!(index.is_none());
     }
 
     #[test]
@@ -829,9 +852,8 @@ mod tests {
             store.push_raw(&raw_buf, &mut ()).unwrap();
         }
 
-        let mut output = Vec::new();
-        let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
         #[allow(clippy::cast_possible_truncation, reason = "test data is tiny")]
         for i in 0..store.len() as u32 {
             writer.write_store_record(&store, i).unwrap();
