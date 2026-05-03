@@ -26,10 +26,11 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::cigar::CigarOpType;
-use seqair::bam::{BamWriter, CigarOp, Pos0, RecordStore};
-use seqair::reader::{IndexedReader, ResolveTid};
-use seqair_types::RegionString;
+use seqair::{
+    bam::{BamWriter, CigarOp, CigarStr, Pos0, RecordStore, cigar::CigarOpType},
+    reader::{IndexedReader, ResolveTid},
+};
+use seqair_types::{RegionString, SmolStr, smol_str::ToSmolStr};
 use std::path::PathBuf;
 
 /// seqair realignment — a toy local-realignment example.
@@ -189,37 +190,13 @@ fn propose_realignment(
 struct Snapshot {
     qname: String,
     pos: Pos0,
-    cigar_str: String,
+    cigar_str: SmolStr,
 }
 
 fn snapshot(store: &RecordStore, idx: u32) -> Snapshot {
     let rec = store.record(idx);
     let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>").to_owned();
-    Snapshot { qname, pos: rec.pos, cigar_str: fmt_cigar(store.cigar(idx)) }
-}
-
-// `CigarOp` does not yet implement `Display`. Once it does (see
-// `.claude/prompts/cigar-diplay.md`), this helper drops to a one-liner.
-fn fmt_cigar(ops: &[CigarOp]) -> String {
-    let mut s = String::new();
-    for op in ops {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{}", op.len());
-        let c = match op.op_type() {
-            CigarOpType::Match => 'M',
-            CigarOpType::Insertion => 'I',
-            CigarOpType::Deletion => 'D',
-            CigarOpType::RefSkip => 'N',
-            CigarOpType::SoftClip => 'S',
-            CigarOpType::HardClip => 'H',
-            CigarOpType::Padding => 'P',
-            CigarOpType::SeqMatch => '=',
-            CigarOpType::SeqMismatch => 'X',
-            CigarOpType::Unknown(_) => '?',
-        };
-        s.push(c);
-    }
-    s
+    Snapshot { qname, pos: rec.pos, cigar_str: CigarStr(store.cigar(idx)).to_smolstr() }
 }
 
 fn write_store(
