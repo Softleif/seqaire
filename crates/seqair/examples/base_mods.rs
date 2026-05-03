@@ -28,7 +28,6 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::aux::{AuxValue, find_tag};
 use seqair::bam::{AlignedPair, BaseModState, ModType, Pos0, RecordStore};
 use seqair::reader::{IndexedReader, ResolveTid};
 use seqair_types::{Base, RegionString};
@@ -136,19 +135,12 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let aux = rec.aux(&store).context("aux access")?;
-        let seq = store.seq(idx);
-
-        // MM is a Z-type string (yields `&[u8]` via the typed accessor).
-        // ML is a B:C byte array — there is no typed accessor for arrays
-        // yet, so we drop down to `find_tag` for it.
-        let Ok(mm) = aux.get::<&[u8]>("MM") else { continue };
-        let Some(AuxValue::ArrayU8(ml)) = find_tag(aux.as_bytes(), *b"ML") else { continue };
-
-        // Parse MM/ML into resolved per-position calls. The parser handles
-        // reverse-strand coordinate flipping internally.
-        let state = match BaseModState::parse(mm, ml, seq, rec.flags.is_reverse()) {
-            Ok(s) => s,
+        // Pull MM/ML/seq/is_reverse out of the record in one call. Returns
+        // `Ok(None)` when the record carries no MM tag (most reads in a
+        // mixed BAM), surfaces malformed payloads as typed errors.
+        let state = match BaseModState::from_record(rec, &store) {
+            Ok(Some(s)) => s,
+            Ok(None) => continue,
             Err(e) => {
                 let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>");
                 eprintln!("warning: skipping {qname}: {e}");
