@@ -157,8 +157,9 @@ pub enum GetAuxError {
 /// Convert an [`AuxValue`] into a concrete Rust type.
 ///
 /// Implementations perform type checking and (for integers) widening
-/// conversions. Implemented for `i64`, `u64`, `f64`, `&str`, `&[u8]`,
-/// `SmolStr`, `String`, `u8`, `u16`, `u32`, `i32`, `f32`, and `char`.
+/// conversions. Implemented for `i64`, `u64`, `f64`, `&str`, `&[u8]`
+/// (Z-only — fetch `H` tags as [`HexBytes`]), [`HexBytes`], `SmolStr`,
+/// `String`, `u8`, `u16`, `u32`, `i32`, `f32`, and `char`.
 ///
 /// # Examples
 ///
@@ -320,12 +321,92 @@ impl<'a> FromAuxValue<'a> for char {
 impl<'a> FromAuxValue<'a> for &'a [u8] {
     fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
         match value {
-            AuxValue::String(s) | AuxValue::Hex(s) => Ok(s),
+            AuxValue::String(s) => Ok(s),
             ref other => {
-                Err(GetAuxError::TypeMismatch { expected: "Z or H", actual: other.type_name() })
+                Err(GetAuxError::TypeMismatch { expected: "Z", actual: other.type_name() })
             }
         }
     }
+}
+
+/// Borrowed view of a BAM `H`-typed auxiliary tag.
+///
+/// `H` tags are stored on the wire identically to `Z` (NUL-terminated ASCII),
+/// but the SAM spec defines the bytes as an even-length sequence of
+/// `[0-9A-F]` representing an underlying byte array. `H` is uncommon in
+/// modern BAMs (BWA, minimap2, dorado, samtools all emit `Z` instead);
+/// this type exists so that the unusual case can be handled deliberately
+/// rather than slipping through a `&[u8]` fetch.
+///
+/// Construct via `Aux::get::<HexBytes>(...)`. `Z` tags do not coerce to
+/// `HexBytes` — fetch them as `&[u8]` instead. Use [`HexBytes::decode`] to
+/// materialize the underlying byte array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HexBytes<'a>(pub &'a [u8]);
+
+impl<'a> HexBytes<'a> {
+    /// The raw hex-digit bytes, as stored on the wire (no NUL terminator).
+    pub fn as_bytes(&self) -> &'a [u8] {
+        self.0
+    }
+
+    /// Decode the hex digits into the underlying byte array. Returns
+    /// [`HexDecodeError`] if the length is odd or any byte is not a hex
+    /// digit.
+    pub fn decode(&self) -> Result<Vec<u8>, HexDecodeError> {
+        if !self.0.len().is_multiple_of(2) {
+            return Err(HexDecodeError::OddLength { len: self.0.len() });
+        }
+        let mut out = Vec::with_capacity(self.0.len() / 2);
+        for (chunk_idx, chunk) in self.0.chunks_exact(2).enumerate() {
+            let [hi_byte, lo_byte] = *chunk else {
+                debug_assert!(false, "chunks_exact(2) must yield 2-byte slices");
+                return Err(HexDecodeError::OddLength { len: self.0.len() });
+            };
+            let pos = chunk_idx.saturating_mul(2);
+            let hi = decode_hex_digit(hi_byte)
+                .ok_or(HexDecodeError::InvalidDigit { pos, byte: hi_byte })?;
+            let lo = decode_hex_digit(lo_byte).ok_or(HexDecodeError::InvalidDigit {
+                pos: pos.saturating_add(1),
+                byte: lo_byte,
+            })?;
+            out.push((hi << 4) | lo);
+        }
+        Ok(out)
+    }
+}
+
+impl<'a> FromAuxValue<'a> for HexBytes<'a> {
+    fn from_aux_value(value: AuxValue<'a>) -> Result<Self, GetAuxError> {
+        match value {
+            AuxValue::Hex(s) => Ok(HexBytes(s)),
+            ref other => {
+                Err(GetAuxError::TypeMismatch { expected: "H", actual: other.type_name() })
+            }
+        }
+    }
+}
+
+fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte.wrapping_sub(b'0')),
+        b'A'..=b'F' => Some(byte.wrapping_sub(b'A').wrapping_add(10)),
+        b'a'..=b'f' => Some(byte.wrapping_sub(b'a').wrapping_add(10)),
+        _ => None,
+    }
+}
+
+/// Failure decoding a BAM `H`-typed tag into bytes.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum HexDecodeError {
+    /// The hex string has an odd number of characters; SAM 1.6 requires an
+    /// even-length sequence of hex digits.
+    #[error("hex string has odd length: {len}")]
+    OddLength { len: usize },
+    /// Byte at `pos` is not in `[0-9A-Fa-f]`.
+    #[error("invalid hex digit at position {pos}: {byte:#04x}")]
+    InvalidDigit { pos: usize, byte: u8 },
 }
 
 impl<'a> FromAuxValue<'a> for &'a str {
@@ -703,6 +784,54 @@ mod tests {
         data.push(0);
         let aux = build_aux(&[(b"X1", &data)]);
         assert_eq!(find_tag(&aux, *b"X1"), Some(AuxValue::Hex(b"DEADBEEF")));
+    }
+
+    #[test]
+    fn from_aux_value_byte_slice_rejects_hex() {
+        let err = <&[u8]>::from_aux_value(AuxValue::Hex(b"DEADBEEF")).unwrap_err();
+        assert!(matches!(err, GetAuxError::TypeMismatch { expected: "Z", actual: "H" }));
+    }
+
+    #[test]
+    fn from_aux_value_byte_slice_accepts_z() {
+        let bytes = <&[u8]>::from_aux_value(AuxValue::String(b"hello")).unwrap();
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn from_aux_value_hex_bytes_rejects_z() {
+        let err = HexBytes::from_aux_value(AuxValue::String(b"hello")).unwrap_err();
+        assert!(matches!(err, GetAuxError::TypeMismatch { expected: "H", actual: "Z" }));
+    }
+
+    #[test]
+    fn hex_bytes_decode_roundtrip() {
+        let raw = HexBytes(b"DEADBEEF");
+        assert_eq!(raw.as_bytes(), b"DEADBEEF");
+        assert_eq!(raw.decode().unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn hex_bytes_decode_lowercase() {
+        let raw = HexBytes(b"deadbeef");
+        assert_eq!(raw.decode().unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    }
+
+    #[test]
+    fn hex_bytes_decode_empty() {
+        assert_eq!(HexBytes(b"").decode().unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn hex_bytes_decode_odd_length() {
+        let err = HexBytes(b"ABC").decode().unwrap_err();
+        assert!(matches!(err, HexDecodeError::OddLength { len: 3 }));
+    }
+
+    #[test]
+    fn hex_bytes_decode_invalid_digit() {
+        let err = HexBytes(b"AZ").decode().unwrap_err();
+        assert!(matches!(err, HexDecodeError::InvalidDigit { pos: 1, byte: b'Z' }));
     }
 
     #[test]
@@ -1094,6 +1223,92 @@ mod prop_tests {
                 let aux = Aux::new(&aux_bytes);
                 let err = aux.get::<&str>(&tag).unwrap_err();
                 assert!(matches!(err, GetAuxError::InvalidUtf8));
+            }
+
+            // HexBytes::decode is the inverse of "format every byte as two
+            // ASCII hex digits". Generated against arbitrary byte arrays of
+            // any practical size.
+            #[test]
+            fn hex_bytes_decode_roundtrip_arbitrary(
+                bytes in proptest::collection::vec(any::<u8>(), 0..256),
+            ) {
+                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+                for b in &bytes {
+                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
+                }
+                let decoded = HexBytes(&hex).decode().expect("valid hex string");
+                prop_assert_eq!(decoded, bytes);
+            }
+
+            // Mixed-case hex digits decode the same as upper-case.
+            #[test]
+            fn hex_bytes_decode_case_insensitive(
+                bytes in proptest::collection::vec(any::<u8>(), 0..64),
+                lower_mask in proptest::collection::vec(any::<bool>(), 0..128),
+            ) {
+                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+                for b in &bytes {
+                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
+                }
+                let mut mixed = hex.clone();
+                for (i, slot) in mixed.iter_mut().enumerate() {
+                    if lower_mask.get(i).copied().unwrap_or(false) && slot.is_ascii_uppercase() {
+                        *slot = slot.to_ascii_lowercase();
+                    }
+                }
+                prop_assert_eq!(HexBytes(&hex).decode().unwrap(), HexBytes(&mixed).decode().unwrap());
+            }
+
+            // Tightened &[u8] impl: H tags MUST be rejected (not silently
+            // returned as raw hex digits). Pre-PR this returned Ok.
+            #[test]
+            fn byte_slice_rejects_h_tag(
+                tag in tag_name(),
+                bytes in proptest::collection::vec(any::<u8>(), 0..64),
+            ) {
+                let mut hex = Vec::with_capacity(bytes.len().saturating_mul(2));
+                for b in &bytes {
+                    hex.extend_from_slice(format!("{b:02X}").as_bytes());
+                }
+                let mut raw = vec![b'H'];
+                raw.extend_from_slice(&hex);
+                raw.push(0);
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+
+                let err = aux.get::<&[u8]>(&tag).unwrap_err();
+                let is_z_h_mismatch = matches!(
+                    err,
+                    GetAuxError::TypeMismatch { expected: "Z", actual: "H" }
+                );
+                prop_assert!(is_z_h_mismatch);
+
+                let hexbytes = aux.get::<HexBytes>(&tag).expect("H tag → HexBytes");
+                prop_assert_eq!(hexbytes.as_bytes(), hex.as_slice());
+                prop_assert_eq!(hexbytes.decode().unwrap(), bytes);
+            }
+
+            // Symmetric: HexBytes MUST reject Z tags.
+            #[test]
+            fn hex_bytes_rejects_z_tag(
+                tag in tag_name(),
+                value in proptest::collection::vec(b'!'..=b'~', 0..32),
+            ) {
+                let mut raw = vec![b'Z'];
+                raw.extend_from_slice(&value);
+                raw.push(0);
+                let aux_bytes = build_aux(&[(tag, &raw)]);
+                let aux = Aux::new(&aux_bytes);
+
+                let err = aux.get::<HexBytes>(&tag).unwrap_err();
+                let is_h_z_mismatch = matches!(
+                    err,
+                    GetAuxError::TypeMismatch { expected: "H", actual: "Z" }
+                );
+                prop_assert!(is_h_z_mismatch);
+
+                let bytes = aux.get::<&[u8]>(&tag).unwrap();
+                prop_assert_eq!(bytes, value.as_slice());
             }
     }
 }
