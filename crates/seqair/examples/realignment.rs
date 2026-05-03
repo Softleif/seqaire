@@ -205,7 +205,7 @@ fn write_store(
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
     let mut writer =
-        BamWriter::from_path(path, header, false).context("could not create BAM writer")?;
+        BamWriter::builder(path, header).build().context("could not create BAM writer")?;
 
     for i in 0..store.len() as u32 {
         writer

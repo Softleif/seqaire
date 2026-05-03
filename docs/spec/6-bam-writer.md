@@ -30,13 +30,13 @@ The pipeline is parallelized: rayon workers each process a genomic region, produ
 > _[SAM1] §4 — BAM file = magic + header + records, all BGZF-compressed_
 
 r[bam_writer.create_from_path]
-`BamWriter::from_path(path, header, build_index)` MUST create a BAM file at the given path (truncating any existing file), write the BAM magic and serialized header, and return a writer ready to accept records. The file MUST be BGZF-compressed using `BgzfWriter`. When `build_index` is true, an `IndexBuilder` configured for BAI MUST be created with `n_refs = header.n_targets()` (see `r[bam_writer.index_coproduction]`).
+`BamWriter::builder(path, header).build()` MUST create a BAM file at the given path (truncating any existing file), write the BAM magic and serialized header, and return a writer ready to accept records. The file MUST be BGZF-compressed using `BgzfWriter`. When the builder's `write_index(true)` setter has been called, an `IndexBuilder` configured for BAI MUST be created with `n_refs = header.n_targets()` (see `r[bam_writer.index_coproduction]`).
 
 r[bam_writer.header_eager]
-The BAM header (magic + header text + reference sequences) is written eagerly during construction (`from_path` / `from_stdout`). There is no separate `write_header()` method — unlike the VCF writer (`r[vcf_writer.header_first]`), which defers header writing. This is because BAM always requires a header (there is no "headerless BAM"), and writing it eagerly simplifies the state machine (no "header not yet written" error path on `write()`).
+The BAM header (magic + header text + reference sequences) is written eagerly during `BamWriterBuilder::build` (whether the target is a path or an arbitrary writer). There is no separate `write_header()` method — unlike the VCF writer (`r[vcf_writer.header_first]`), which defers header writing. This is because BAM always requires a header (there is no "headerless BAM"), and writing it eagerly simplifies the state machine (no "header not yet written" error path on `write()`).
 
 r[bam_writer.create_from_stdout]
-`BamWriter::from_stdout(header)` MUST write BGZF-compressed BAM to stdout. Index co-production is not supported for stdout output (there is no sidecar path for the `.bai` file). The caller is responsible for determining whether stdout is the intended target (e.g. by checking for `-` or `/dev/stdout` in a CLI argument).
+`BamWriter::build_over(writer, header).build()` MUST write BGZF-compressed BAM to a caller-supplied [`Write`] sink (e.g. `io::stdout()`). Index co-production is allowed via `write_index(true)`, but for stdout output the caller is responsible for routing the resulting `IndexBuilder` somewhere useful (there is no sidecar path for the `.bai` file). The caller is responsible for determining whether stdout is the intended target (e.g. by checking for `-` or `/dev/stdout` in a CLI argument).
 
 r[bam_writer.write_record]
 `write(record: &BamRecord)` MUST serialize the record into the writer's reusable buffer via `BamRecord::to_bam_bytes()` (see `r[bam.owned_record.to_bam_bytes]`), prepend the 4-byte `block_size` (i32 little-endian, equal to the serialized byte count), and write the result to the BGZF stream. If index co-production is enabled, the writer MUST then push the record to the IndexBuilder (see `r[bam_writer.index_record_dispatch]`).
@@ -51,7 +51,7 @@ r[bam_writer.finish]
 `finish()` MUST flush any buffered BGZF data. If index co-production is enabled, it MUST call `index.finish(final_virtual_offset)` after flushing all record data (see `r[bam_writer.index_finish]`). It MUST then write the BGZF EOF marker block (as specified by `r[bgzf.writer.eof_marker]`). The method MUST return `Result<(W, Option<IndexBuilder>), BamWriteError>` — the inner writer `W` (matching the VCF writer's `r[vcf_writer.finish]` pattern) and the finished IndexBuilder if co-production was enabled. Dropping the writer without calling `finish()` SHOULD flush on a best-effort basis (see `r[bgzf.writer.finish]`).
 
 r[bam_writer.compression_level]
-The compression level MUST be configurable as a constructor parameter (not a post-construction setter), since the header is written during construction and its BGZF blocks use whatever level is set at that point. The default SHOULD be level 6 (matching htslib). Level 1 (fastest) is commonly used in pipelines where downstream tools re-compress. The constructor signatures are: `from_path(path, header, build_index)` uses the default level; `from_path_with_level(path, header, build_index, level)` accepts an explicit level.
+The compression level MUST be configurable on the builder via `BamWriterBuilder::compression_level(level)` (taking effect when `build()` is called, before the header is written). The default SHOULD be level 6 (matching htslib). Level 1 (fastest) is commonly used in pipelines where downstream tools re-compress. Setting the level after `build()` is not supported, since the header's BGZF blocks would already have been emitted at the previous level.
 
 ## BGZF block management
 

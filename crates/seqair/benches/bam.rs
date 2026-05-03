@@ -201,7 +201,6 @@ fn bam_roundtrip(c: &mut Criterion) {
             use seqair::bam::BamHeader;
             use seqair::bam::owned_record::OwnedBamRecord;
             use seqair::bam::writer::BamWriter;
-            use seqair::io::BgzfWriter;
 
             let path = std::path::Path::new(BAM_PATH);
             let mut reader = seqair::bam::IndexedBamReader::open(path).unwrap();
@@ -211,8 +210,7 @@ fn bam_roundtrip(c: &mut Criterion) {
             reader.fetch_into(tid, START, END, &mut store).unwrap();
 
             let mut output = Vec::with_capacity(2_000_000);
-            let bgzf = BgzfWriter::new(&mut output);
-            let mut writer = BamWriter::new_inner(bgzf, &header, false).unwrap();
+            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
 
             for i in 0..store.len() {
                 let idx = i as u32;

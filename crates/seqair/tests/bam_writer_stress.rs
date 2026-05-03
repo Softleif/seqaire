@@ -32,7 +32,7 @@ fn make_header() -> BamHeader {
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("stress.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
     for rec in records {
         writer.write(rec).unwrap();
     }
@@ -166,7 +166,7 @@ fn placed_unmapped_records() {
     let dir = tempfile::tempdir().unwrap();
     let header = make_header();
     let bam_path = dir.path().join("placed.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
 
     // Mapped record
     let mapped = OwnedBamRecord::builder(0, Some(Pos0::new(100).unwrap()), b"mapped".to_vec())
@@ -287,7 +287,7 @@ fn poisoned_writer_partial_output_is_readable() {
     let dir = tempfile::tempdir().unwrap();
     let header = make_header();
     let bam_path = dir.path().join("poison.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, false).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).build().unwrap();
 
     // Write two good records
     for i in 0..2u32 {

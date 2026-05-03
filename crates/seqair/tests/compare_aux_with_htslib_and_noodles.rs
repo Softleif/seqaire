@@ -52,7 +52,7 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         .build()
         .unwrap();
 
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
     writer.write(&rec).unwrap();
     let _ = writer.finish().unwrap();
     bam_path

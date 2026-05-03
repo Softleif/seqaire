@@ -37,7 +37,7 @@ fn make_header() -> BamHeader {
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("test.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
     for rec in records {
         writer.write(rec).unwrap();
     }
@@ -545,7 +545,7 @@ fn roundtrip_write_store_record() {
     // Write via write_store_record
     let bam_path = dir.path().join("store.bam");
     {
-        let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+        let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
         for i in 0..store.len() as u32 {
             writer.write_store_record(&store, i).unwrap();
         }
@@ -676,7 +676,7 @@ mod e2e_oracle {
             let bam_path = dir.path().join("e2e.bam");
             let header = make_header();
             {
-                let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+                let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
                 for i in 0..store.len() as u32 {
                     writer.write_store_record(&store, i).unwrap();
                 }
