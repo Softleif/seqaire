@@ -26,8 +26,10 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::{BamWriter, Pos0, RecordStore};
-use seqair::reader::IndexedReader;
+use seqair::bam::cigar::CigarOpType;
+use seqair::bam::{BamWriter, CigarOp, Pos0, RecordStore};
+use seqair::reader::{IndexedReader, ResolveTid};
+use seqair_types::RegionString;
 use std::path::PathBuf;
 
 /// seqair realignment — a toy local-realignment example.
@@ -36,9 +38,10 @@ struct Cli {
     /// BAM/SAM file to read (must be indexed).
     input: PathBuf,
 
-    /// Region to process (e.g. "chr1:1000-2000"). Omit for the first contig.
+    /// Region to process. `chr`, `chr:start`, or `chr:start-end`
+    /// (1-based, inclusive). Omit for the first contig in the header.
     #[clap(long, short)]
-    region: Option<String>,
+    region: Option<RegionString>,
 
     /// Soft-clip this many leading match bases per eligible record.
     #[clap(long, default_value_t = 2)]
@@ -62,28 +65,18 @@ fn main() -> anyhow::Result<()> {
 
     let mut reader = IndexedReader::open(&args.input).context("could not open alignment file")?;
 
-    let (tid, start, end) = if let Some(ref r) = args.region {
-        parse_region(r, reader.header())?
-    } else {
-        let tid = 0u32;
-        let len = reader.header().target_len(tid).context("empty header")? as u32;
-        (tid, 0, len)
-    };
-    let contig = reader.header().target_name(tid).context("unknown tid")?.to_owned();
-
-    let start_pos = Pos0::new(start).context("invalid start position")?;
-    let end_pos = Pos0::new(end).context("invalid end position")?;
+    let (tid, start, end, contig) = resolve_region(args.region.as_ref(), reader.header())?;
 
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, start_pos, end_pos, &mut store)
-        .with_context(|| format!("fetch failed for {contig}:{start}-{end}"))?;
+        .fetch_into(tid, start, end, &mut store)
+        .with_context(|| format!("fetch failed for {contig}:{}-{}", *start, *end))?;
 
-    println!("fetched {} record(s) from {contig}:{start}-{end}", store.len());
+    println!("fetched {} record(s) from {contig}:{}-{}", store.len(), *start, *end);
 
     // Pass 1: inspect records and plan changes without mutating the store.
     // `set_alignment` needs `&mut self`, so we collect the work first.
-    let mut plan: Vec<(u32, u32, Vec<seqair::bam::CigarOp>)> = Vec::new();
+    let mut plan: Vec<(u32, Pos0, Vec<CigarOp>)> = Vec::new();
     for idx in 0..store.len() as u32 {
         let rec = store.record(idx);
         // Skip unmapped reads — no alignment to update.
@@ -91,7 +84,7 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         let Some((new_pos, new_cigar)) =
-            propose_realignment(store.cigar(idx), *rec.pos, args.clip, args.min_match)
+            propose_realignment(store.cigar(idx), rec.pos, args.clip, args.min_match)
         else {
             continue;
         };
@@ -103,19 +96,16 @@ fn main() -> anyhow::Result<()> {
     let mut applied = 0usize;
     for (i, (idx, new_pos, new_cigar)) in plan.iter().enumerate() {
         let before = snapshot(&store, *idx);
-        let Some(new_pos_typed) = Pos0::new(*new_pos) else {
-            continue;
-        };
         store
-            .set_alignment(*idx, new_pos_typed, new_cigar)
+            .set_alignment(*idx, *new_pos, new_cigar)
             .with_context(|| format!("set_alignment failed for record {idx}"))?;
         applied += 1;
 
         if i < args.show {
             let after = snapshot(&store, *idx);
             println!(
-                "  [{}] {:?}  {} @ {}  ->  {} @ {}",
-                idx, before.qname, before.cigar_str, before.pos, after.cigar_str, after.pos,
+                "  [{idx}] {:?}  {} @ {}  ->  {} @ {}",
+                before.qname, before.cigar_str, *before.pos, after.cigar_str, *after.pos,
             );
         }
     }
@@ -135,19 +125,47 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolve a `RegionString` (or "first contig" fallback) against the BAM
+/// header into a `(tid, start, end_exclusive, contig_name)` tuple.
+fn resolve_region(
+    region: Option<&RegionString>,
+    header: &seqair::bam::BamHeader,
+) -> anyhow::Result<(u32, Pos0, Pos0, String)> {
+    match region {
+        Some(r) => {
+            let tid = r.chromosome.as_str().resolve_tid(header)?.as_u32();
+            let len = header.target_len(tid).context("contig has no length")? as u32;
+            let start = match r.start {
+                Some(p) => p.to_zero_based(),
+                None => Pos0::new(0).expect("0 is valid"),
+            };
+            let end = match r.end {
+                Some(p) => p.to_zero_based(),
+                None => Pos0::new(len).context("contig length out of range")?,
+            };
+            Ok((tid, start, end, r.chromosome.to_string()))
+        }
+        None => {
+            let tid = 0u32;
+            let len = header.target_len(tid).context("empty header")? as u32;
+            let contig = header.target_name(tid).context("unknown tid")?.to_owned();
+            let start = Pos0::new(0).expect("0 is valid");
+            let end = Pos0::new(len).context("contig length out of range")?;
+            Ok((tid, start, end, contig))
+        }
+    }
+}
+
 /// The proposed realignment: turn the first `clip` bases of the leading `M`
 /// op into a soft clip and shift `pos` right by `clip`. Returns `None` when
 /// the record does not match the rule (empty CIGAR, leading op not M, or M
 /// too short).
 fn propose_realignment(
-    cigar: &[seqair::bam::CigarOp],
-    pos: u32,
+    cigar: &[CigarOp],
+    pos: Pos0,
     clip: u32,
     min_match: u32,
-) -> Option<(u32, Vec<seqair::bam::CigarOp>)> {
-    use seqair::bam::CigarOp;
-    use seqair::bam::cigar::CigarOpType;
-
+) -> Option<(Pos0, Vec<CigarOp>)> {
     let first = *cigar.first()?;
     if clip == 0 || !matches!(first.op_type(), CigarOpType::Match) {
         return None;
@@ -158,7 +176,7 @@ fn propose_realignment(
     }
 
     let new_match_len = first_len - clip;
-    let new_pos = pos.checked_add(clip)?;
+    let new_pos = Pos0::new((*pos).checked_add(clip)?)?;
 
     // Rebuild: [clip]S + [new_match_len]M + cigar[1..]
     let mut out = Vec::with_capacity(cigar.len() + 1);
@@ -170,18 +188,19 @@ fn propose_realignment(
 
 struct Snapshot {
     qname: String,
-    pos: u32,
+    pos: Pos0,
     cigar_str: String,
 }
 
 fn snapshot(store: &RecordStore, idx: u32) -> Snapshot {
     let rec = store.record(idx);
     let qname = std::str::from_utf8(store.qname(idx)).unwrap_or("<non-utf8>").to_owned();
-    Snapshot { qname, pos: *rec.pos, cigar_str: fmt_cigar(store.cigar(idx)) }
+    Snapshot { qname, pos: rec.pos, cigar_str: fmt_cigar(store.cigar(idx)) }
 }
 
-fn fmt_cigar(ops: &[seqair::bam::CigarOp]) -> String {
-    use seqair::bam::cigar::CigarOpType;
+// `CigarOp` does not yet implement `Display`. Once it does (see
+// `.claude/prompts/cigar-diplay.md`), this helper drops to a one-liner.
+fn fmt_cigar(ops: &[CigarOp]) -> String {
     let mut s = String::new();
     for op in ops {
         use std::fmt::Write as _;
@@ -219,23 +238,4 @@ fn write_store(
 
     writer.finish().context("could not finalize BAM")?;
     Ok(())
-}
-
-fn parse_region(region: &str, header: &seqair::bam::BamHeader) -> anyhow::Result<(u32, u32, u32)> {
-    if let Some((name, range)) = region.split_once(':') {
-        let tid = header.tid(name).with_context(|| format!("contig '{name}' not found"))?;
-        let (start_str, end_str) =
-            range.split_once('-').with_context(|| format!("invalid range: {range}"))?;
-        let start: u32 = start_str
-            .replace(',', "")
-            .parse()
-            .with_context(|| format!("invalid start: {start_str}"))?;
-        let end: u32 =
-            end_str.replace(',', "").parse().with_context(|| format!("invalid end: {end_str}"))?;
-        Ok((tid, start.saturating_sub(1), end))
-    } else {
-        let tid = header.tid(region).with_context(|| format!("contig '{region}' not found"))?;
-        let len = header.target_len(tid).unwrap_or(0) as u32;
-        Ok((tid, 0, len))
-    }
 }

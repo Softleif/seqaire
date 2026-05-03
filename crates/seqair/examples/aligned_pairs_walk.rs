@@ -7,7 +7,7 @@
     reason = "example"
 )]
 
-//! Per-record AlignedPairs walking — three layers, three calling tasks.
+//! Per-record aligned-pair walking — three layers, three calling tasks.
 //!
 //! This example demonstrates the [`AlignedPairs`](seqair::bam::AlignedPairs)
 //! iterator and its two layered adapters. Each adapter pays only for the
@@ -45,9 +45,7 @@
 
 use anyhow::Context;
 use clap::Parser as _;
-use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
-use seqair::bam::{AlignedPair, AlignedPairWithRef};
-use seqair::bam::{MatchKind, RefSeq};
+use seqair::bam::{AlignedPair, AlignedPairWithRef, MatchKind, RecordStore, RefSeq};
 use seqair::reader::{Readers, ResolveTid};
 use seqair_types::{Base, RegionString};
 use std::path::PathBuf;
@@ -63,29 +61,13 @@ struct Cli {
     #[clap(long, short)]
     reference: PathBuf,
 
-    /// Region to scan (e.g. "chr1:1000-2000").
+    /// Region to scan, e.g. "chr1:1000-2000".
     #[clap(long, short)]
     region: RegionString,
 
     /// Phred quality threshold for methylation evidence.
     #[clap(long, default_value_t = 20)]
     min_qual: u8,
-}
-
-/// A push-time filter that drops records that won't produce useful
-/// evidence — same defensive set as the variant caller example.
-#[derive(Clone)]
-struct DropUseless;
-impl CustomizeRecordStore for DropUseless {
-    type Extra = ();
-    fn filter(&mut self, rec: &SlimRecord, _: &RecordStore<()>) -> bool {
-        !rec.flags.is_unmapped()
-            && !rec.flags.is_secondary()
-            && !rec.flags.is_supplementary()
-            && !rec.flags.is_failed_qc()
-            && !rec.flags.is_duplicate()
-    }
-    fn compute(&mut self, _: &SlimRecord, _: &RecordStore<()>) {}
 }
 
 #[derive(Default, Debug)]
@@ -103,39 +85,54 @@ fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     let mut readers =
-        Readers::<DropUseless>::open_customized(&args.input, &args.reference, DropUseless)
-            .context("could not open BAM + FASTA")?;
+        Readers::open(&args.input, &args.reference).context("could not open BAM + FASTA")?;
 
-    // Resolve the region against the BAM header.
-    let tid = args.region.chromosome.as_str().resolve_tid(readers.header())?;
+    // Resolve the region against the BAM header. `RegionString` is parsed
+    // by clap; here we lift its `(name, Pos1, Pos1)` into the engine's
+    // `(tid, Pos0, Pos0)` form.
+    let tid = args.region.chromosome.as_str().resolve_tid(readers.header())?.as_u32();
     let start = args
         .region
         .start
-        .context("region must have a start (e.g. chr1:1000-2000)")?
+        .context("region needs an explicit start (e.g. chr1:1000-2000)")?
         .to_zero_based();
-    let end =
-        args.region.end.context("region must have an end (e.g. chr1:1000-2000)")?.to_zero_based();
+    let end = args
+        .region
+        .end
+        .context("region needs an explicit end (e.g. chr1:1000-2000)")?
+        .to_zero_based();
 
-    // Fetch records into a freshly-built RecordStore. (For repeated calls
-    // you'd reuse one — see Readers::pileup which retains capacity via the
-    // PileupGuard. This example keeps the data flow visible.)
+    // Fetch records and the matching reference window. `Readers::pileup`
+    // would do both for us internally, but this example doesn't need
+    // column iteration — just per-record CIGAR walks. So we keep the data
+    // flow visible by calling each step directly.
     let mut store = RecordStore::<()>::new();
-    readers.fetch_into(tid.as_u32(), start, end, &mut store)?;
+    readers.fetch_into(tid, start, end, &mut store)?;
 
-    // Load the reference window once for the whole region. RefSeq wraps an
-    // Rc<[Base]>; the layered iterator borrows it for the duration of the walk.
     let ref_bases: Rc<[Base]> =
         readers.fetch_base_seq(args.region.chromosome.as_str(), start, end)?;
     let ref_seq = RefSeq::new(ref_bases, start);
 
     let mut counts = Counts::default();
 
-    // Iterate every record in the fetched window.
     for idx in 0..store.len() as u32 {
-        counts.records += 1;
         let rec = store.record(idx);
 
-        // ── Layer 1: indel evidence (no read or ref data needed) ───────────
+        // Skip records that won't contribute useful evidence. Done inline
+        // here rather than via `Readers::open_customized` + a
+        // `CustomizeRecordStore` filter — for a one-region example the
+        // boilerplate is heavier than the savings.
+        if rec.flags.is_unmapped()
+            || rec.flags.is_secondary()
+            || rec.flags.is_supplementary()
+            || rec.flags.is_failed_qc()
+            || rec.flags.is_duplicate()
+        {
+            continue;
+        }
+        counts.records += 1;
+
+        // ── Layer 1: indel evidence (no read or ref data needed) ───────
         for pair in rec.aligned_pairs(&store)? {
             match pair {
                 AlignedPair::Insertion { insert_len, .. } => {
@@ -150,31 +147,27 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
-        // ── Layers 2+3: methylation + SNV evidence (need ref + qual) ──────
+        // ── Layers 2+3: methylation + SNV evidence (need ref + qual) ──
         // One walk, two callers:
         //   - methylation: ref C + query T with qual >= threshold
         //   - SNV: any mismatch where ref_base is known
-        // We use AlignedPairWithRef::Match's full destructure to express the
-        // methylation predicate in the pattern itself — the compiler enforces
-        // exhaustiveness across all variants.
         for ev in rec.aligned_pairs_with_read(&store)?.with_reference(&ref_seq) {
-            if let AlignedPairWithRef::Match {
+            let AlignedPairWithRef::Match {
                 kind: _, // methylation cares about M/=/X equally
                 query,
                 ref_base: Some(rb),
                 qual,
                 ..
             } = ev
-            {
-                // Methylation (TAPS C→T conversion).
-                if rb == Base::C && query == Base::T && qual.get().unwrap_or(0) >= args.min_qual {
-                    counts.methylation_calls += 1;
-                }
-                // Per-read SNV evidence — query disagrees with the reference.
-                // (Real callers gate this on quality, MAPQ, strand bias, etc.)
-                if query != rb && query != Base::Unknown && rb != Base::Unknown {
-                    counts.snv_evidence += 1;
-                }
+            else {
+                continue;
+            };
+
+            if rb == Base::C && query == Base::T && qual.get().unwrap_or(0) >= args.min_qual {
+                counts.methylation_calls += 1;
+            }
+            if query != rb && query != Base::Unknown && rb != Base::Unknown {
+                counts.snv_evidence += 1;
             }
         }
     }
@@ -192,13 +185,13 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ── Bonus: bare-walk indel-only counter ───────────────────────────────────
-// Inline standalone function showing the cheapest possible layer — no read
-// data, no reference, just CIGAR events. Useful when you only need event
-// counts (for QC, sanity checks, or coarse filtering).
+// ── Bonus: bare-walk indel-only counter ──────────────────────────────────
+// Inline standalone function showing the cheapest layer — no read data, no
+// reference, just CIGAR events. Useful when you only need event counts (for
+// QC, sanity checks, or coarse filtering).
 #[allow(dead_code, reason = "showcase function")]
 fn count_indels_per_record(
-    rec: &SlimRecord,
+    rec: &seqair::bam::record_store::SlimRecord,
     store: &RecordStore<()>,
 ) -> anyhow::Result<(u32, u32)> {
     let mut ins = 0u32;
@@ -213,13 +206,13 @@ fn count_indels_per_record(
     Ok((ins, del))
 }
 
-// ── Bonus: indel-evidence walker that exposes the inserted bases ───────────
+// ── Bonus: indel-evidence walker that exposes the inserted bases ─────────
 // `with_read` gives Insertion variants pre-sliced bases and qual. This is
 // what an indel-aware variant caller would use to record the inserted
 // sequence as part of the variant's ALT allele.
 #[allow(dead_code, reason = "showcase function")]
 fn collect_insertions(
-    rec: &SlimRecord,
+    rec: &seqair::bam::record_store::SlimRecord,
     store: &RecordStore<()>,
 ) -> anyhow::Result<Vec<(u32, Vec<Base>)>> {
     use seqair::bam::AlignedPairWithRead;
@@ -232,13 +225,16 @@ fn collect_insertions(
     Ok(out)
 }
 
-// ── Bonus: MatchKind dispatch ──────────────────────────────────────────────
+// ── Bonus: MatchKind dispatch ────────────────────────────────────────────
 // `=` and `X` CIGARs let an aligner record per-position match/mismatch
 // information without forcing the caller to consult the reference. If a
 // caller wants to count pre-known mismatches without a FASTA, `MatchKind`
 // makes that a one-line filter.
 #[allow(dead_code, reason = "showcase function")]
-fn count_explicit_mismatches(rec: &SlimRecord, store: &RecordStore<()>) -> anyhow::Result<u32> {
+fn count_explicit_mismatches(
+    rec: &seqair::bam::record_store::SlimRecord,
+    store: &RecordStore<()>,
+) -> anyhow::Result<u32> {
     let mut count = 0u32;
     for pair in rec.aligned_pairs(store)? {
         if let AlignedPair::Match { kind: MatchKind::SeqMismatch, .. } = pair {

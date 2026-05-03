@@ -114,7 +114,7 @@ fn main() -> anyhow::Result<()> {
 
         while let Some(column) = engine.pileups() {
             let pos = column.pos();
-            let pos1 = *pos + 1;
+            let pos1 = pos.to_one_based().context("position overflow")?;
             let ref_base = column.reference_base();
             let store = column.store();
 
@@ -169,8 +169,9 @@ fn main() -> anyhow::Result<()> {
             if depth > 0 {
                 writeln!(
                     output,
-                    "{contig_name}\t{pos1}\t{}\t{depth}\t{bases}\t{quals}",
-                    ref_base as u8 as char
+                    "{contig_name}\t{}\t{}\t{depth}\t{bases}\t{quals}",
+                    *pos1,
+                    ref_base.as_char(),
                 )?;
             }
         }
@@ -241,7 +242,7 @@ fn format_alignment(
         if base == ref_base && ref_base != Base::Unknown {
             buf.push(if is_reverse { ',' } else { '.' });
         } else {
-            let ch = base as u8 as char;
+            let ch = base.as_char();
             if is_reverse {
                 buf.push(ch.to_ascii_lowercase());
             } else {

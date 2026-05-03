@@ -160,10 +160,11 @@ fn main() -> anyhow::Result<()> {
             let rg_summary: Vec<String> =
                 rg_counts.iter().map(|(name, count)| format!("{name}:{count}")).collect();
 
+            let pos1 = column.pos().to_one_based().context("position overflow")?;
             println!(
                 "{pos}\t{depth}\t{ref_base}\t{rgs}\t{mean:.3}",
-                pos = *column.pos() + 1,
-                ref_base = column.reference_base() as u8 as char,
+                pos = *pos1,
+                ref_base = column.reference_base().as_char(),
                 rgs = rg_summary.join(","),
                 mean = aligned_sum / counted as f64,
             );
