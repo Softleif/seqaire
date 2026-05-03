@@ -203,6 +203,47 @@ impl std::fmt::Debug for CigarOp {
     }
 }
 
+impl std::fmt::Display for CigarOpType {
+    /// SAM 1.6 single-character op code. `Unknown` renders as `?`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use std::fmt::Write as _;
+        let c = match self {
+            Self::Match => 'M',
+            Self::Insertion => 'I',
+            Self::Deletion => 'D',
+            Self::RefSkip => 'N',
+            Self::SoftClip => 'S',
+            Self::HardClip => 'H',
+            Self::Padding => 'P',
+            Self::SeqMatch => '=',
+            Self::SeqMismatch => 'X',
+            Self::Unknown(_) => '?',
+        };
+        f.write_char(c)
+    }
+}
+
+impl std::fmt::Display for CigarOp {
+    /// `{len}{op_char}`, e.g. `10M`, `2I`, `4=`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", self.len(), self.op_type())
+    }
+}
+
+/// Display wrapper for a slice of [`CigarOp`]s, formatting as a SAM CIGAR
+/// string (e.g. `"10M2I3D"`). Allocation-free — `format!("{}", CigarStr(ops))`
+/// when you need an owned `String`.
+pub struct CigarStr<'a>(pub &'a [CigarOp]);
+
+impl std::fmt::Display for CigarStr<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for op in self.0 {
+            write!(f, "{op}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Whether a CIGAR op code consumes the reference.
 const fn consumes_ref(op: u8) -> bool {
     matches!(op, CIGAR_M | CIGAR_D | CIGAR_N | CIGAR_EQ | CIGAR_X)
@@ -589,6 +630,46 @@ mod tests {
         // Should work fine — position fits in i32
         assert!(matches!(mapping, CigarMapping::Linear { .. }));
         assert_eq!(mapping.pos_info_at(rec_pos), Some(CigarPosInfo::Match { qpos: 0 }));
+    }
+
+    #[test]
+    fn cigar_op_type_display_matches_sam_spec() {
+        assert_eq!(CigarOpType::Match.to_string(), "M");
+        assert_eq!(CigarOpType::Insertion.to_string(), "I");
+        assert_eq!(CigarOpType::Deletion.to_string(), "D");
+        assert_eq!(CigarOpType::RefSkip.to_string(), "N");
+        assert_eq!(CigarOpType::SoftClip.to_string(), "S");
+        assert_eq!(CigarOpType::HardClip.to_string(), "H");
+        assert_eq!(CigarOpType::Padding.to_string(), "P");
+        assert_eq!(CigarOpType::SeqMatch.to_string(), "=");
+        assert_eq!(CigarOpType::SeqMismatch.to_string(), "X");
+        assert_eq!(CigarOpType::Unknown(9).to_string(), "?");
+    }
+
+    #[test]
+    fn cigar_op_display_concatenates_len_and_op() {
+        assert_eq!(op(CigarOpType::Match, 10).to_string(), "10M");
+        assert_eq!(op(CigarOpType::Insertion, 2).to_string(), "2I");
+        assert_eq!(op(CigarOpType::SeqMatch, 4).to_string(), "4=");
+    }
+
+    #[test]
+    fn cigar_str_renders_full_cigar() {
+        let ops = [
+            op(CigarOpType::Match, 10),
+            op(CigarOpType::Insertion, 2),
+            op(CigarOpType::Deletion, 3),
+        ];
+        assert_eq!(CigarStr(&ops).to_string(), "10M2I3D");
+
+        let clipped = [
+            op(CigarOpType::SoftClip, 5),
+            op(CigarOpType::Match, 50),
+            op(CigarOpType::SoftClip, 3),
+        ];
+        assert_eq!(CigarStr(&clipped).to_string(), "5S50M3S");
+
+        assert_eq!(CigarStr(&[]).to_string(), "");
     }
 
     // r[verify cigar.qpos_bounds]
