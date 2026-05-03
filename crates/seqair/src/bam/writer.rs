@@ -495,6 +495,7 @@ fn write_bam_header<W: Write>(
 mod tests {
     use super::super::aux_data::AuxData;
     use super::super::cigar::{CigarOp, CigarOpType};
+    use super::super::test_util::push_one_record_from_bgzf;
     use super::*;
     use seqair_types::BamFlags;
     use seqair_types::Base;
@@ -567,19 +568,12 @@ mod tests {
         // Read records back through the production decode path (RecordStore).
         let mut store = RecordStore::new();
 
-        let block_size = reader.read_i32().unwrap();
-        assert!(block_size > 0);
-        let mut rec_data = vec![0u8; block_size as usize];
-        reader.read_exact_into(&mut rec_data).unwrap();
-        let idx0 = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
+        let idx0 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.qname(idx0), b"read1");
         assert_eq!(*store.record(idx0).pos, 100);
         assert_eq!(store.record(idx0).mapq, 30);
 
-        let block_size = reader.read_i32().unwrap();
-        let mut rec_data = vec![0u8; block_size as usize];
-        reader.read_exact_into(&mut rec_data).unwrap();
-        let idx1 = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
+        let idx1 = push_one_record_from_bgzf(&mut reader, &mut store);
         assert_eq!(store.qname(idx1), b"read2");
         assert_eq!(*store.record(idx1).pos, 200);
     }
@@ -774,10 +768,7 @@ mod tests {
 
         let mut store2 = RecordStore::new();
         for _ in 0..2 {
-            let block_size = reader.read_i32().unwrap();
-            let mut rec_data = vec![0u8; block_size as usize];
-            reader.read_exact_into(&mut rec_data).unwrap();
-            store2.push_raw(&rec_data, &mut ()).unwrap();
+            push_one_record_from_bgzf(&mut reader, &mut store2);
         }
 
         for i in 0..2u32 {
@@ -881,10 +872,7 @@ mod tests {
 
         let mut store = RecordStore::new();
         for i in 0..5 {
-            let block_size = reader.read_i32().unwrap();
-            let mut rec_data = vec![0u8; block_size as usize];
-            reader.read_exact_into(&mut rec_data).unwrap();
-            let idx = store.push_raw(&rec_data, &mut ()).unwrap().unwrap();
+            let idx = push_one_record_from_bgzf(&mut reader, &mut store);
             let expected = format!("read{i}");
             assert_eq!(store.qname(idx), expected.as_bytes());
         }

@@ -53,7 +53,7 @@ r[types.base_quality.slice_to_bytes]
 ## Field usage
 
 r[types.base_quality.field_type]
-Public qual APIs — `RecordStore::qual`, `BamRecord::qual`, `OwnedBamRecord::qual`/`set_qual`, and `PileupOp::Match { qual }` / `PileupOp::Insertion { qual }` — MUST expose quality as `&[BaseQuality]` (or `BaseQuality` for per-base positions). Internal slab storage and reader scratch buffers MAY remain `Vec<u8>` / `&mut Vec<u8>`; the cast happens at the public API boundary.
+Public qual APIs — `RecordStore::qual`, `OwnedBamRecord::qual`/`set_qual`, and `PileupOp::Match { qual }` / `PileupOp::Insertion { qual }` — MUST expose quality as `&[BaseQuality]` (or `BaseQuality` for per-base positions). Internal slab storage and reader scratch buffers MAY remain `Vec<u8>` / `&mut Vec<u8>`; the cast happens at the public API boundary.
 
 ## Round-trip
 

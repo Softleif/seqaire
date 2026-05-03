@@ -118,6 +118,7 @@ pub(crate) struct ParsedHeader {
 /// shorter than `qual_end`, and `DecodeError::OffsetOverflow` if any offset
 /// arithmetic overflows.
 // r[impl bam.record.checked_offsets]
+// r[impl bam.record.fields]
 pub(crate) fn parse_header(raw: &[u8]) -> Result<ParsedHeader, DecodeError> {
     if raw.len() < 32 {
         return Err(DecodeError::TooShort { len: raw.len() });

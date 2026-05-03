@@ -19,7 +19,7 @@ r[perf.cigar_no_to_vec]
 Building a `CigarMapping` MUST NOT clone the CIGAR ops via `.to_vec()`. The typed CIGAR ops live in the arena slab for the lifetime of the region (see `r[record_store.slim_record.field_getters]`); `CigarMapping::new` MUST take a borrowed `&[CigarOp]` and either pre-extract a small `CompactOp` array (Complex path) or compute summary state without copying the ops (Linear path).
 
 r[perf.precompute_matches_indels]
-Matches and indels counts MUST be computed once per record during decode and stored in `BamRecord`, NOT recomputed from CIGAR at every pileup position.
+Matches and indels counts MUST be computed once per record during decode and stored in `SlimRecord`, NOT recomputed from CIGAR at every pileup position.
 
 r[perf.cigar_binary_search]
 For records with more than 4 CIGAR operations, `qpos_at` SHOULD use binary search on `ref_start` instead of linear scan. For 1–4 ops, linear scan is acceptable.

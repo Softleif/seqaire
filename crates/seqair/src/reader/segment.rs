@@ -272,31 +272,12 @@ impl Default for SegmentOptions {
 impl SegmentOptions {
     /// Plain options: tile *cores* up to `max_len` bases, no overlap.
     ///
-    /// **What `max_len` actually bounds.** `max_len` caps the **core**
-    /// length of each tile (`Segment::core_range()`). With
+    /// `max_len` caps the **core** length of each tile
+    /// (`Segment::core_range()`). With
     /// [`with_overlap(o)`](Self::with_overlap), an internal tile's full
     /// `[start, end]` is the core expanded by `o` bases on each side, so
     /// internal tiles can be up to `max_len + 2 * o` bases. Edge tiles
-    /// clip their overlap to the requested range and are smaller. Pick
-    /// `max_len` based on the desired core length, then add `2 * overlap`
-    /// to budget peak memory.
-    ///
-    /// **Picking `max_len`.** Each tile drives one BAM fetch and one FASTA
-    /// fetch. A single tile occupies roughly `~40 MB` of `RecordStore`
-    /// state for typical 30× coverage plus the reference bases for the
-    /// tile. As a rule of thumb:
-    ///
-    /// * **50–500 kb** is a good default for whole-genome work — small
-    ///   enough to bound peak memory, large enough that BAI bin lookup
-    ///   overhead is amortized.
-    /// * **5–50 kb** if you're parallelizing across many forks and want
-    ///   tiles to be cheap to ship.
-    /// * **>1 Mb** if you're processing very low-depth data and want to
-    ///   minimize fetch round-trips. Be aware that reference bases plus
-    ///   record store grow linearly with tile length.
-    ///
-    /// There is no universally correct value, which is why this method
-    /// requires a `NonZeroU32` rather than offering a default.
+    /// clip their overlap to the requested range and are smaller.
     #[must_use]
     pub const fn new(max_len: NonZeroU32) -> Self {
         Self { max_len, overlap: 0 }

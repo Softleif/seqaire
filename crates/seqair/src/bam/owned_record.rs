@@ -421,15 +421,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Decode `to_bam_bytes` output by pushing into a one-shot `RecordStore`.
-    /// This is the production decode path (what region loading actually runs)
-    /// — there is no separate `BamRecord::decode` oracle by design.
-    fn decode_into_store(buf: &[u8]) -> super::super::record_store::RecordStore {
-        let mut store = super::super::record_store::RecordStore::new();
-        let idx = store.push_raw(buf, &mut ()).unwrap().expect("record accepted");
-        assert_eq!(idx, 0);
-        store
-    }
+    use super::super::test_util::decode_into_store;
 
     // r[verify bam.owned_record.to_bam_bytes]
     // r[verify bam.owned_record.test_roundtrip_bytes]
