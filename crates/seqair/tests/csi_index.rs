@@ -51,7 +51,7 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("multi.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
 
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {
@@ -322,7 +322,7 @@ fn indexed_reader_finds_csi_without_bam_infix() {
     {
         // Recreate the index to write to the new path
         let header = make_header();
-        let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+        let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
         for i in 0..5u32 {
             let rec = OwnedBamRecord::builder(
                 0,
@@ -535,7 +535,7 @@ proptest! {
         )
         .unwrap();
         let bam_path = dir.path().join("prop.bam");
-        let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+        let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
 
         for i in 0..n_records {
             let pos = ((seed + (i as u64) * 1000) % 9_000_000) as u32;

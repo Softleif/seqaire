@@ -89,45 +89,26 @@ pub struct BamWriter<W: Write> {
 }
 
 impl BamWriter<BufWriter<File>> {
-    /// Create a BAM writer writing to a file path.
+    // r[impl bam_writer.create_from_path]
+    /// Start configuring a [`BamWriter`] writing to a file path.
     ///
-    /// Uses the default compression level (6). If `build_index` is true,
-    /// a BAI index is co-produced during writing.
-    pub fn from_path(
-        path: &Path,
-        header: &BamHeader,
-        build_index: bool,
-    ) -> Result<Self, BamWriteError> {
-        Self::from_path_with_level(path, header, build_index, 6)
-    }
-
-    // r[impl bam_writer.compression_level]
-    /// Create a BAM writer with a specific compression level.
-    pub fn from_path_with_level(
-        path: &Path,
-        header: &BamHeader,
-        build_index: bool,
-        level: i32,
-    ) -> Result<Self, BamWriteError> {
-        let file = File::create(path)?;
-        let inner = BufWriter::new(file);
-        let bgzf = BgzfWriter::with_compression_level(inner, level);
-        Self::new_inner(bgzf, header, build_index)
-    }
-}
-
-// r[impl bam_writer.create_from_stdout]
-impl BamWriter<io::Stdout> {
-    /// Create a BAM writer writing to stdout. Index co-production is not supported.
-    pub fn from_stdout(header: &BamHeader) -> Result<Self, BamWriteError> {
-        let bgzf = BgzfWriter::new(io::stdout());
-        Self::new_inner(bgzf, header, false)
+    /// Defaults: compression level 6, no index co-production. Configure with
+    /// [`BamWriterBuilder::write_index`] / [`BamWriterBuilder::compression_level`],
+    /// then call [`BamWriterBuilder::build`].
+    pub fn builder<'a>(path: &'a Path, header: &'a BamHeader) -> BamWriterBuilder<'a, ToPath<'a>> {
+        BamWriterBuilder::with_target(ToPath { path }, header)
     }
 }
 
 impl<W: Write> BamWriter<W> {
-    /// Construct from any `BgzfWriter`. Writes the BAM header eagerly.
-    pub fn new_inner(
+    // r[impl bam_writer.create_from_stdout]
+    /// Start configuring a [`BamWriter`] over an arbitrary writer (e.g. `io::stdout()`).
+    pub fn build_over(writer: W, header: &BamHeader) -> BamWriterBuilder<'_, ToWriter<W>> {
+        BamWriterBuilder::with_target(ToWriter { writer }, header)
+    }
+
+    /// Construct from a `BgzfWriter` and write the BAM header eagerly.
+    fn from_bgzf(
         mut bgzf: BgzfWriter<W>,
         header: &BamHeader,
         build_index: bool,
@@ -353,6 +334,78 @@ impl<W: Write> BamWriter<W> {
     }
 }
 
+/// Target marker: writer targets a filesystem path. The file is created on
+/// [`BamWriterBuilder::build`].
+#[derive(Debug)]
+pub struct ToPath<'a> {
+    path: &'a Path,
+}
+
+/// Target marker: writer targets a caller-supplied [`Write`] sink.
+#[derive(Debug)]
+pub struct ToWriter<W> {
+    writer: W,
+}
+
+/// Configuration builder for [`BamWriter`].
+///
+/// Created via [`BamWriter::builder`] (file path) or [`BamWriter::build_over`]
+/// (arbitrary writer). The header is required at construction; everything else
+/// has a default. Call [`Self::build`] to produce the writer.
+#[derive(Debug)]
+pub struct BamWriterBuilder<'a, T> {
+    target: T,
+    header: &'a BamHeader,
+    write_index: bool,
+    compression_level: i32,
+}
+
+impl<'a, T> BamWriterBuilder<'a, T> {
+    fn with_target(target: T, header: &'a BamHeader) -> Self {
+        Self { target, header, write_index: false, compression_level: 6 }
+    }
+
+    /// Co-produce a BAI index during writing. Defaults to `false`.
+    ///
+    /// Only meaningful when the underlying writer corresponds to a
+    /// seekable/sidecar-friendly target (e.g. a file). Stdout output cannot
+    /// usefully consume the produced index.
+    #[must_use]
+    pub fn write_index(mut self, build_index: bool) -> Self {
+        self.write_index = build_index;
+        self
+    }
+
+    // r[impl bam_writer.compression_level]
+    /// Override the BGZF compression level. Defaults to `6` (htslib default).
+    /// Level `1` is commonly used in pipelines that re-compress downstream.
+    #[must_use]
+    pub fn compression_level(mut self, level: i32) -> Self {
+        self.compression_level = level;
+        self
+    }
+}
+
+impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
+    /// Create the file, wrap it in [`BufWriter`] + [`BgzfWriter`], and write
+    /// the BAM header eagerly.
+    pub fn build(self) -> Result<BamWriter<BufWriter<File>>, BamWriteError> {
+        let file = File::create(self.target.path)?;
+        let inner = BufWriter::new(file);
+        let bgzf = BgzfWriter::with_compression_level(inner, self.compression_level);
+        BamWriter::from_bgzf(bgzf, self.header, self.write_index)
+    }
+}
+
+impl<W: Write> BamWriterBuilder<'_, ToWriter<W>> {
+    /// Wrap the supplied writer in a [`BgzfWriter`] and write the BAM header
+    /// eagerly.
+    pub fn build(self) -> Result<BamWriter<W>, BamWriteError> {
+        let bgzf = BgzfWriter::with_compression_level(self.target.writer, self.compression_level);
+        BamWriter::from_bgzf(bgzf, self.header, self.write_index)
+    }
+}
+
 // r[impl bam_writer.magic]
 // r[impl bam_writer.header_text]
 // r[impl bam_writer.header_references]
@@ -472,8 +525,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let bgzf = BgzfWriter::new(&mut output);
-            let writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+            let writer = BamWriter::build_over(&mut output, &header).build().unwrap();
             writer.finish().unwrap();
         }
 
@@ -496,8 +548,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let bgzf = BgzfWriter::new(&mut output);
-            let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
 
             let rec1 = test_record(0, 100, b"read1");
             let rec2 = test_record(0, 200, b"read2");
@@ -539,8 +590,7 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+        let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
 
         // Force poison by writing a record with an oversized qname
         let bad_rec = OwnedBamRecord {
@@ -571,8 +621,8 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
 
         let rec = test_record(0, 100, b"r1");
         writer.write(&rec).unwrap();
@@ -598,8 +648,8 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
 
         let rec1 = test_record(0, 200, b"r1");
         let rec2 = test_record(0, 100, b"r2"); // out of order
@@ -614,8 +664,8 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
         let rec = OwnedBamRecord::builder(-1, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
@@ -635,8 +685,8 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
 
         // Write a mapped record first (index needs at least one)
         let mapped = test_record(0, 100, b"mapped");
@@ -660,8 +710,7 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let bgzf = BgzfWriter::new(&mut output);
-        let writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+        let writer = BamWriter::build_over(&mut output, &header).build().unwrap();
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_none());
     }
@@ -713,8 +762,7 @@ mod tests {
         // Write via write_store_record
         let mut output = Vec::new();
         {
-            let bgzf = BgzfWriter::new(&mut output);
-            let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
             writer.write_store_record(&store, 0).unwrap();
             writer.write_store_record(&store, 1).unwrap();
             writer.finish().unwrap();
@@ -791,8 +839,8 @@ mod tests {
         }
 
         let mut output = Vec::new();
-        let bgzf = BgzfWriter::new(&mut output);
-        let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, true).unwrap();
+        let mut writer =
+            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
         #[allow(clippy::cast_possible_truncation, reason = "test data is tiny")]
         for i in 0..store.len() as u32 {
             writer.write_store_record(&store, i).unwrap();
@@ -817,8 +865,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let bgzf = BgzfWriter::new(&mut output);
-            let mut writer = BamWriter::<&mut Vec<u8>>::new_inner(bgzf, &header, false).unwrap();
+            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
 
             for i in 0..5 {
                 let name = format!("read{i}");

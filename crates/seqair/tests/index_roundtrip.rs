@@ -49,7 +49,7 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("multi.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
 
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {

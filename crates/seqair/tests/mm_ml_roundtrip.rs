@@ -39,7 +39,7 @@ fn make_header() -> BamHeader {
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("test.bam");
-    let mut writer = BamWriter::from_path(&bam_path, &header, true).unwrap();
+    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
     for rec in records {
         writer.write(rec).unwrap();
     }
