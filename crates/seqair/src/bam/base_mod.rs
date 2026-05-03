@@ -11,7 +11,9 @@
 use seqair_types::Base;
 use thiserror::Error;
 
+use super::aux::{AuxValue, GetAuxError, find_tag};
 use super::cigar::{CigarMapping, CigarPosInfo};
+use super::record_store::{RecordAccessError, RecordStore, SlimRecord};
 
 /// Modification type code: a single-character SAM code (`m`, `h`, `a`, …) or a
 /// numeric `ChEBI` ontology id.
@@ -87,6 +89,24 @@ pub enum BaseModError {
     SeqTooLong { len: usize },
 }
 
+/// Errors produced by [`BaseModState::from_record`].
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum FromRecordError {
+    /// Failed to access the record's aux or sequence slab.
+    #[error(transparent)]
+    RecordAccess(#[from] RecordAccessError),
+    /// MM tag was present but not a `Z`-type string.
+    #[error("MM tag has wrong BAM type: {0}")]
+    BadMmTag(GetAuxError),
+    /// ML tag was present but not a `B:C` (unsigned 8-bit array).
+    #[error("ML tag has wrong BAM type: expected B:C, got {got}")]
+    BadMlTag { got: &'static str },
+    /// Parsing the MM/ML payload failed.
+    #[error(transparent)]
+    Parse(#[from] BaseModError),
+}
+
 // r[impl base_mod.state]
 /// Resolved modification calls for a single record, stored in
 /// stored-BAM-sequence coordinates.
@@ -151,6 +171,52 @@ impl BaseModState {
             state.mods.push(m);
         }
         Ok(state)
+    }
+
+    /// Parse MM/ML tags from a record into a resolved state, pulling MM,
+    /// ML, the stored sequence and the reverse-strand flag from
+    /// `(rec, store)` directly.
+    ///
+    /// # Returns
+    /// - `Ok(Some(state))` if the record carried an MM tag (with optional ML).
+    /// - `Ok(None)` if MM is absent — not an error.
+    /// - `Err(_)` if MM has the wrong BAM type, ML has the wrong BAM type,
+    ///   the slab access fails, or the payload is malformed (length
+    ///   mismatch, bad delta, …).
+    ///
+    /// When MM is present but ML is absent, an empty `&[]` is passed to
+    /// [`BaseModState::parse`]: that succeeds for delta lists of length 0
+    /// (no probabilities needed) and otherwise fails with
+    /// [`BaseModError::MlLengthMismatch`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use seqair::bam::{BaseModState, FromRecordError};
+    ///
+    /// match BaseModState::from_record(rec, &store)? {
+    ///     Some(state) => { /* use state.mod_at_qpos(...) */ }
+    ///     None => { /* record has no MM tag — skip */ }
+    /// }
+    /// ```
+    pub fn from_record<U>(
+        rec: &SlimRecord,
+        store: &RecordStore<U>,
+    ) -> Result<Option<Self>, FromRecordError> {
+        let aux = rec.aux(store)?;
+        let mm: &[u8] = match aux.get("MM") {
+            Ok(bytes) => bytes,
+            Err(GetAuxError::TagNotFound { .. }) => return Ok(None),
+            Err(other) => return Err(FromRecordError::BadMmTag(other)),
+        };
+        let ml: &[u8] = match find_tag(aux.as_bytes(), *b"ML") {
+            Some(AuxValue::ArrayU8(bytes)) => bytes,
+            Some(other) => return Err(FromRecordError::BadMlTag { got: other.type_name() }),
+            None => &[],
+        };
+        let seq = rec.seq(store)?;
+        let state = Self::parse(mm, ml, seq, rec.flags.is_reverse())?;
+        Ok(Some(state))
     }
 
     /// Number of resolved modification calls.
@@ -772,6 +838,194 @@ mod tests {
     fn try_qpos_accepts_in_range_indices() {
         assert_eq!(try_qpos(0, 1).unwrap(), 0);
         assert_eq!(try_qpos(u32::MAX as usize, u32::MAX as usize + 1).unwrap(), u32::MAX);
+    }
+
+    // ---------------- from_record (high-level constructor) ----------------
+
+    use crate::bam::aux_data::AuxData;
+    use crate::bam::record_store::RecordStore;
+    use seqair_types::{BamFlags, Pos0};
+
+    /// Push a forward-strand record with the given bases and aux bytes.
+    /// Returns the populated `RecordStore` and the record index.
+    fn push_record(bases: &[Base], aux: &[u8]) -> (RecordStore<()>, u32) {
+        let mut store: RecordStore<()> = RecordStore::new();
+        let pos = Pos0::new(100).unwrap();
+        let qual = vec![30u8; bases.len()];
+        let idx = store
+            .push_fields(
+                pos,
+                pos,
+                BamFlags::empty(),
+                30,
+                bases.len() as u32,
+                0,
+                b"r1",
+                &[],
+                bases,
+                &qual,
+                aux,
+                0,
+                -1,
+                -1,
+                0,
+                &mut (),
+            )
+            .unwrap()
+            .unwrap();
+        (store, idx)
+    }
+
+    #[test]
+    fn from_record_with_mm_and_ml_returns_some() {
+        let bases = vec![A, C, G, T, A, C, G, C, G, A, C, G, T];
+        let mut aux = AuxData::new();
+        aux.set_string(*b"MM", b"C+m,0,2;");
+        aux.set_array_u8(*b"ML", &[200, 180]).unwrap();
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let from_rec =
+            BaseModState::from_record(rec, &store).unwrap().expect("MM tag present, expected Some");
+        let expected = BaseModState::parse(b"C+m,0,2;", &[200, 180], &bases, false).unwrap();
+
+        assert_eq!(from_rec.len(), expected.len());
+        let m_from = from_rec.mod_at_qpos(1).unwrap();
+        let m_exp = expected.mod_at_qpos(1).unwrap();
+        assert_eq!(m_from.len(), m_exp.len());
+        assert_eq!(m_from[0].probability, m_exp[0].probability);
+        assert_eq!(m_from[0].canonical_base, m_exp[0].canonical_base);
+    }
+
+    #[test]
+    fn from_record_with_mm_only_uses_empty_ml() {
+        // MM with a single delta of 0 needs one ML byte. Without ML, parse
+        // sees ml=&[] and the length-mismatch validation fires.
+        let bases = vec![A, C, G];
+        let mut aux = AuxData::new();
+        aux.set_string(*b"MM", b"C+m,0;");
+        // No ML set.
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let err = BaseModState::from_record(rec, &store).unwrap_err();
+        assert!(
+            matches!(err, FromRecordError::Parse(BaseModError::MlLengthMismatch { .. })),
+            "got {err:?}"
+        );
+
+        // Empty MM (no deltas) is fine with no ML.
+        let mut aux2 = AuxData::new();
+        aux2.set_string(*b"MM", b"C+m;");
+        let (store2, idx2) = push_record(&bases, aux2.as_bytes());
+        let rec2 = store2.record(idx2);
+        let state = BaseModState::from_record(rec2, &store2).unwrap().expect("MM present");
+        assert!(state.is_empty());
+    }
+
+    #[test]
+    fn from_record_without_mm_returns_none() {
+        let bases = vec![A, C, G];
+        let mut aux = AuxData::new();
+        // Some unrelated tag, but no MM.
+        aux.set_string(*b"RG", b"grp1");
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let state = BaseModState::from_record(rec, &store).unwrap();
+        assert!(state.is_none(), "expected None when MM absent, got Some");
+    }
+
+    #[test]
+    fn from_record_with_malformed_mm_returns_err() {
+        // `C+m,0` — missing terminating ';' — propagates as Parse(MissingTerminator).
+        let bases = vec![A, C, G];
+        let mut aux = AuxData::new();
+        aux.set_string(*b"MM", b"C+m,0");
+        aux.set_array_u8(*b"ML", &[200]).unwrap();
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let err = BaseModState::from_record(rec, &store).unwrap_err();
+        assert!(
+            matches!(err, FromRecordError::Parse(BaseModError::MissingTerminator)),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn from_record_with_wrong_mm_type_returns_err() {
+        // MM as an integer instead of a Z-string.
+        let bases = vec![A, C, G];
+        let mut aux = AuxData::new();
+        aux.set_int(*b"MM", 42).unwrap();
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let err = BaseModState::from_record(rec, &store).unwrap_err();
+        assert!(matches!(err, FromRecordError::BadMmTag(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn from_record_with_wrong_ml_type_returns_err() {
+        // ML as a B:S array instead of B:C.
+        let bases = vec![A, C, G];
+        let mut aux = AuxData::new();
+        aux.set_string(*b"MM", b"C+m,0;");
+        aux.set_array_u16(*b"ML", &[200]).unwrap();
+
+        let (store, idx) = push_record(&bases, aux.as_bytes());
+        let rec = store.record(idx);
+
+        let err = BaseModState::from_record(rec, &store).unwrap_err();
+        assert!(matches!(err, FromRecordError::BadMlTag { got: "B:S" }), "got {err:?}");
+    }
+
+    #[test]
+    fn from_record_reverse_strand_uses_complement() {
+        // Same fixture as `reverse_strand_uses_complement_counting_from_end`,
+        // but driven through from_record with the reverse flag.
+        let bases = vec![C, G, T, A, C, G, T];
+        let mut aux = AuxData::new();
+        aux.set_string(*b"MM", b"C+m,0,0;");
+        aux.set_array_u8(*b"ML", &[200, 210]).unwrap();
+
+        let mut store: RecordStore<()> = RecordStore::new();
+        let pos = Pos0::new(100).unwrap();
+        let qual = vec![30u8; bases.len()];
+        let mut flags = BamFlags::empty();
+        flags.set(seqair_types::bam_flags::consts::FLAG_REVERSE);
+        let idx = store
+            .push_fields(
+                pos,
+                pos,
+                flags,
+                30,
+                bases.len() as u32,
+                0,
+                b"r1",
+                &[],
+                &bases,
+                &qual,
+                aux.as_bytes(),
+                0,
+                -1,
+                -1,
+                0,
+                &mut (),
+            )
+            .unwrap()
+            .unwrap();
+
+        let rec = store.record(idx);
+        let state = BaseModState::from_record(rec, &store).unwrap().expect("MM present");
+        assert_eq!(state.mod_at_qpos(5).unwrap()[0].probability, 200);
+        assert_eq!(state.mod_at_qpos(1).unwrap()[0].probability, 210);
     }
 
     // ---------------- proptest oracles for the validation paths ----------------

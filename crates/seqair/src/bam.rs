@@ -67,7 +67,9 @@ pub use aligned_pairs_view::{
     MatchedBase, MatchedBases, MatchedRef, MatchedRefs,
 };
 pub use aux_data::{AuxData, AuxDataError};
-pub use base_mod::{BaseModError, BaseModState, ModMode, ModStrand, ModType, Modification};
+pub use base_mod::{
+    BaseModError, BaseModState, FromRecordError, ModMode, ModStrand, ModType, Modification,
+};
 pub use bgzf::BgzfError;
 pub use cigar::{CigarOp, CigarStr};
 pub use csi_index::{CsiError, CsiIndex};
