@@ -26,7 +26,7 @@ use seqair::bam::Pos0;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
-use seqair::bam::writer::BamWriter;
+use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{BaseModState, ModType};
 use seqair_types::{BamFlags, Base, BaseQuality};
 const FLAG_REVERSE: u16 = 0x10;
@@ -49,7 +49,8 @@ fn make_header() -> BamHeader {
 fn write_bam(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("mods.bam");
-    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
+    let mut writer =
+        BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
     for rec in records {
         writer.write(rec).unwrap();
     }
