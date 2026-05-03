@@ -27,7 +27,7 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::{
-    bam::{BamWriter, CigarOp, CigarStr, Pos0, RecordStore, cigar::CigarOpType},
+    bam::{BamWriterBuilder, CigarOp, CigarStr, Pos0, RecordStore, cigar::CigarOpType},
     reader::{IndexedReader, ResolveTid},
 };
 use seqair_types::{RegionString, SmolStr, smol_str::ToSmolStr};
@@ -205,7 +205,7 @@ fn write_store(
     path: &std::path::Path,
 ) -> anyhow::Result<()> {
     let mut writer =
-        BamWriter::builder(path, header).build().context("could not create BAM writer")?;
+        BamWriterBuilder::to_path(path, header).build().context("could not create BAM writer")?;
 
     for i in 0..store.len() as u32 {
         writer

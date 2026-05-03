@@ -32,7 +32,7 @@ use seqair::bam::aux_data::AuxData;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
-use seqair::bam::writer::BamWriter;
+use seqair::bam::writer::BamWriterBuilder;
 use seqair_types::bam_flags::BamFlags;
 use seqair_types::{Base, BaseQuality};
 
@@ -52,7 +52,8 @@ fn write_bam_with_aux(dir: &std::path::Path, aux: AuxData) -> std::path::PathBuf
         .build()
         .unwrap();
 
-    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
+    let mut writer =
+        BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
     writer.write(&rec).unwrap();
     let _ = writer.finish().unwrap();
     bam_path

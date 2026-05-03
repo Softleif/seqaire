@@ -18,7 +18,7 @@
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
-use seqair::bam::writer::BamWriter;
+use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
@@ -49,7 +49,8 @@ fn cyclic_seq(n: usize) -> Vec<Base> {
 fn write_multi_contig_bam(dir: &Path) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("multi.bam");
-    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
+    let mut writer =
+        BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
 
     // chr1: 30 records at positions 0, 10000, 20000, ...
     for i in 0..30u32 {

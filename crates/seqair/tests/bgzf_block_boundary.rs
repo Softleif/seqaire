@@ -23,7 +23,7 @@ use noodles::sam;
 use seqair::bam::cigar::{CigarOp, CigarOpType};
 use seqair::bam::header::BamHeader;
 use seqair::bam::owned_record::OwnedBamRecord;
-use seqair::bam::writer::BamWriter;
+use seqair::bam::writer::BamWriterBuilder;
 use seqair::bam::{IndexedBamReader, Pos0, RecordStore};
 use seqair_types::{Base, BaseQuality};
 use std::path::Path;
@@ -36,7 +36,8 @@ fn make_header() -> BamHeader {
 fn write_bam_with_index(dir: &Path, records: &[OwnedBamRecord]) -> std::path::PathBuf {
     let header = make_header();
     let bam_path = dir.join("boundary.bam");
-    let mut writer = BamWriter::builder(&bam_path, &header).write_index(true).build().unwrap();
+    let mut writer =
+        BamWriterBuilder::to_path(&bam_path, &header).write_index(true).build().unwrap();
     for rec in records {
         writer.write(rec).unwrap();
     }

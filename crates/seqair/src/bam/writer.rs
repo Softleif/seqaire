@@ -88,25 +88,7 @@ pub struct BamWriter<W: Write> {
     poisoned: bool,
 }
 
-impl BamWriter<BufWriter<File>> {
-    // r[impl bam_writer.create_from_path]
-    /// Start configuring a [`BamWriter`] writing to a file path.
-    ///
-    /// Defaults: compression level 6, no index co-production. Configure with
-    /// [`BamWriterBuilder::write_index`] / [`BamWriterBuilder::compression_level`],
-    /// then call [`BamWriterBuilder::build`].
-    pub fn builder<'a>(path: &'a Path, header: &'a BamHeader) -> BamWriterBuilder<'a, ToPath<'a>> {
-        BamWriterBuilder::with_target(ToPath { path }, header)
-    }
-}
-
 impl<W: Write> BamWriter<W> {
-    // r[impl bam_writer.create_from_stdout]
-    /// Start configuring a [`BamWriter`] over an arbitrary writer (e.g. `io::stdout()`).
-    pub fn build_over(writer: W, header: &BamHeader) -> BamWriterBuilder<'_, ToWriter<W>> {
-        BamWriterBuilder::with_target(ToWriter { writer }, header)
-    }
-
     /// Construct from a `BgzfWriter` and write the BAM header eagerly.
     fn from_bgzf(
         mut bgzf: BgzfWriter<W>,
@@ -349,15 +331,37 @@ pub struct ToWriter<W> {
 
 /// Configuration builder for [`BamWriter`].
 ///
-/// Created via [`BamWriter::builder`] (file path) or [`BamWriter::build_over`]
-/// (arbitrary writer). The header is required at construction; everything else
-/// has a default. Call [`Self::build`] to produce the writer.
+/// Construct with [`BamWriterBuilder::to_path`] (filesystem path) or
+/// [`BamWriterBuilder::to_writer`] (arbitrary [`Write`] sink). The header is
+/// required at construction; everything else has a default. Call
+/// [`Self::build`] to produce the writer.
 #[derive(Debug)]
 pub struct BamWriterBuilder<'a, T> {
     target: T,
     header: &'a BamHeader,
     write_index: bool,
     compression_level: i32,
+}
+
+impl<'a> BamWriterBuilder<'a, ToPath<'a>> {
+    // r[impl bam_writer.create_from_path]
+    /// Start configuring a [`BamWriter`] writing to a file path.
+    ///
+    /// Defaults: compression level 6, no index co-production. Configure with
+    /// [`Self::write_index`] / [`Self::compression_level`], then call
+    /// [`Self::build`] to create the file and write the BAM header.
+    pub fn to_path(path: &'a Path, header: &'a BamHeader) -> Self {
+        Self::with_target(ToPath { path }, header)
+    }
+}
+
+impl<'a, W: Write> BamWriterBuilder<'a, ToWriter<W>> {
+    // r[impl bam_writer.create_from_stdout]
+    /// Start configuring a [`BamWriter`] over an arbitrary [`Write`] sink
+    /// (e.g. `io::stdout()`).
+    pub fn to_writer(writer: W, header: &'a BamHeader) -> Self {
+        Self::with_target(ToWriter { writer }, header)
+    }
 }
 
 impl<'a, T> BamWriterBuilder<'a, T> {
@@ -537,7 +541,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+            let writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
             writer.finish().unwrap();
         }
 
@@ -560,7 +564,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+            let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
             let rec1 = test_record(0, 100, b"read1");
             let rec2 = test_record(0, 200, b"read2");
@@ -595,7 +599,7 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+        let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
         // Force poison by writing a record with an oversized qname
         let bad_rec = OwnedBamRecord {
@@ -626,7 +630,8 @@ mod tests {
         let header = test_header();
         let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
+        let mut writer =
+            BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         let rec = test_record(0, 100, b"r1");
         writer.write(&rec).unwrap();
@@ -649,7 +654,8 @@ mod tests {
         let header = test_header();
         let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
+        let mut writer =
+            BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         let rec1 = test_record(0, 200, b"r1");
         let rec2 = test_record(0, 100, b"r2"); // out of order
@@ -664,7 +670,8 @@ mod tests {
         let header = test_header();
         let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
+        let mut writer =
+            BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Mapped (flags & 0x4 == 0) but ref_id == -1
         let rec = OwnedBamRecord::builder(-1, Some(Pos0::new(0).unwrap()), b"bad".to_vec())
@@ -684,7 +691,8 @@ mod tests {
         let header = test_header();
         let tmp = tempfile::NamedTempFile::new().unwrap();
 
-        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
+        let mut writer =
+            BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
 
         // Write a mapped record first (index needs at least one)
         let mapped = test_record(0, 100, b"mapped");
@@ -714,7 +722,7 @@ mod tests {
         // route a sidecar BAI for a stream sink, and BAI virtual offsets
         // are only meaningful against a seekable file.
         let mut writer =
-            BamWriter::build_over(&mut output, &header).write_index(true).build().unwrap();
+            BamWriterBuilder::to_writer(&mut output, &header).write_index(true).build().unwrap();
 
         writer.write(&test_record(0, 100, b"r1")).unwrap();
 
@@ -727,7 +735,7 @@ mod tests {
         let header = test_header();
         let mut output = Vec::new();
 
-        let writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+        let writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
         let (_inner, index) = writer.finish().unwrap();
         assert!(index.is_none());
     }
@@ -779,7 +787,7 @@ mod tests {
         // Write via write_store_record
         let mut output = Vec::new();
         {
-            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+            let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
             writer.write_store_record(&store, 0).unwrap();
             writer.write_store_record(&store, 1).unwrap();
             writer.finish().unwrap();
@@ -853,7 +861,8 @@ mod tests {
         }
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mut writer = BamWriter::builder(tmp.path(), &header).write_index(true).build().unwrap();
+        let mut writer =
+            BamWriterBuilder::to_path(tmp.path(), &header).write_index(true).build().unwrap();
         #[allow(clippy::cast_possible_truncation, reason = "test data is tiny")]
         for i in 0..store.len() as u32 {
             writer.write_store_record(&store, i).unwrap();
@@ -878,7 +887,7 @@ mod tests {
         let mut output = Vec::new();
 
         {
-            let mut writer = BamWriter::build_over(&mut output, &header).build().unwrap();
+            let mut writer = BamWriterBuilder::to_writer(&mut output, &header).build().unwrap();
 
             for i in 0..5 {
                 let name = format!("read{i}");
