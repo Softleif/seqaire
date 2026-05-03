@@ -9,8 +9,8 @@
     reason = "example"
 )]
 
-//! Extract and summarize base modifications (5mC methylation, etc.) from
-//! a BAM file.
+//! Extract and summarise base modifications (5mC, 5hmC, ...) from a BAM
+//! file.
 //!
 //! Oxford Nanopore and PacBio sequencers encode base-modification calls in
 //! the `MM` (modification positions) and `ML` (modification likelihoods)
@@ -18,7 +18,9 @@
 //!
 //! 1. Fetch records for a region with [`IndexedReader`] + [`RecordStore`].
 //! 2. Parse `MM`/`ML` tags into a [`BaseModState`] per record.
-//! 3. Query per-base modification calls with [`mod_at_qpos`].
+//! 3. Walk the record's CIGAR with [`SlimRecord::aligned_pairs`] and join
+//!    each `Match { qpos, rpos }` event with `state.mod_at_qpos(qpos)` to
+//!    project per-base modification calls onto the reference.
 //! 4. Aggregate per-position methylation frequency across all reads.
 //!
 //! For a typical bisulfite or nanopore BAM, this produces a BED-like summary
@@ -27,9 +29,9 @@
 use anyhow::Context;
 use clap::Parser as _;
 use seqair::bam::aux::{AuxValue, find_tag};
-use seqair::bam::{BaseModState, ModType, Pos0, RecordStore};
-use seqair::reader::IndexedReader;
-use seqair_types::Base;
+use seqair::bam::{AlignedPair, BaseModState, ModType, Pos0, RecordStore};
+use seqair::reader::{IndexedReader, ResolveTid};
+use seqair_types::{Base, RegionString};
 use std::collections::BTreeMap;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -37,12 +39,14 @@ use std::path::PathBuf;
 /// seqair base-mods — extract base-modification calls from a BAM.
 #[derive(Debug, clap::Parser)]
 struct Cli {
-    /// BAM/SAM/CRAM file (must be indexed).
+    /// BAM/SAM file (must be indexed). CRAM is not supported here because
+    /// this example does not load a FASTA.
     input: PathBuf,
 
-    /// Region to inspect (e.g. "chr1:1000-2000"). Required.
+    /// Region to inspect. `chr`, `chr:start`, or `chr:start-end`
+    /// (1-based, inclusive).
     #[clap(long, short)]
-    region: String,
+    region: RegionString,
 
     /// Print per-read modification calls (verbose). Without this flag,
     /// only the per-position summary is printed.
@@ -89,16 +93,25 @@ fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     let mut reader = IndexedReader::open(&args.input).context("could not open alignment file")?;
-    let (tid, start, end) = parse_region(&args.region, reader.header())?;
-    let contig_name = reader.header().target_name(tid).context("unknown tid")?.to_owned();
 
-    let start_pos = Pos0::new(start).context("invalid start position")?;
-    let end_pos = Pos0::new(end).context("invalid end position")?;
+    // Resolve the region against the BAM header.
+    let tid = args.region.chromosome.as_str().resolve_tid(reader.header())?.as_u32();
+    let contig_name = reader.header().target_name(tid).context("unknown tid")?.to_owned();
+    let contig_len =
+        reader.header().target_len(tid).context("contig has no length in header")? as u32;
+    let start = match args.region.start {
+        Some(p) => p.to_zero_based(),
+        None => Pos0::new(0).expect("0 is valid"),
+    };
+    let end = match args.region.end {
+        Some(p) => p.to_zero_based(),
+        None => Pos0::new(contig_len).context("contig length out of i32 range")?,
+    };
 
     let mut store = RecordStore::new();
     reader
-        .fetch_into(tid, start_pos, end_pos, &mut store)
-        .with_context(|| format!("fetch failed for {contig_name}:{start}-{end}"))?;
+        .fetch_into(tid, start, end, &mut store)
+        .with_context(|| format!("fetch failed for {contig_name}:{}-{}", *start, *end))?;
 
     let mut output: Box<dyn Write> = if let Some(ref path) = args.output {
         Box::new(BufWriter::new(
@@ -109,7 +122,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Per-reference-position methylation accumulator.
-    // Key: (ref_pos, mod_code) — so we can track different mod types separately.
+    // Key: (ref_pos, mod_code) — so we track different mod types separately.
     let mut pos_stats: BTreeMap<(u32, u8), PosSummary> = BTreeMap::new();
 
     let mut records_with_mods = 0u32;
@@ -123,17 +136,14 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
 
-        let aux = store.aux(idx);
+        let aux = rec.aux(&store).context("aux access")?;
         let seq = store.seq(idx);
 
-        // Look up MM and ML aux tags. Both must be present for modification
-        // calls. MM is a Z-type string; ML is a B:C (byte array).
-        let Some(AuxValue::String(mm)) = find_tag(aux, *b"MM") else {
-            continue;
-        };
-        let Some(AuxValue::ArrayU8(ml)) = find_tag(aux, *b"ML") else {
-            continue;
-        };
+        // MM is a Z-type string (yields `&[u8]` via the typed accessor).
+        // ML is a B:C byte array — there is no typed accessor for arrays
+        // yet, so we drop down to `find_tag` for it.
+        let Ok(mm) = aux.get::<&[u8]>("MM") else { continue };
+        let Some(AuxValue::ArrayU8(ml)) = find_tag(aux.as_bytes(), *b"ML") else { continue };
 
         // Parse MM/ML into resolved per-position calls. The parser handles
         // reverse-strand coordinate flipping internally.
@@ -161,14 +171,16 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
 
-        // Walk every query position looking for modification calls.
-        for qpos in 0..seq.len() {
-            let Some(mods) = state.mod_at_qpos(qpos) else {
-                continue;
-            };
+        // Walk CIGAR once. Each `Match { qpos, rpos }` event gives both the
+        // query and reference position; lift the modifications at that qpos
+        // straight onto the reference. `aligned_pairs` skips Insertion and
+        // SoftClip qpos for us — exactly the positions that have no ref
+        // coordinate.
+        for pair in rec.aligned_pairs(&store)? {
+            let AlignedPair::Match { qpos, rpos, .. } = pair else { continue };
+            let Some(mods) = state.mod_at_qpos(qpos as usize) else { continue };
 
             for m in mods {
-                // Filter by modification code if requested.
                 let code = mod_code_char(m.mod_type);
                 if let Some(filter_code) = args.mod_code {
                     if code != filter_code {
@@ -180,30 +192,29 @@ fn main() -> anyhow::Result<()> {
                 if args.verbose {
                     writeln!(
                         output,
-                        "  qpos={qpos:>5}  base={:<1}  mod={code}  prob={:>3}  strand={}",
-                        m.canonical_base as u8 as char,
+                        "  qpos={qpos:>5}  base={}  mod={code}  prob={:>3}  strand={}",
+                        m.canonical_base.as_char(),
                         m.probability,
                         strand_char(m.strand == seqair::bam::ModStrand::Minus),
                     )?;
                 }
 
-                // Map query position back to reference coordinates via the
-                // CIGAR, so we can accumulate per-position statistics.
-                if let Some(ref_pos) = qpos_to_ref_pos(store.cigar(idx), *rec.pos, qpos as u32) {
-                    if ref_pos >= start && ref_pos < end {
-                        let code_byte = mod_code_byte(m.mod_type);
-                        let entry = pos_stats.entry((ref_pos, code_byte)).or_insert(PosSummary {
-                            modified: 0,
-                            unmodified: 0,
-                            canonical_base: m.canonical_base,
-                            mod_code: code_byte,
-                        });
-                        if m.probability >= args.min_prob {
-                            entry.modified += 1;
-                        } else {
-                            entry.unmodified += 1;
-                        }
-                    }
+                let ref_pos = *rpos;
+                if ref_pos < *start || ref_pos >= *end {
+                    continue;
+                }
+
+                let code_byte = mod_code_byte(m.mod_type);
+                let entry = pos_stats.entry((ref_pos, code_byte)).or_insert(PosSummary {
+                    modified: 0,
+                    unmodified: 0,
+                    canonical_base: m.canonical_base,
+                    mod_code: code_byte,
+                });
+                if m.probability >= args.min_prob {
+                    entry.modified += 1;
+                } else {
+                    entry.unmodified += 1;
                 }
             }
         }
@@ -218,7 +229,7 @@ fn main() -> anyhow::Result<()> {
             writeln!(
                 output,
                 "{contig_name}\t{ref_pos}\t{}\t{}\t{}\t{}\t{:.3}",
-                summary.canonical_base as u8 as char,
+                summary.canonical_base.as_char(),
                 summary.mod_code as char,
                 summary.modified,
                 summary.total(),
@@ -230,62 +241,15 @@ fn main() -> anyhow::Result<()> {
     output.flush()?;
 
     eprintln!(
-        "{contig_name}:{start}-{end}: {} records, {} with modifications, {} total calls",
+        "{contig_name}:{}-{}: {} records, {} with modifications, {} total calls",
+        *start,
+        *end,
         store.len(),
         records_with_mods,
         total_calls,
     );
 
     Ok(())
-}
-
-/// Map a query position back to a reference position by walking CIGAR ops.
-///
-/// Returns `None` if qpos falls in an insertion or soft clip (no reference
-/// coordinate).
-fn qpos_to_ref_pos(
-    cigar: &[seqair::bam::CigarOp],
-    record_pos: u32,
-    target_qpos: u32,
-) -> Option<u32> {
-    let mut rpos = record_pos;
-    let mut qpos = 0u32;
-
-    for op in cigar {
-        let len = op.len();
-        match op.op_code() {
-            // M, =, X: consume both ref and query
-            0 | 7 | 8 => {
-                if target_qpos >= qpos && target_qpos < qpos + len {
-                    return Some(rpos + (target_qpos - qpos));
-                }
-                rpos += len;
-                qpos += len;
-            }
-            // I: consume query only — qpos in an insertion has no ref coordinate
-            1 => {
-                if target_qpos >= qpos && target_qpos < qpos + len {
-                    return None;
-                }
-                qpos += len;
-            }
-            // D, N: consume ref only
-            2 | 3 => {
-                rpos += len;
-            }
-            // S: consume query only (soft clip)
-            4 => {
-                if target_qpos >= qpos && target_qpos < qpos + len {
-                    return None;
-                }
-                qpos += len;
-            }
-            // H, P: consume neither
-            5 | 6 => {}
-            _ => {}
-        }
-    }
-    None
 }
 
 fn strand_char(is_reverse: bool) -> char {
@@ -295,14 +259,11 @@ fn strand_char(is_reverse: bool) -> char {
 fn mod_code_char(mod_type: ModType) -> char {
     match mod_type {
         ModType::Code(c) => c as char,
-        ModType::ChEBI(id) => {
-            // Common ChEBI ids
-            match id {
-                27551 => 'm', // 5mC
-                76792 => 'h', // 5hmC
-                _ => '?',
-            }
-        }
+        ModType::ChEBI(id) => match id {
+            27551 => 'm', // 5mC
+            76792 => 'h', // 5hmC
+            _ => '?',
+        },
     }
 }
 
@@ -312,24 +273,5 @@ fn mod_code_byte(mod_type: ModType) -> u8 {
         ModType::ChEBI(27551) => b'm',
         ModType::ChEBI(76792) => b'h',
         ModType::ChEBI(_) => b'?',
-    }
-}
-
-fn parse_region(region: &str, header: &seqair::bam::BamHeader) -> anyhow::Result<(u32, u32, u32)> {
-    if let Some((name, range)) = region.split_once(':') {
-        let tid = header.tid(name).with_context(|| format!("contig '{name}' not found"))?;
-        let (start_str, end_str) =
-            range.split_once('-').with_context(|| format!("invalid range: {range}"))?;
-        let start: u32 = start_str
-            .replace(',', "")
-            .parse()
-            .with_context(|| format!("invalid start: {start_str}"))?;
-        let end: u32 =
-            end_str.replace(',', "").parse().with_context(|| format!("invalid end: {end_str}"))?;
-        Ok((tid, start.saturating_sub(1), end))
-    } else {
-        let tid = header.tid(region).with_context(|| format!("contig '{region}' not found"))?;
-        let len = header.target_len(tid).unwrap_or(0) as u32;
-        Ok((tid, 0, len))
     }
 }

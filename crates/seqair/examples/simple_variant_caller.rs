@@ -35,7 +35,7 @@ use seqair::vcf::{
     VcfHeaderBuilder, Writer,
     record_encoder::{Arr, FormatFieldDef, Gt, InfoFieldDef, Scalar},
 };
-use seqair_types::{Base, Pos1, RegionString};
+use seqair_types::{Base, RegionString};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -117,9 +117,17 @@ fn main() -> anyhow::Result<()> {
     let args = Cli::parse();
 
     // ── Open readers with a push-time filter ───────────────────────────
-    // Skip reads that are unmapped, secondary, supplementary, QC-failed, or
-    // duplicate before they enter the store. Mapping quality is checked per
-    // alignment in the pileup loop below since `min_mapq` is dynamic.
+    //
+    // seqair does NOT filter records by default — every variant caller has
+    // its own opinion about which alignments to trust. Here we drop reads
+    // that are unmapped, secondary, supplementary, QC-failed, or duplicate
+    // before they enter the store. Doing this at push time (via
+    // `CustomizeRecordStore::filter`) means the slab never even allocates
+    // memory for them; per-alignment knobs like `min_mapq` are applied in
+    // the pileup loop below since they vary per call.
+    //
+    // To run *without* a filter, swap `Readers::open_customized(...)` for
+    // `Readers::open(input, fasta)` and drop the struct.
     use seqair::bam::record_store::{CustomizeRecordStore, RecordStore, SlimRecord};
     #[derive(Clone)]
     struct DropUseless;
@@ -209,22 +217,25 @@ fn main() -> anyhow::Result<()> {
     // ── Pileup and call variants ───────────────────────────────────────
     let min_mapq = args.min_mapq;
 
-    // Tile the requested region into 100 kb segments. This example processes
-    // them sequentially; a real caller would parallelize across forks. The
-    // parsed RegionString is fed straight to `segments()` — no manual region
-    // parsing needed.
-    let max_len = std::num::NonZeroU32::new(100_000).expect("non-zero literal");
-    let opts = SegmentOptions::new(max_len);
-    let plan: Vec<_> = readers.segments(&args.region, opts)?.collect();
+    // Tile the requested region. This example processes segments sequentially;
+    // a real caller would parallelise across forks. The parsed `RegionString`
+    // is fed straight to `segments()` — no manual region parsing needed.
+    // `SegmentOptions::default()` is a 10 kb tile with no overlap; pick a
+    // larger tile via `SegmentOptions::new(NonZeroU32::new(N).unwrap())` for
+    // whole-genome scans.
+    let plan: Vec<_> = readers.segments(&args.region, SegmentOptions::default())?.collect();
     let mut n_calls = 0u32;
 
     for segment in &plan {
         let mut pileup = readers.pileup(segment)?;
 
+        // Restrict emission to the segment's "owned" core range so that
+        // adjacent overlapping segments don't double-call the same site.
+        // (See `.claude/plans/core-pre-filter.md` — once that lands, this
+        // becomes `engine.core_pileups()` with no manual gate.)
+        let core = segment.core_range();
+
         while let Some(column) = pileup.pileups() {
-            // Restrict emission to the segment's "owned" core range so that
-            // adjacent overlapping segments don't double-call the same site.
-            let core = segment.core_range();
             if !core.contains(&column.pos()) {
                 continue;
             }
@@ -260,7 +271,7 @@ fn main() -> anyhow::Result<()> {
             }
 
             // Convert 0-based pileup position to 1-based VCF position.
-            let pos1 = Pos1::new(*column.pos() + 1).context("position overflow")?;
+            let pos1 = column.pos().to_one_based().context("position overflow")?;
 
             // Build alleles — seqair enforces ref != alt at construction time.
             let alleles = Alleles::snv(ref_base, alt_base)?;

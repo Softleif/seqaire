@@ -249,13 +249,24 @@ impl Segment {
 // r[impl unified.segment_options]
 /// Tile-size policy for [`Readers::segments`](super::Readers::segments).
 ///
-/// There is no `Default` impl — every caller must commit to a `max_len`,
-/// since the whole point of a segmenter is that there is no universal sane
-/// default for "how much of a contig should one pileup load at once".
+/// `Default` returns 10 kb tiles with no overlap — a conservative choice
+/// that keeps peak `RecordStore` memory low and works for most exploratory
+/// or per-region use. For whole-genome scans, larger tiles (50–500 kb,
+/// see [`SegmentOptions::new`]) amortise BAI/CRAI lookup overhead better.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentOptions {
     max_len: NonZeroU32,
     overlap: u32,
+}
+
+impl Default for SegmentOptions {
+    /// 10 kb tiles, no overlap. Suits exploratory and per-region work; pick
+    /// a larger `max_len` via [`SegmentOptions::new`] for whole-genome scans.
+    fn default() -> Self {
+        // SAFETY: 10_000 is non-zero.
+        let max_len = NonZeroU32::new(10_000).expect("non-zero literal");
+        Self { max_len, overlap: 0 }
+    }
 }
 
 impl SegmentOptions {
