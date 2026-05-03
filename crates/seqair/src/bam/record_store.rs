@@ -23,6 +23,7 @@ pub struct SlimRecord {
     pub pos: Pos0,
     /// 0-based exclusive end (`pos` + reference-consuming CIGAR length).
     pub end_pos: Pos0,
+    // r[impl flags.field_type]
     /// BAM flag bits (paired, unmapped, reverse strand, …).
     pub flags: BamFlags,
     /// Number of CIGAR ops; bounded by BAM's u16 `l_op` field.
@@ -31,6 +32,7 @@ pub struct SlimRecord {
     pub mapq: u8,
     /// Query sequence length in bases — also the qual slab length for this record.
     pub seq_len: u32,
+    // r[impl perf.precompute_matches_indels]
     /// Sum of M/=/X op lengths, pre-computed from CIGAR at push time.
     pub matching_bases: u32,
     /// Sum of I/D op lengths, pre-computed from CIGAR at push time.
@@ -411,6 +413,7 @@ impl<U> RecordStore<U> {
         // Safety: spare_capacity_mut returns at least seq_len bytes after reserve().
         // decode_bases_into writes only valid Base discriminants (A=65,C=67,G=71,T=84,Unknown=78)
         // as guaranteed by the DECODE_BASE_TYPED table invariant. Base is repr(u8).
+        // r[impl bam.record.seq_at_simd+2]
         // r[depends base_decode.table_invariant]
         unsafe {
             let out = std::slice::from_raw_parts_mut(bases_spare.as_mut_ptr() as *mut u8, seq_len);
@@ -930,6 +933,7 @@ impl<U> RecordStore<U> {
         &self.bases[start..end]
     }
 
+    // r[impl bam.record.seq_at]
     pub fn seq_at(&self, idx: u32, pos: usize) -> Base {
         let rec = self.record(idx);
         self.bases
@@ -948,6 +952,7 @@ impl<U> RecordStore<U> {
         BaseQuality::slice_from_bytes(&self.qual[start..end])
     }
 
+    // r[impl bam.record.raw_aux]
     #[allow(clippy::indexing_slicing, reason = "offsets written by push_raw; within slab bounds")]
     pub fn aux(&self, idx: u32) -> &[u8] {
         let rec = self.record(idx);

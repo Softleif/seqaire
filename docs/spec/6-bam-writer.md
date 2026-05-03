@@ -1,6 +1,6 @@
 # BAM Writer
 
-The BAM writer serializes alignment records into the BAM binary format: a BGZF-compressed file containing a header followed by a stream of binary records. This is the write counterpart to the BAM reader ([BAM Reader](./2-bam-1-reader.md)) and consumes `BamRecord` values from the owned record type ([BAM Record Builder](./6-bam-record-builder.md)).
+The BAM writer serializes alignment records into the BAM binary format: a BGZF-compressed file containing a header followed by a stream of binary records. This is the write counterpart to the BAM reader ([BAM Reader](./2-bam-1-reader.md)) and consumes `OwnedBamRecord` values from the owned record type ([BAM Record Builder](./6-bam-record-builder.md)).
 
 BAM writing is needed in two primary contexts:
 
@@ -39,7 +39,7 @@ r[bam_writer.create_from_stdout]
 `BamWriter::build_over(writer, header).build()` MUST write BGZF-compressed BAM to a caller-supplied [`Write`] sink (e.g. `io::stdout()`). Index co-production is allowed via `write_index(true)`, but for stdout output the caller is responsible for routing the resulting `IndexBuilder` somewhere useful (there is no sidecar path for the `.bai` file). The caller is responsible for determining whether stdout is the intended target (e.g. by checking for `-` or `/dev/stdout` in a CLI argument).
 
 r[bam_writer.write_record]
-`write(record: &BamRecord)` MUST serialize the record into the writer's reusable buffer via `BamRecord::to_bam_bytes()` (see `r[bam.owned_record.to_bam_bytes]`), prepend the 4-byte `block_size` (i32 little-endian, equal to the serialized byte count), and write the result to the BGZF stream. If index co-production is enabled, the writer MUST then push the record to the IndexBuilder (see `r[bam_writer.index_record_dispatch]`).
+`write(record: &OwnedBamRecord)` MUST serialize the record into the writer's reusable buffer via `OwnedBamRecord::to_bam_bytes()` (see `r[bam.owned_record.to_bam_bytes]`), prepend the 4-byte `block_size` (i32 little-endian, equal to the serialized byte count), and write the result to the BGZF stream. If index co-production is enabled, the writer MUST then push the record to the IndexBuilder (see `r[bam_writer.index_record_dispatch]`).
 
 r[bam_writer.write_store_record]
 `write_store_record(store: &RecordStore, idx: u32)` MUST serialize a record directly from RecordStore slabs into the BGZF stream without constructing an intermediate `OwnedBamRecord`. The method MUST write the 32-byte BAM fixed header from SlimRecord fields, then append variable-length data: NUL-terminated qname from the name slab, the typed cigar slab reinterpreted as wire bytes via `CigarOp::ops_as_bytes` (zero-copy on little-endian hosts because `CigarOp` is `#[repr(transparent)]` over the on-disk packed `u32`), 4-bit packed sequence re-encoded from the bases slab, quality bytes from the data slab, and raw aux bytes from the data slab. The BAI bin MUST be recomputed from pos and end_pos at serialization time. Index co-production, error poisoning, flush-before-record, and record-size-limit rules apply identically to `write()`.
@@ -75,7 +75,7 @@ This follows the same pattern established for VCF/BCF writing, where TBI/CSI ind
 > _[SAM1] §5.2 — BAI index format. The index builder (`r[index_builder.single_pass]`) supports BAI output via `r[index_builder.bai_format]`._
 
 r[bam_writer.index_coproduction]
-The writer MUST support co-producing a BAI index during writing. When enabled (via the `build_index` constructor parameter), the writer MUST hold an `IndexBuilder` configured for BAI via `IndexBuilder::bai(header.n_targets())` (see `r[index_builder.bai_constructor]`). After each record is written to the BGZF stream, the writer MUST dispatch the record to the IndexBuilder according to `r[bam_writer.index_record_dispatch]`.
+The writer MUST support co-producing a BAI index during writing. When enabled (via `BamWriterBuilder::write_index(true)`), the writer MUST hold an `IndexBuilder` configured for BAI via `IndexBuilder::bai(header.n_targets())` (see `r[index_builder.bai_constructor]`). After each record is written to the BGZF stream, the writer MUST dispatch the record to the IndexBuilder according to `r[bam_writer.index_record_dispatch]`.
 
 > r[bam_writer.index_record_dispatch]
 > When index co-production is enabled, the writer MUST classify each record into one of three cases and handle it accordingly:
@@ -137,7 +137,7 @@ If writing a record fails (I/O error, compression error), the writer MUST return
 ## Performance
 
 r[bam_writer.reuse_buffers]
-The writer MUST reuse a single `Vec<u8>` serialization buffer across `write()` calls. The buffer is cleared (not deallocated) before each record to avoid per-record allocation. `BamRecord::to_bam_bytes()` appends into this buffer (see `r[bam.owned_record.to_bam_bytes]`).
+The writer MUST reuse a single `Vec<u8>` serialization buffer across `write()` calls. The buffer is cleared (not deallocated) before each record to avoid per-record allocation. `OwnedBamRecord::to_bam_bytes()` appends into this buffer (see `r[bam.owned_record.to_bam_bytes]`).
 
 r[bam_writer.multithreaded_compression]
 The writer SHOULD support multi-threaded BGZF compression as a future optimization. A `set_threads(n)` method SHOULD configure background compression workers, where `n=0` (default) means synchronous compression in the calling thread. This matches htslib's `hts_set_threads` pattern and is important for write-heavy pipelines like BAM rewriting at whole-genome scale.
@@ -172,4 +172,4 @@ r[bam_writer.test_store_roundtrip]
 A BAM file written via `write_store_record` MUST be readable by seqair's BAM reader. All fields — including `next_ref_id`, `next_pos`, `template_len`, flags, mapq, CIGAR, seq, qual, aux, and qname — MUST round-trip exactly when compared with the original RecordStore contents. This MUST be verified by reading the written BAM back into a fresh RecordStore and comparing field-by-field.
 
 r[bam_writer.test_fuzz]
-A fuzz target SHOULD construct random `BamRecord` values (with arbitrary field combinations including edge-case lengths, empty CIGARs, maximum-length qnames, and varied aux tags), serialize them via `BamWriter`, and read them back via seqair's BAM reader. This catches encoder/decoder divergence. While the writer receives structured input (not raw untrusted bytes), a read-modify-write pipeline operating on a malicious source BAM can produce adversarial field combinations that the writer must handle without panicking.
+A fuzz target SHOULD construct random `OwnedBamRecord` values (with arbitrary field combinations including edge-case lengths, empty CIGARs, maximum-length qnames, and varied aux tags), serialize them via `BamWriter`, and read them back via seqair's BAM reader. This catches encoder/decoder divergence. While the writer receives structured input (not raw untrusted bytes), a read-modify-write pipeline operating on a malicious source BAM can produce adversarial field combinations that the writer must handle without panicking.

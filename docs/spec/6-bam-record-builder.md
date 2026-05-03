@@ -2,7 +2,7 @@
 
 When a BAM record needs to be constructed from scratch (for writing) or modified in memory (for realignment), the read-only slab-based `SlimRecord`/`RecordStore` architecture is insufficient — it packs variable-length data into shared contiguous buffers with no mechanism for per-record mutation. An owned, mutable record type bridges this gap.
 
-The `BamRecord` is an owned BAM record with individually-allocated fields that supports construction, modification, serialization to BAM binary format, and round-trip conversion to/from `RecordStore` entries. It is the unit of exchange between the read path (RecordStore/pileup) and the write path (BamWriter), and enables in-memory record manipulation for realignment workflows.
+The `OwnedBamRecord` is an owned BAM record with individually-allocated fields that supports construction, modification, serialization to BAM binary format, and round-trip conversion to/from `RecordStore` entries. It is the unit of exchange between the read path (RecordStore/pileup) and the write path (BamWriter), and enables in-memory record manipulation for realignment workflows.
 
 > **Sources:** [SAM1] §4.2 "The BAM format" — binary record layout (block_size, refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen, qname, cigar, seq, qual, aux); §1.4 — FLAG bit definitions; §4.2.4 — SEQ 4-bit encoding; §4.2.5 — auxiliary tag encoding. CIGAR operation semantics from [SAM1] §1.4 "CIGAR". See [References](./99-references.md).
 
@@ -12,13 +12,13 @@ The `BamRecord` is an owned BAM record with individually-allocated fields that s
 
 `SlimRecord` (see [Record Store](./3-record_store.md)) stores fixed fields inline and references variable-length data by offset into shared slabs. This design eliminates per-record allocation and is optimal for the read-only pileup hot path, but it makes mutation impossible: changing one record's CIGAR would require shifting all subsequent records' data in the slab.
 
-`BamRecord` owns its data in separate `Vec`s, trading cache density for mutability. The typical use case is extracting a small number of records (e.g. reads at a realignment candidate site) from the store, modifying them, and either writing them to a BAM file or re-inserting them into a fresh `RecordStore` for re-pileup.
+`OwnedBamRecord` owns its data in separate `Vec`s, trading cache density for mutability. The typical use case is extracting a small number of records (e.g. reads at a realignment candidate site) from the store, modifying them, and either writing them to a BAM file or re-inserting them into a fresh `RecordStore` for re-pileup.
 
 ### Realignment context
 
 In TAPS methylation sequencing, C-to-T conversions caused by methylation are indistinguishable from true C>T SNPs at the sequence level. Realignment against local haplotypes can resolve ambiguous alignments at these positions by considering the methylation context. This requires modifying the CIGAR (new alignment path), potentially the position (if the optimal alignment starts elsewhere), and recomputing alignment-derived tags (NM, MD).
 
-The owned record type makes these modifications safe and explicit: callers get a mutable `BamRecord`, change what they need, and the record recomputes derived fields (end position, BAM bin) on serialization.
+The owned record type makes these modifications safe and explicit: callers get a mutable `OwnedBamRecord`, change what they need, and the record recomputes derived fields (end position, BAM bin) on serialization.
 
 ## Owned record structure
 
@@ -48,7 +48,7 @@ CIGAR operations MUST be represented by a `CigarOp` type that wraps the BAM-on-d
 > _[SAM1] §4.2 — l_read_name (u8, max 255 including NUL), n_cigar_op (u16, max 65535), l_seq (i32)_
 
 r[bam.owned_record.builder]
-`BamRecord` MUST provide a builder API for constructing records from individual fields. The builder MUST require at minimum `ref_id`, `pos`, and `qname`. Fields `cigar`, `seq`, and `qual` MUST default to empty (representing an unmapped read). Optional fields (`mapq`, `flags`, `next_ref_id`, `next_pos`, `template_len`, `aux`) MUST default to zero or -1 for reference IDs. The `flags` field MUST default to 0; callers are responsible for setting appropriate flag bits.
+`OwnedBamRecord` MUST provide a builder API for constructing records from individual fields. The builder MUST require at minimum `ref_id`, `pos`, and `qname`. Fields `cigar`, `seq`, and `qual` MUST default to empty (representing an unmapped read). Optional fields (`mapq`, `flags`, `next_ref_id`, `next_pos`, `template_len`, `aux`) MUST default to zero or -1 for reference IDs. The `flags` field MUST default to 0; callers are responsible for setting appropriate flag bits.
 
 r[bam.owned_record.qname_limit]
 The qname (without NUL terminator) MUST NOT exceed 254 bytes. The `l_read_name` field in the BAM 32-byte header is a u8 that stores the length including NUL, so the maximum stored length is 255. The builder and `to_bam_bytes` MUST reject qnames exceeding this limit with a typed error.
@@ -60,35 +60,35 @@ r[bam.owned_record.seq_length_limit]
 The sequence length MUST NOT exceed `i32::MAX` (2,147,483,647). The `l_seq` field in the BAM header is an i32. The builder, `set_seq`, and `to_bam_bytes` MUST reject sequences exceeding this limit with a typed error.
 
 r[bam.owned_record.from_record_store]
-`RecordStore` MUST provide a `to_owned_record(idx: u32) -> BamRecord` method that extracts a complete owned copy of a record from the slabs. CIGAR bytes MUST be converted to `Vec<CigarOp>`, sequence MUST be cloned from the bases slab, and auxiliary data MUST be copied from the aux slab.
+`RecordStore` MUST provide a `to_owned_record(idx: u32) -> OwnedBamRecord` method that extracts a complete owned copy of a record from the slabs. CIGAR bytes MUST be converted to `Vec<CigarOp>`, sequence MUST be cloned from the bases slab, and auxiliary data MUST be copied from the aux slab.
 
 ## Modification
 
 The following rules support in-memory record manipulation for realignment and BAM rewriting. In TAPS methylation analysis, the BAM rewrite pipeline modifies SEQ (T->C or A->G to reverse methylation evidence) and adds auxiliary tags (MM/ML for SAM 4.5 modification tags, or XR/XG/XM for legacy Bismark format). Realignment additionally requires changing the CIGAR and possibly the position.
 
 r[bam.owned_record.set_alignment]
-`BamRecord` MUST support replacing the alignment by setting a new `pos` and `cigar` simultaneously. For mapped reads (flags & 0x4 == 0), the implementation MUST validate that the CIGAR's query-consuming length equals `seq.len()`, returning an error on mismatch. For unmapped reads (flags & 0x4 != 0), a zero-operation CIGAR with non-empty `seq` MUST be allowed.
+`OwnedBamRecord` MUST support replacing the alignment by setting a new `pos` and `cigar` simultaneously. For mapped reads (flags & 0x4 == 0), the implementation MUST validate that the CIGAR's query-consuming length equals `seq.len()`, returning an error on mismatch. For unmapped reads (flags & 0x4 != 0), a zero-operation CIGAR with non-empty `seq` MUST be allowed.
 
 r[bam.owned_record.set_seq]
-`BamRecord` MUST support replacing the sequence. For mapped reads, the new sequence length MUST match the CIGAR's query-consuming length. A `seq_mut() -> &mut [Base]` accessor MUST also be provided for in-place base modification (e.g. T->C rewriting in the TAPS BAM rewrite pipeline).
+`OwnedBamRecord` MUST support replacing the sequence. For mapped reads, the new sequence length MUST match the CIGAR's query-consuming length. A `seq_mut() -> &mut [Base]` accessor MUST also be provided for in-place base modification (e.g. T->C rewriting in the TAPS BAM rewrite pipeline).
 
 r[bam.owned_record.set_qual]
-`BamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
+`OwnedBamRecord` MUST support replacing quality scores. The new array length MUST equal `seq.len()`.
 
 **`OwnedBamRecord::aligned_pairs()`** is the owned-record counterpart to `SlimRecord::aligned_pairs(store)`. Both return the typed `AlignedPairs` iterator from [CIGAR Operations](./1-3-cigar.md). See `r[cigar.aligned_pairs.owned_record]` for the integration contract and `r[cigar.aligned_pairs.types]` for the variant set. For unmapped reads (empty CIGAR), the iterator is empty.
 
 r[bam.owned_record.end_pos]
-`BamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]`, but MUST be recomputed from the current CIGAR state (not cached from a stale value).
+`OwnedBamRecord` MUST provide `end_pos() -> i64` computing the rightmost reference position from `pos` + CIGAR reference-consuming operations. This uses the same logic as `r[bam.record.end_pos]`, but MUST be recomputed from the current CIGAR state (not cached from a stale value).
 
 r[bam.owned_record.bin]
-`BamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. This method is specific to the BAI binning scheme (min_shift=14, depth=5), where the maximum non-pseudo bin ID is 37449 — well within u16 range. CSI indexes with larger depths can produce bin IDs exceeding u16; those are handled by the IndexBuilder directly and do not flow through `BamRecord::bin()`. In the serialized 32-byte header, this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.
+`OwnedBamRecord` MUST provide `bin() -> u16` computing the BAM bin value from `pos` and `end_pos` using the `reg2bin` algorithm from [SAM1] §5.3. This method is specific to the BAI binning scheme (min_shift=14, depth=5), where the maximum non-pseudo bin ID is 37449 — well within u16 range. CSI indexes with larger depths can produce bin IDs exceeding u16; those are handled by the IndexBuilder directly and do not flow through `OwnedBamRecord::bin()`. In the serialized 32-byte header, this value is packed into the `bin_mq_nl` field as `bin << 16 | mapq << 8 | l_read_name` — the serialization logic in `to_bam_bytes` handles this packing.
 
 ## Serialization
 
 > _[SAM1] §4.2 — BAM record binary layout: block_size (i32), 32-byte fixed header, variable fields_
 
 r[bam.owned_record.to_bam_bytes]
-`BamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]`). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence, quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
+`OwnedBamRecord` MUST serialize to BAM binary format by appending into a caller-provided `&mut Vec<u8>` (the method appends; clearing the buffer is the caller's responsibility — see `r[bam_writer.reuse_buffers]`). The layout MUST follow [SAM1] §4.2: 32-byte fixed fields (refID, pos, bin_mq_nl, flag_nc, l_seq, next_refID, next_pos, tlen), NUL-terminated qname, packed CIGAR (u32 per op), 4-bit packed sequence, quality scores, and raw auxiliary bytes. The method MUST NOT include the 4-byte `block_size` prefix — that is the caller's (writer's) responsibility, since the caller needs to know the total byte count to write the prefix.
 
 **Position fields (constructive validity):** `pos` and `next_pos` are `Option<Pos0>`. `Pos0` constructively guarantees `0..=i32::MAX`, and the `Option` carries the unmapped-sentinel meaning explicitly. Wire serialization writes `Some(p)` as `p.as_i32()` and `None` as `-1`. There is no run-time overflow check at serialization because the type system has already enforced the bound — overflow is unconstructable.
 
@@ -100,7 +100,7 @@ The BAM `bin` value in the serialized `bin_mq_nl` field MUST be computed from th
 For realignment workflows, modified records need to be fed back into the pileup engine for re-calling. This requires converting the owned record back into the slab-based format.
 
 r[bam.owned_record.push_owned]
-`RecordStore` MUST provide a `push_owned(record: &BamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST encode the sequence from `Vec<Base>` into the bases slab, pack CIGAR ops into u32 format for the cigar slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
+`RecordStore` MUST provide a `push_owned(record: &OwnedBamRecord) -> Result<u32>` method that inserts an owned record into the slabs. This MUST encode the sequence from `Vec<Base>` into the bases slab, pack CIGAR ops into u32 format for the cigar slab, and copy qname/qual/aux into their respective slabs. The returned index MUST be valid for subsequent `record()`, `seq()`, `qual()`, etc. lookups.
 
 r[bam.owned_record.roundtrip]
 A record extracted via `to_owned_record(idx)` and re-inserted via `push_owned()` (without modification) MUST produce a store entry with field values identical to the original. This MUST be verified by tests comparing all accessible fields.
@@ -149,10 +149,10 @@ When extracting a record from `RecordStore`, the auxiliary data MUST be copied v
 
 ## Flag convenience methods
 
-`BamRecord` MUST implement the same flag interface as `SlimRecord`, as specified by `r[io.typed_flags]` (and `r[bam.record.flag_reverse]`, `r[bam.record.flag_first]`, `r[bam.record.flag_second]`, `r[bam.record.flag_unmapped]`).
+`OwnedBamRecord` MUST implement the same flag interface as `SlimRecord`, as specified by `r[io.typed_flags]` (and `r[bam.record.flag_reverse]`, `r[bam.record.flag_first]`, `r[bam.record.flag_second]`, `r[bam.record.flag_unmapped]`).
 
 r[bam.owned_record.flag_methods]
-In addition to the read-only flag predicates, `BamRecord` MUST provide `set_flags(flags: u16)` for bulk flag updates.
+In addition to the read-only flag predicates, `OwnedBamRecord` MUST provide `set_flags(flags: u16)` for bulk flag updates.
 
 ## Testing
 
@@ -160,7 +160,7 @@ r[bam.owned_record.test_roundtrip_store]
 A record loaded via `push_raw` and extracted via `to_owned_record` MUST have identical field values to the original BAM record. This MUST be tested with records containing: simple CIGARs (match-only), complex CIGARs (insertions, deletions, soft clips), multiple auxiliary tags of different types, reverse-strand reads, and paired reads.
 
 r[bam.owned_record.test_roundtrip_bytes]
-A `BamRecord` serialized via `to_bam_bytes` (with a prepended block_size) and decoded via `push_raw` MUST produce a store entry with identical field values. This verifies the encoder/decoder symmetry.
+An `OwnedBamRecord` serialized via `to_bam_bytes` (with a prepended block_size) and decoded via `push_raw` MUST produce a store entry with identical field values. This verifies the encoder/decoder symmetry.
 
 **Test coverage for `aligned_pairs()`** is provided by `r[cigar.aligned_pairs.htslib_equivalence]` (not duplicated here).
 

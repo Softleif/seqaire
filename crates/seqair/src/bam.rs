@@ -57,6 +57,8 @@ pub(crate) mod record;
 pub mod record_store;
 pub mod region_buf;
 pub mod seq;
+#[cfg(test)]
+mod test_util;
 pub mod writer;
 
 pub use aligned_pairs::{

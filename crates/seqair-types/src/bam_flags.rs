@@ -99,6 +99,7 @@ impl BamFlags {
         self.is_set(FLAG_PROPER_PAIR)
     }
 
+    // r[impl bam.record.flag_unmapped]
     /// Read is unmapped.
     pub const fn is_unmapped(self) -> bool {
         self.is_set(FLAG_UNMAPPED)
@@ -109,6 +110,7 @@ impl BamFlags {
         self.is_set(FLAG_MATE_UNMAPPED)
     }
 
+    // r[impl bam.record.flag_reverse]
     /// Read is mapped to the reverse strand.
     pub const fn is_reverse(self) -> bool {
         self.is_set(FLAG_REVERSE)
@@ -119,11 +121,13 @@ impl BamFlags {
         self.is_set(FLAG_MATE_REVERSE)
     }
 
+    // r[impl bam.record.flag_first]
     /// Read is the first in a template (pair).
     pub const fn is_first_in_template(self) -> bool {
         self.is_set(FLAG_FIRST_IN_TEMPLATE)
     }
 
+    // r[impl bam.record.flag_second]
     /// Read is the second (last) in a template (pair).
     pub const fn is_second_in_template(self) -> bool {
         self.is_set(FLAG_SECOND_IN_TEMPLATE)

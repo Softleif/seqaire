@@ -164,6 +164,7 @@ static DECODE_PAIR_TYPED: [[u8; 2]; 256] = {
 ///
 /// `out` must have length >= `len`. Writes exactly `len` bytes.
 /// All written bytes are valid `Base` discriminants per `DECODE_BASE_TYPED`.
+// r[impl bam.record.seq_4bit]
 pub fn decode_bases_into(encoded: &[u8], len: usize, out: &mut [u8]) {
     debug_assert!(out.len() >= len, "output buffer too small: {} < {}", out.len(), len);
     let required = len.div_ceil(2);
