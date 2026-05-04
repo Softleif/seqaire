@@ -14,6 +14,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_BOOSTRAP: 1
 
 jobs:
   fuzz:
@@ -24,7 +25,6 @@ jobs:
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: nightly
           components: llvm-tools-preview
 
       - name: Install cargo-fuzz
