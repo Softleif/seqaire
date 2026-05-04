@@ -881,6 +881,27 @@ impl<U> RecordStore<U> {
         &self.records[idx as usize]
     }
 
+    // r[impl record_store.iter]
+    /// Iterate over `(idx, &SlimRecord)` pairs in store order.
+    ///
+    /// The yielded `idx` is the same `u32` returned by [`Self::push_raw`] /
+    /// [`Self::push_fields`] and accepted by [`Self::record`], [`Self::cigar`],
+    /// [`Self::seq`], etc. Use the `SlimRecord` getters (`rec.cigar(store)`,
+    /// `rec.qname(store)`, …) to read variable-length fields without a
+    /// second `idx` lookup. After [`Self::sort_by_pos`] / [`Self::dedup`],
+    /// indices are reassigned by position — earlier indices may map to
+    /// different records than before.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "records.len() is bounded by u32::MAX via push_raw's try_from check"
+    )]
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &SlimRecord)> + '_ {
+        self.records.iter().enumerate().map(|(i, r)| {
+            debug_assert!(i <= u32::MAX as usize, "record idx exceeds u32::MAX");
+            (i as u32, r)
+        })
+    }
+
     /// Update the `template_len` field for a record in the store.
     /// Used by the CRAM decoder to fill in TLEN after resolving mate
     /// cross-references within a slice.
@@ -1220,6 +1241,33 @@ mod tests {
         let result = store.push_raw(&raw, &mut ());
         assert!(result.is_ok());
         assert_eq!(store.len(), 1);
+    }
+
+    // r[verify record_store.iter]
+    #[test]
+    fn iter_yields_all_records_with_indices() {
+        let mut store = RecordStore::new();
+        store.push_raw(&make_raw_record(b"read0", 4, 1), &mut ()).unwrap();
+        store.push_raw(&make_raw_record(b"read1", 4, 1), &mut ()).unwrap();
+        store.push_raw(&make_raw_record(b"read2", 4, 1), &mut ()).unwrap();
+
+        let collected: Vec<(u32, &[u8])> =
+            store.iter().map(|(idx, rec)| (idx, rec.qname(&store).unwrap())).collect();
+
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0], (0, b"read0".as_slice()));
+        assert_eq!(collected[1], (1, b"read1".as_slice()));
+        assert_eq!(collected[2], (2, b"read2".as_slice()));
+
+        // ExactSizeIterator parity with len()
+        assert_eq!(store.iter().len(), store.len());
+    }
+
+    #[test]
+    fn iter_empty_store() {
+        let store: RecordStore = RecordStore::new();
+        assert_eq!(store.iter().count(), 0);
+        assert_eq!(store.iter().len(), 0);
     }
 
     // r[verify record_store.slim_record_fields]
