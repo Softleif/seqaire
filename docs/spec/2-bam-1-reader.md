@@ -31,7 +31,9 @@ Records in the store MUST be in coordinate-sorted order (by pos, then by end_pos
 ## Edge cases
 
 r[bam.reader.unmapped_skipped+2]
-Unmapped reads (flag 0x4) MUST be excluded from the store during `fetch_into`. htslib's pileup engine rejects them in `bam_plp_push`, so including them would inflate depth counts.
+Unmapped reads (flag 0x4) MUST be excluded from the store during `fetch_into` by default. htslib's pileup engine rejects them in `bam_plp_push`, so including them by default would inflate depth counts.
+
+The reader MUST expose a `keep_unmapped(bool)` builder-style setter (and a `keeps_unmapped()` inspector) so downstream tools that need htslib-`view`-equivalent semantics can opt into receiving placed-unmapped reads (flag 0x4 with a valid tid). When `keep_unmapped` is `true`, placed-unmapped reads MUST flow through the customize layer (`filter_raw` / `filter`) like any other record, letting the caller decide. The default MUST remain `false` to preserve the legacy pileup-correct behavior. `fork()` MUST propagate the flag so each forked reader observes the same setting.
 
 r[bam.reader.secondary_supplementary_included+2]
 Secondary (0x100) and supplementary (0x800) reads MUST be included in the store by default. The caller's pileup filter is responsible for excluding them if desired, matching htslib's behavior.
