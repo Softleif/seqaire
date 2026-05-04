@@ -882,24 +882,14 @@ impl<U> RecordStore<U> {
     }
 
     // r[impl record_store.iter]
-    /// Iterate over `(idx, &SlimRecord)` pairs in store order.
+    /// Iterate `&SlimRecord` in store order.
     ///
-    /// The yielded `idx` is the same `u32` returned by [`Self::push_raw`] /
-    /// [`Self::push_fields`] and accepted by [`Self::record`], [`Self::cigar`],
-    /// [`Self::seq`], etc. Use the `SlimRecord` getters (`rec.cigar(store)`,
-    /// `rec.qname(store)`, …) to read variable-length fields without a
-    /// second `idx` lookup. After [`Self::sort_by_pos`] / [`Self::dedup`],
-    /// indices are reassigned by position — earlier indices may map to
-    /// different records than before.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "records.len() is bounded by u32::MAX via push_raw's try_from check"
-    )]
-    pub fn iter(&self) -> impl ExactSizeIterator<Item = (u32, &SlimRecord)> + '_ {
-        self.records.iter().enumerate().map(|(i, r)| {
-            debug_assert!(i <= u32::MAX as usize, "record idx exceeds u32::MAX");
-            (i as u32, r)
-        })
+    /// Read variable-length fields directly off the record via the
+    /// `SlimRecord` getters (`rec.cigar(store)`, `rec.qname(store)`, …);
+    /// the index isn't needed for shared-reference access. Callers that
+    /// truly need the position can use `records().enumerate()`.
+    pub fn records(&self) -> impl ExactSizeIterator<Item = &SlimRecord> + '_ {
+        self.records.iter()
     }
 
     /// Update the `template_len` field for a record in the store.
@@ -1251,23 +1241,21 @@ mod tests {
         store.push_raw(&make_raw_record(b"read1", 4, 1), &mut ()).unwrap();
         store.push_raw(&make_raw_record(b"read2", 4, 1), &mut ()).unwrap();
 
-        let collected: Vec<(u32, &[u8])> =
-            store.iter().map(|(idx, rec)| (idx, rec.qname(&store).unwrap())).collect();
+        let qnames: Vec<&[u8]> = store.records().map(|rec| rec.qname(&store).unwrap()).collect();
 
-        assert_eq!(collected.len(), 3);
-        assert_eq!(collected[0], (0, b"read0".as_slice()));
-        assert_eq!(collected[1], (1, b"read1".as_slice()));
-        assert_eq!(collected[2], (2, b"read2".as_slice()));
+        assert_eq!(qnames, vec![b"read0".as_slice(), b"read1".as_slice(), b"read2".as_slice()]);
 
-        // ExactSizeIterator parity with len()
-        assert_eq!(store.iter().len(), store.len());
+        // ExactSizeIterator parity with len(); enumerate gives positions when needed.
+        assert_eq!(store.records().len(), store.len());
+        let positions: Vec<usize> = store.records().enumerate().map(|(i, _)| i).collect();
+        assert_eq!(positions, vec![0, 1, 2]);
     }
 
     #[test]
     fn iter_empty_store() {
         let store: RecordStore = RecordStore::new();
-        assert_eq!(store.iter().count(), 0);
-        assert_eq!(store.iter().len(), 0);
+        assert_eq!(store.records().count(), 0);
+        assert_eq!(store.records().len(), 0);
     }
 
     // r[verify record_store.slim_record_fields]

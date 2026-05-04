@@ -55,7 +55,7 @@ r[record_store.field_access]
 The store MUST provide methods to access each variable-length field for a given record index: `qname(idx)`, `cigar(idx)`, `seq(idx)`, `seq_at(idx, pos)`, `qual(idx)`, `aux(idx)`. These return borrowed slices into the slabs.
 
 r[record_store.iter]
-The store MUST expose `iter() -> impl ExactSizeIterator<Item = (u32, &SlimRecord)>` yielding records in store order. The yielded `u32` MUST be a valid index for `record(idx)` / `cigar(idx)` / `seq(idx)` / `qual(idx)` / `aux(idx)` and for the `SlimRecord` getters that take `&store`. Iteration MUST visit every live record exactly once and MUST NOT borrow the store mutably, so callers MAY combine `for (idx, rec) in store.iter()` with further `&store` reads inside the loop body.
+The store MUST expose `records() -> impl ExactSizeIterator<Item = &SlimRecord>` yielding records in store order. Iteration MUST visit every live record exactly once and MUST NOT borrow the store mutably, so callers MAY use `SlimRecord::cigar(&store)` / `qname(&store)` / `seq(&store)` / `qual(&store)` / `aux(&store)` getters inside the loop body. Callers that need the position of a record within the store MAY use `records().enumerate()`.
 
 ## Region lifecycle
 
