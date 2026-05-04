@@ -147,6 +147,25 @@ struct ActiveRecord {
     indel_bases: u32,
 }
 
+// r[impl pileup.empty_seq_unknown_base]
+// Resolve the base + quality at `qpos` for a record on a Match/Insertion op.
+// Records with `SEQ=*` (`seq_len == 0`) have an empty bases/qual slab slice;
+// htslib's pileup keeps them in every covered column with base=N and the
+// missing-quality sentinel. We mirror that here by returning Unknown +
+// UNAVAILABLE so depth() and match_depth() stay in parity with htslib.
+fn base_qual_at<U>(
+    store: &RecordStore<U>,
+    active: &ActiveRecord,
+    qpos: u32,
+) -> (Base, BaseQuality) {
+    if active.seq_len == 0 {
+        return (Base::Unknown, BaseQuality::UNAVAILABLE);
+    }
+    let qual = store.qual(active.record_idx);
+    let q = qual.get(qpos as usize).copied().unwrap_or(BaseQuality::UNAVAILABLE);
+    (store.seq_at(active.record_idx, qpos as usize), q)
+}
+
 // r[impl pileup.column_contents]
 // r[impl pileup.htslib_compat]
 // r[impl pileup.lending_iterator]
@@ -708,23 +727,12 @@ impl<U> PileupEngine<U> {
 
                 let op = match info {
                     CigarPosInfo::Match { qpos } => {
-                        let qual = self.store.qual(active.record_idx);
-                        let Some(&q) = qual.get(qpos as usize) else { continue };
-                        PileupOp::Match {
-                            qpos,
-                            base: self.store.seq_at(active.record_idx, qpos as usize),
-                            qual: q,
-                        }
+                        let (base, qual) = base_qual_at(&self.store, active, qpos);
+                        PileupOp::Match { qpos, base, qual }
                     }
                     CigarPosInfo::Insertion { qpos, insert_len } => {
-                        let qual = self.store.qual(active.record_idx);
-                        let Some(&q) = qual.get(qpos as usize) else { continue };
-                        PileupOp::Insertion {
-                            qpos,
-                            base: self.store.seq_at(active.record_idx, qpos as usize),
-                            qual: q,
-                            insert_len,
-                        }
+                        let (base, qual) = base_qual_at(&self.store, active, qpos);
+                        PileupOp::Insertion { qpos, base, qual, insert_len }
                     }
                     CigarPosInfo::Deletion { del_len } => PileupOp::Deletion { del_len },
                     // r[impl pileup_indel.complex_indel]

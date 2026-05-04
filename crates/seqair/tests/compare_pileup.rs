@@ -19,7 +19,8 @@ mod helpers;
 use rust_htslib::bam::pileup::Indel;
 use rust_htslib::bam::{self, FetchDefinition, Read as _};
 use seqair::bam::Pos0;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 fn test_bam_path() -> &'static Path {
     Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/data/test.bam"))
@@ -432,4 +433,121 @@ fn insertion_ops_match_htslib() {
             );
         }
     }
+}
+
+fn htslib_sam_fixture(name: &str) -> PathBuf {
+    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/htslib/sam/")).join(name)
+}
+
+fn sam_to_indexed_bam(dir: &Path, sam_path: &Path) -> PathBuf {
+    let bam_path = dir.join("test.bam");
+    let status = Command::new("samtools")
+        .args(["sort", "-o"])
+        .arg(&bam_path)
+        .arg(sam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("samtools not found");
+    assert!(status.success(), "samtools sort failed for {}", sam_path.display());
+    let status = Command::new("samtools")
+        .arg("index")
+        .arg(&bam_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("samtools index failed");
+    assert!(status.success(), "samtools index failed");
+    bam_path
+}
+
+// r[verify pileup.empty_seq_unknown_base]
+// r[verify pileup.htslib_compat]
+//
+// `c1#noseq.sam` mixes mapped reads with concrete SEQ/QUAL and mapped reads
+// with `SEQ=*` (`seq_len == 0`). htslib's pileup keeps the empty-SEQ records
+// in every column they overlap (reporting their base as `N`); seqair must
+// match depth and match_depth column-by-column or downstream tools (e.g.
+// perbase's `base-depth -x`) will see a different coverage profile.
+#[test]
+fn pileup_empty_seq_matches_htslib() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bam_path = sam_to_indexed_bam(dir.path(), &htslib_sam_fixture("c1#noseq.sam"));
+
+    let mut hts_reader = bam::IndexedReader::from_path(&bam_path).expect("htslib open");
+    let hts_tid = hts_reader.header().tid(b"c1").expect("htslib tid for c1");
+    hts_reader.fetch(FetchDefinition::Region(hts_tid as i32, 0, 10)).expect("htslib fetch");
+
+    let mut hts_cols: Vec<(u32, u32, usize)> = Vec::new();
+    {
+        let pileup = hts_reader.pileup();
+        for p in pileup {
+            let p = p.expect("htslib pileup");
+            let pos = p.pos();
+            if pos >= 10 {
+                continue;
+            }
+            let depth = p.depth();
+            let match_depth = p.alignments().filter(|a| a.qpos().is_some()).count();
+            hts_cols.push((pos, depth, match_depth));
+        }
+    }
+    assert!(!hts_cols.is_empty(), "htslib produced no columns for c1#noseq.sam");
+
+    let mut reader = seqair::bam::IndexedBamReader::open(&bam_path).expect("seqair open");
+    let mut store = seqair::bam::RecordStore::new();
+    let tid = reader.header().tid("c1").expect("seqair tid for c1");
+    reader
+        .fetch_into(tid, Pos0::new(0).unwrap(), Pos0::new(10).unwrap(), &mut store)
+        .expect("seqair fetch");
+    let mut engine =
+        seqair::bam::PileupEngine::new(store, Pos0::new(0).unwrap(), Pos0::new(10).unwrap());
+    let cols = helpers::collect_columns(&mut engine);
+
+    assert_eq!(
+        cols.len(),
+        hts_cols.len(),
+        "column count mismatch: seqair={} htslib={}",
+        cols.len(),
+        hts_cols.len()
+    );
+
+    for (i, (sc, &(hp, hd, hm))) in cols.iter().zip(hts_cols.iter()).enumerate() {
+        assert_eq!(*sc.pos(), hp, "pos mismatch at column {i}");
+        assert_eq!(
+            sc.depth(),
+            hd as usize,
+            "depth mismatch at pos {hp} (column {i}): seqair={} htslib={}",
+            sc.depth(),
+            hd
+        );
+        assert_eq!(
+            sc.match_depth(),
+            hm,
+            "match_depth mismatch at pos {hp} (column {i}): seqair={} htslib={}",
+            sc.match_depth(),
+            hm
+        );
+    }
+
+    // Empty-SEQ records must contribute Base::Unknown with UNAVAILABLE quality
+    // at every M position they cover (mirroring htslib's `N`).
+    let unknown_alns: usize = cols
+        .iter()
+        .flat_map(|c| c.alignments())
+        .filter(|a| {
+            matches!(
+                a.op(),
+                seqair::bam::pileup::PileupOp::Match {
+                    base: seqair_types::Base::Unknown,
+                    qual,
+                    ..
+                } if *qual == seqair_types::BaseQuality::UNAVAILABLE
+            )
+        })
+        .count();
+    assert!(
+        unknown_alns >= 10,
+        "expected ≥10 Unknown/UNAVAILABLE matches from SQ1 (10M with SEQ=*), got {unknown_alns}"
+    );
 }
